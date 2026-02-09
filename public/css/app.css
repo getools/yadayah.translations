@@ -1,0 +1,212 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #f0f2f5;
+    color: #333;
+    margin: 0;
+    padding: 20px;
+}
+
+.container { max-width: 1100px; margin: 0 auto; }
+
+h1 { text-align: center; color: #2c3e50; margin-bottom: 24px; }
+h2 { margin: 0 0 16px 0; color: #34495e; font-size: 1.25rem; }
+
+/* ── Login ── */
+.login-screen {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: -20px;
+    padding: 20px;
+    background: #f0f2f5;
+}
+.login-card {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    padding: 32px;
+    width: 100%;
+    max-width: 380px;
+}
+.login-card h1 { font-size: 1.4rem; margin-bottom: 20px; }
+
+/* ── App Header ── */
+.app-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+.app-header h1 { margin: 0; font-size: 1.4rem; }
+.user-info { display: flex; align-items: center; gap: 12px; font-size: 0.875rem; color: #666; }
+
+/* ── Tabs ── */
+.tab-bar {
+    display: flex;
+    gap: 0;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #ddd;
+}
+.tab-btn {
+    padding: 10px 24px;
+    border: none;
+    background: none;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #777;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.2s, border-color 0.2s;
+}
+.tab-btn:hover { color: #333; }
+.tab-btn.active { color: #3498db; border-bottom-color: #3498db; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── Card ── */
+.card {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    padding: 24px;
+    margin-bottom: 20px;
+}
+
+/* ── Fields ── */
+.dropdown-row, .inline-row { display: flex; gap: 16px; flex-wrap: wrap; }
+
+.field {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 180px;
+    margin-bottom: 16px;
+}
+.field-sm { min-width: 120px; flex: 0 1 150px; }
+
+label { font-weight: 600; margin-bottom: 4px; font-size: 0.875rem; color: #555; }
+
+select, input[type="number"], input[type="date"], input[type="text"], input[type="password"] {
+    padding: 8px 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    background: #fff;
+    color: #333;
+}
+select:disabled { background: #e9ecef; cursor: not-allowed; color: #999; }
+select:focus, input:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 2px rgba(52,152,219,0.2);
+}
+
+/* ── Buttons ── */
+.btn {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+.btn-primary { background: #3498db; color: #fff; }
+.btn-primary:hover { background: #2980b9; }
+.btn-secondary { background: #95a5a6; color: #fff; }
+.btn-secondary:hover { background: #7f8c8d; }
+.btn-danger { background: #e74c3c; color: #fff; }
+.btn-danger:hover { background: #c0392b; }
+.btn-sm { padding: 4px 12px; font-size: 0.8rem; }
+.button-row { display: flex; gap: 12px; margin-top: 16px; }
+
+/* ── Translations header ── */
+.translations-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+}
+.translations-header h2 { margin-bottom: 0; }
+
+/* ── Translation cards (verse view) ── */
+.translation-card {
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 12px;
+    background: #fafafa;
+}
+.translation-meta { font-size: 0.825rem; color: #777; margin-bottom: 8px; line-height: 1.5; }
+.translation-meta span { margin-right: 16px; }
+.translation-preview {
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: #444;
+    max-height: 100px;
+    overflow: hidden;
+    margin-bottom: 12px;
+    border-left: 3px solid #3498db;
+    padding-left: 12px;
+}
+.translation-actions { display: flex; gap: 8px; }
+.no-translations { color: #999; font-style: italic; padding: 20px 0; text-align: center; }
+
+/* ── Error messages ── */
+.error-messages {
+    background: #fdecea;
+    border: 1px solid #f5c6cb;
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 16px;
+    color: #c0392b;
+    font-size: 0.875rem;
+}
+.error-messages ul { margin: 0; padding-left: 20px; }
+.error-messages li { margin-bottom: 4px; }
+
+/* ── Translations Table (list view) ── */
+.table-wrap { overflow-x: auto; }
+
+#translations-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+}
+#translations-table th, #translations-table td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid #e0e0e0;
+    white-space: nowrap;
+}
+#translations-table thead th {
+    background: #f8f9fa;
+    font-weight: 600;
+    color: #555;
+    position: sticky;
+    top: 0;
+}
+#translations-table tbody tr:hover { background: #eef6fc; cursor: pointer; }
+
+.sortable { cursor: pointer; user-select: none; }
+.sortable:hover { color: #3498db; }
+.sortable.sort-asc::after { content: ' \25B2'; font-size: 0.7em; }
+.sortable.sort-desc::after { content: ' \25BC'; font-size: 0.7em; }
+
+.filter-row th { padding: 4px 4px 8px; background: #fff; }
+.col-filter {
+    width: 100%;
+    padding: 4px 6px;
+    font-size: 0.8rem;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+}
+
+/* ── TinyMCE ── */
+.tox-tinymce { border-radius: 4px !important; }

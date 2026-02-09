@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Translation Display</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .filters { margin-bottom: 20px; }
+        .filter-group { margin-bottom: 10px; }
+        .filter-group > label { font-weight: bold; display: block; margin-bottom: 5px; }
+        select, input[type="number"] { padding: 5px; width: 200px; }
+        .checkbox-row { display: flex; align-items: center; gap: 8px; }
+        .checkbox-row label { font-weight: normal; }
+        button { padding: 8px 16px; background-color: #007bff; color: white; border: none; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        .results { margin-top: 20px; }
+        .section-break { margin-top: 15px; padding: 10px 0; border-top: 3px solid #999; border-bottom: 2px solid #ccc; font-weight: bold; }
+        .record { margin: 5px 0; padding: 5px; }
+        #chapter-verse-filters { display: none; }
+    </style>
+</head>
+<body>
+    <h1>Translation Display</h1>
+
+    <div class="filters">
+        <div class="filter-group">
+            <label for="cite">Book</label>
+            <select id="cite">
+                <option value="">All</option>
+            </select>
+        </div>
+
+        <div id="chapter-verse-filters">
+            <div class="filter-group">
+                <label>Chapter</label>
+                <div class="checkbox-row">
+                    <input type="checkbox" id="chapter-all" checked>
+                    <label for="chapter-all">All</label>
+                    <input type="number" id="chapter" min="1" style="display: none;">
+                </div>
+            </div>
+
+            <div class="filter-group">
+                <label>Verse</label>
+                <div class="checkbox-row">
+                    <input type="checkbox" id="verse-all" checked>
+                    <label for="verse-all">All</label>
+                    <input type="number" id="verse" min="1" style="display: none;">
+                </div>
+            </div>
+        </div>
+
+        <button onclick="fetchResults()">Go</button>
+    </div>
+
+    <div id="results" class="results"></div>
+
+    <script>
+        async function loadCiteBooks() {
+            const response = await fetch('/api/cite-books.php');
+            const books = await response.json();
+            const select = document.getElementById('cite');
+            books.forEach(book => {
+                const option = document.createElement('option');
+                option.value = book.cite_book_id;
+                option.textContent = book.cite_book_hebrew + ' / ' + book.cite_book_common;
+                select.appendChild(option);
+            });
+        }
+
+        document.getElementById('cite').addEventListener('change', function() {
+            const filters = document.getElementById('chapter-verse-filters');
+            filters.style.display = this.value ? 'block' : 'none';
+        });
+
+        document.getElementById('chapter-all').addEventListener('change', function() {
+            document.getElementById('chapter').style.display = this.checked ? 'none' : 'inline-block';
+            if (this.checked) document.getElementById('chapter').value = '';
+        });
+
+        document.getElementById('verse-all').addEventListener('change', function() {
+            document.getElementById('verse').style.display = this.checked ? 'none' : 'inline-block';
+            if (this.checked) document.getElementById('verse').value = '';
+        });
+
+        async function fetchResults() {
+            const citeId = document.getElementById('cite').value;
+            const chapterAll = document.getElementById('chapter-all').checked;
+            const verseAll = document.getElementById('verse-all').checked;
+            const chapter = !chapterAll ? document.getElementById('chapter').value : '';
+            const verse = !verseAll ? document.getElementById('verse').value : '';
+
+            const params = new URLSearchParams();
+            if (citeId) params.set('cite_book_id', citeId);
+            if (chapter) params.set('chapter', chapter);
+            if (verse) params.set('verse', verse);
+
+            const response = await fetch('/api/display-translations.php?' + params);
+            const records = await response.json();
+            displayResults(records);
+        }
+
+        function displayResults(records) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+
+            if (records.length === 0) {
+                resultsDiv.textContent = 'No translations found.';
+                return;
+            }
+
+            let lastCite = null, lastChapter = null, lastVerse = null;
+
+            records.forEach(record => {
+                if (lastCite !== record.translation_cite || lastChapter !== record.translation_cite_chapter || lastVerse !== record.translation_cite_verse) {
+                    const breakDiv = document.createElement('div');
+                    breakDiv.className = 'section-break';
+                    const ch = record.translation_cite_chapter != null ? ' ' + record.translation_cite_chapter : '';
+                    const vs = record.translation_cite_verse != null ? ':' + record.translation_cite_verse : '';
+                    const citeName = record.cite_book_hebrew ? record.cite_book_hebrew + ' / ' + record.cite_book_common : (record.translation_cite || 'Unknown');
+                    breakDiv.textContent = citeName + ch + vs;
+                    resultsDiv.appendChild(breakDiv);
+
+                    lastCite = record.translation_cite;
+                    lastChapter = record.translation_cite_chapter;
+                    lastVerse = record.translation_cite_verse;
+                }
+
+                const recordDiv = document.createElement('div');
+                recordDiv.className = 'record';
+                const bookName = record.translation_book.replace(/^YY-/i, '');
+                const flipCode = record.yy_volume_flip_code;
+                const page = record.translation_page;
+                let bookPage;
+                if (flipCode && page) {
+                    const url = 'https://book.yadayah.com/books/' + encodeURIComponent(flipCode) + '/#p=' + page;
+                    bookPage = '<a href="' + url + '" target="_blank"><strong>' + bookName + '</strong> - Page ' + page + '</a>';
+                } else {
+                    bookPage = '<strong>' + bookName + '</strong> - Page ' + (page || '?');
+                }
+                recordDiv.innerHTML = bookPage + ':<br>' + record.translation_text_word;
+                resultsDiv.appendChild(recordDiv);
+            });
+        }
+
+        loadCiteBooks();
+    </script>
+</body>
+</html>

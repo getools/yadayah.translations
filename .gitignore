@@ -1,0 +1,7 @@
+.env
+__pycache__/
+NUL
+*.log
+*.csv
+test_open.vbs
+.claude/

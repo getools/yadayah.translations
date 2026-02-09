@@ -1,0 +1,344 @@
+/*
+Below are the definitions for the database tables used to support the Yada Yah translations.
+These tables define the structure of the form used to capture the location of each translation segment within the Towrah and within the Yada Yah series and volumes.
+Each table is defined along with comments describing how the data is used to populate the form fields and what values are stored when the form is submitted.
+
+A web-based form with helpful script interfaces should be structured with fields to input the following information into the database from a web interface.
+
+The web form should be programmed to enable Claude.AI to catch, detect, and correct errors.
+
+Ask questions to clarify requirements for the form, form fields, layout, value constraints, user messages, the database structure, and any other ambiguous application definitions.
+*/
+
+/*
+The first field in the form is labeled "Scroll"
+It is a dropdown field with values found in the table yah_scroll defined just below.
+The text displayed in the "Scroll" dropdown list are the concatenation of yah_scroll_label_yy, a slash, and then yah_scroll_label_common
+The order in which the records appear is ascending based on yah_scroll_sort
+The value saved when the form is submitted is yah_scroll_key
+*/
+create table yah_scroll {
+    yah_scroll_key int not null, -- primary key auto increment identity/sequence
+    yah_scroll_label_common nvarchar(250) not null,
+    yah_scroll_label_yy nvarchar(250) not null,
+    yah_scroll_sort smallint default 0
+}
+
+/*
+the following values are stored in yah_scroll:
+0, "","", 0
+1, "Genesis", "Bereshit", 10
+2, "Exodus", "Shemot", 20
+3, "Leviticus", "Vayikra", 30
+4, "Numbers", "Bamidbar", 40
+5, "Deuteronomy", "Devarim", 50
+6, "Joshua", "Yehoshua", 60
+7, "Judges", "Shoftim", 70
+8, "Samuel I", "Shmuel Alef", 80
+9, "Samuel II", "Shmuel Bet", 90
+10, "Kings I", "Melachim Alef", 100
+11, "Kings II", "Melachim Bet", 110
+12, "Isaiah", "Yeshayahu", 120
+13, "Jeremiah", "Yirmiyahu", 130
+14, "Ezekiel", "Yechezkel", 140
+15, "Hosea", "Hoshea", 150
+16, "Joel", "Yow'el", 160
+17, "Amos", "Amos", 170
+18, "Obadiah", "Ovadyah", 180
+19, "Jonah", "Yonah", 190
+20, "Micah", "Michah", 200
+21, "Nahum", "Nachum", 210
+22, "Habakkuk", "Chavakuk", 220
+23, "Zephaniah", "Tzefanyah", 230
+24, "Haggai", "Chaggai", 240
+25, "Zechariah", "Zechariah", 250
+26, "Malachi", "Malachi", 260
+27, "Psalms", "Mizmowr", 270
+*/
+
+
+
+/*
+The next field in the form is labeled "Chapter"
+It is a dropdown field with values found in the table yah_chapter defined just below.
+The options in the dropdown are only populated after a selection is made from the "Scroll" dropdown.
+The options displayed in the "Chapter" dropdown are those with a value for yah_scroll_key that matches the value of the option selected in field "Scroll".
+The text displayed in the "Chapter" dropdown list is found in data table column yah_chapter_num
+The value saved when the form is submitted is yah_chapter_key
+*/
+create table yah_chapter {
+    yah_chapter_key int not null, -- primary key auto increment identity/sequence
+    yah_scroll_key int not null, -- foreign key to yah_scroll
+    yah_chapter_number smallint not null,
+    yah_chapter_sort smallint default 0
+}
+/*
+The records in yah_chapter are as follow this pattern:
+yah_scroll_key for the "Genesis" record has 50 chapters, so there are 50 records in yah_chapter with yah_scroll_key = 1
+yah_scroll_key for the "Exodus" record has 40 chapters, so there are 40 records in yah_chapter with yah_scroll_key = 2
+and so forth for each of the 26 scrolls defined in yah_scroll   
+*/
+
+
+/*
+The next field in the form is labeled "Verse"
+It is a dropdown field with values found in the table yah_verse defined just below.
+The options in the dropdown are only populated after a selection is made from the "Chapter" dropdown.
+The options displayed in the "Chapter" dropdown are those with a value for yah_scroll_key that matches the value of the option selected in field "Scroll".
+The text displayed in the "Chapter" dropdown list is found in data table column yah_chapter_num
+The value saved when the form is submitted is yah_chapter_key
+*/
+create table yah_verse {
+    yah_verse_key int not null, -- primary key auto increment identity/sequence
+    yah_chapter_key int not null, -- foreign key to yah_chapter
+    yah_verse_number smallint not null,
+    yah_verse_sort smallint default 0
+}
+/*
+The records in yah_verse are as follow this pattern:
+There should be one record in yah_verse for each verse in each chapter in each scroll.
+For example, for yah_scroll_key = 1 (Genesis), chapter 1 has 31 verses, so there are 31 records in yah_verse with yah_chapter_key = 1
+and so forth for each chapter in each scroll
+*/
+
+/*
+After the preceding three fields, the form should have an interface where multiple translations can be entered for the selected verse.
+The following fields should be included for each translation entered.
+*/
+
+/*
+Each translation has where it appears in the Yada Yah series defined by the following fields.
+First field is labeled "Series"
+It is a dropdown field with values found in the table yy_series defined just below.
+*/
+create table yy_series {
+    yy_series_key int not null, -- primary key auto increment identity/sequence
+    yy_series_name varchar(250) not null,
+    yy_series_label varchar(250) null,
+    yy_series_sort smallint default 0
+}
+/*
+The records in yy_series are as follow:
+0, "", "", 0
+1, "An Intro to God", null, 10
+2, "Yada Yahowah", null, 20
+3, "Observations", null, 30
+4, "Coming Home", null, 40
+5, "Babel", null, 50
+6, "Twistianity", null, 60
+7, "God Damn Religion", null, 70
+*/
+
+/*
+Second field identifying where a translation is found is labeled "Volume"
+It is a dropdown field with values found in the table yy_volume defined just below.
+The options in the dropdown are only populated after a selection is made from the "Series" dropdown.
+The options displayed in the "Volume" dropdown are those with a value for yy_series_key that matches the value of the option selected in field "Series".
+The text displayed in the "Volume" dropdown list is a concatenation of yy_volume_number, a dash, and then ISNULL(yy_volume_label, yy_volume_name)
+The value saved when the form is submitted is yy_volume_key
+*/
+create table yy_volume {
+    yy_volume_key int not null, -- primary key auto increment identity/sequence
+    yy_series_key int not null, -- foreign key to yy_series
+    yy_volume_number smallint not null,
+    yy_volume_name varchar(250) not null,
+    yy_volume_label varchar(250) null,
+    yy_volume_page_count smallint null,
+    yy_volume_paragraph_count smallint null,
+    yy_volume_sort smallint default 0
+}
+/*
+The records in yy_volume are as follow this pattern:
+All the values for yy_volume_number are sequential starting at 1 for each series.
+Each series in yy_series has one or more volumes associated with it.
+For example, yy_series_key = 1 (An Intro to God) has 3 volumes, so there are 3 records in yy_volume with yy_series_key = 1
+Those volumes are:
+"Dabarym-Words", "Mitswah-Instructions", and "Towrah-Mizmowr"
+The volumes associated with Series "Yada Yahowah" are:
+"Bare'syth-Beginning", "'Adam-Story of Man", "Beyth-In the Family", "Miqra'ey-Invitations", "Qatsyr-Harvests", "Mow'ed-Appointments", "Shanah-Years", "'Azab-Separation", "'Eth Tsarh-Time of Trouble"
+The volumes associated with Series "Observations" are:
+"Perspective","Covenant","Growing","Teaching","Understanding"
+The volumes associated with Series "Coming Home" are:
+"Qowl-A Voice","Mashyach-Messiah","Dowd-Beloved"
+The volumes associated with Series "Babel" are:
+"Chywah-Beast","Tow'ebah-Abominable","Chemah-Venemous"
+The volumes associated with Series "Twistianity" are:
+"Appaling","Towrahless","Devil's Advocate","Incredible","Foolology"
+The volumes associated with Series "God Damn Religion" are:
+"Snake","Satanic","Submission","Slaughter","Sunnah & Suratun"
+*/
+
+
+/*
+Third field identifying where a translation is found is labeled "Chapter"
+It is a dropdown field with values found in the table yy_chapter defined just below.
+The options in the dropdown are only populated after a selection is made from the "Volume" dropdown.
+The options displayed in the "Chapter" dropdown are those with a value for yy_volume_key that matches the value of the option selected in field "Volume".
+The text displayed in the "Chapter" dropdown list is found in data table column yy_chapter_number
+The value saved when the form is submitted is yy_chapter_key
+*/
+create table yy_chapter {
+    yy_chapter_key int not null, -- primary key auto increment identity/sequence
+    yy_volume_key int not null, -- foreign key to yy_volume
+    yy_chapter_number smallint not null,
+    yy_chapter_page int null,
+    yy_chapter_name nvarchar(250) null,
+    yy_chapter_label nvarchar(500) null,
+    yy_chapter_sort smallint default 0
+}
+/*
+The records in yy_chapter are as follow this pattern:
+yy_volume_key for the "Dabarym-Words" record has 10 chapters, so there are 10 records in yy_chapter with yy_volume_key = 1
+Each record has yy_chapter_number values sequential starting at 1 for each volume, 
+Continue this pattern for each volume using the following number of chapters for each volume:
+"Dabarym-Words", 10
+"Mitswah-Instructions", 12
+"Towrah-Mizmowr", 12
+"Bare'syth-Beginning", 8 
+"'Adam-Story of Man", 9
+"Beyth-In the Family", 9
+"Miqra'ey-Invitations", 9
+"Qatsyr-Harvests", 12
+"Mow'ed-Appointments", 7 
+"Shanah-Years", 13
+"'Azab-Separation", 12 
+"'Eth Tsarh-Time of Trouble", 19
+"Perspective", 12
+"Covenant", 12
+"Growing", 14
+"Teaching", 13
+"Understanding", 14
+"Qowl-A Voice", 11
+"Mashyach-Messiah", 13
+"Dowd-Beloved", 12
+"Chywah-Beast", 11
+"Tow'ebah-Abominable", 10
+"Chemah-Venemous", 11
+"Appaling", 11
+"Towrahless", 11
+"Devil's Advocate", 13
+"Incredible", 8
+"Foolology", 8
+"Snake", 12 *
+"Satanic", 8
+"Submission", 11
+"Slaughter", 11
+"Sunnah & Suratun", 6
+
+"Sunnah & Suratun" has another record with yy_chapter_number 7 with yy_chapter_name = "Afterword"
+"Sunnah & Suratun" has another record with yy_chapter_number 8 with yy_chapter_name = "Total Appendix"
+
+"Snake", "Satanic", "Submission", "Slaughter", "Sunnah & Suratun" all have one last chapter record with the next yy_chapter_number to be the next sequential number for that volume and with yy_chapter_name = "Bibliography"
+*/
+
+
+/*
+Fourth field identifies on what page a translation is found within a Yada Yah volume, and is labeled "Page".
+It is a small integer field where the page number is entered.
+*/
+
+/*
+Fifth field identifies in what paragraph a translation is found within a Yada Yah volume, and is labeled "Paragraph".
+It is a small integer field where the paragraph number is entered.
+*/
+
+
+/*
+Sixth field is a large text area where the translation text is entered, and is labeled "Text".
+The text area should support rich text formatting including bold, italics, font type, font size, and color.
+The text area should support pasting from Word documents while preserving formatting.
+The characters being pasted will include long dashes (em dashes), curly quotes, and other special characters.
+*/
+
+/*
+Seventh field is labeled "Translation Date" and is a date field where the date the translation was made, not when it was entered into the database.
+*/
+
+/*
+Eighth field is labeled "Sort" and is a small integer field where a value can be entered to help prioritize multiple translations for the same scripture reference.
+A higher  number indicates a higher priority.
+*/
+
+
+/* 
+Data for each Translation record submitted for a scripture reference is stored in the following table: 
+Data from the preceding fields is stored in the table yy_translation defined just below.
+The fields in yy_translation correspond to the fields described above.
+*/
+create table yy_translation {
+    yy_translation_key int not null, -- primary key auto increment identity/sequence
+    yah_scroll_key int not null, -- foreign key to yah_scroll
+    yah_chapter_key int not null, -- foreign key to yah_chapter
+    yah_verse_key int not null, -- foreign key to yah_chapter
+    yy_series_key int not null, --foreign key to yy_series
+    yy_volume_key int not null, --foreign key to yy_volume
+    yy_chapter_key int not null, --foreign key to yy_chapter
+    yy_translation_page smallint null,  -- page number in the volume where this translation appears based on the PDF version that is linked from YadaYah.com
+    yy_translation_paragraph smallint null, -- when a system for identifying paragraphs is established, this field will capture that value.
+    yy_translation_copy nvarchar(max) null, -- the actual translation text
+    yy_translation_date date null, -- the date the translation was completed (not when it was entered into the database)
+    yy_translation_sort smallint not null default 0, -- help priorotize multiple translations for the same scripture reference
+    yy_translation_dtime datetime2 not null default getdate() -- the date and time the record was created in the database
+}
+
+
+
+
+----------------------------------------------------------------------------------------
+Update 001
+----------------------------------------------------------------------------------------
+Add the option of marking one of many possible custom span tags with different classes to the text within the yy_translation_copy field within the text editor.
+The custom span tags and their classes are:
+"main", "word", "def", "note"
+When text is pasted into the text editor, sections that are bold should be set with a custom class of "main"
+When text is pasted into the text editor, sections that are in italics should be set with a custom class of "word"
+When text is pasted into the text editor, sections that are plain and have no bolding and are not in italics should be set with a custom class of "def"
+
+
+Add functionality where a user must sign in to access the site.
+Create an account with login "admin" and password "7#Yada.Yah#7"
+Create an account with login "joep" and password "7#Yada.Yah#7"
+The database stores the user records in a table named "yy_user"
+These are some of the columns to include in table yy_user, but additional columns can be added to implement other features and functionality.
+create table yy_user {
+    yy_user_key int not null, -- primary key auto increment identity/sequence
+    yy_user_code nvarchar(500) not null, -- unique login and text identifier for the user record
+    yy_user_name_last nvarchar(500) null, -- last name of the user
+    yy_user_name_first nvarchar(500) null, -- first name of the user
+    yy_user_name_middle nvarchar(500) null, -- middle name of the user
+    yy_user_name_prefix nvarchar(500) null, -- salutation for the user that comes before their name
+    yy_user_name_suffix nvarchar(500) null, -- designation like Jr., Sr., that comes after a person's name.
+    yy_user_name_full nvarchar(500) null, -- full name of the user
+    yy_user_email nvarchar(500) null, -- email address to send verification, 2fa, or other communication to the individual
+    yy_user_text nvarchar(64) null, -- Phone number to use to send text messages to the individual
+}
+
+
+Add a tab or section in the web interface that enables a user to see a list of the existing translations.
+The list is a table that displays yah_scroll_label_yy, yah_scroll_label_common, yah_chapter_number, yah_verse_number, coalesce(yy_series_label, yy_series_name), coalese(yy_volume_label,yy_volume_name), yy_translation_page, yy_chapter_number
+The interface should allow the items to be sorted and filtered by any of these columns.
+The last sorting and filtering selections made by the user should be stored such that they are implemented every time that user accesses the list.
+The default sorting is 
+yah_scroll_sort, yah_chapter_number, yah_verse_number, yy_series_sort, yy_volume_number, yy_chapter_sort, yy_translation_page
+
+A translation can be selected from this table and then displayed in the translation form to allow it to be edited or deleted.  
+
+Any time a record is to be deleted from the database, a confirmation window should ask to make sure the user is certain the record should be deleted.
+
+
+A revision version of every main table should be created.
+The revision version of each main table has the same name of the main table with rev_ prefixed to it.
+The revision version of each main table has all of the existing columns from the main table. None of the columns in the revision table carry over the defaults, foreign keys, triggers, or auto-increments found in the main table.
+The revision version of each main table has the following additional columns that are not found in the main table:
+{
+   _key bigint not null default 0, internal auto-incrementing identifier for the revision record.
+   _remove_dtime datetime2() null, -- when the record was removed. NULL value means that the record should be considered active.  Non-Null value indicates that the record should be treated as if it was deleted.
+   _revision_count int not null default 0, -- The number of the version of this record.  Every time a record is updated, created, or marked as removed, a new record in the table is created and the value for the revision count is incremented by 1.  Only the record with 
+   _revision_user_key int not null default 0 -- the individual making the most recent modification to the record in the main table.
+   _revision_dtime datetime2 not null default getdate() -- the date and time the record was created, updated, or marked as removed in the main table associated with this revision table
+}
+Any time a record is created, updated, or deleted from a main table, a record is created in its revision table that stores the information in the main table.
+The _revision_count is incremented by 1
+The revision_dtime value is set to the timestamp the action was made to the associated record in the main table.
+The identifier of the user making the change to the main record is stored in column _revision_user_key, which is a foreign key to the yy_user table.
+

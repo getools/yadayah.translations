@@ -1,0 +1,20 @@
+write a python script that parses multiple word documents that exports text discovered that matches a regular expression pattern
+the word documents that should be parsed are all of those found in a given directory.
+the default directory to parse is "C:\users\joe\work\dev\yada\docs\"
+all of the files to parse are word documents with the ".docx" extension.
+do not parse any subdirectories, only the files in the given directory.
+Create a postgresql database instance name "yada" is an instance of the same name does not already exist.
+the parsed text and some meta information are saved in a table called "translation".
+the beginning of each text pattern to be extracted begins with a bold left double quote U+201C.
+the end of the text is marked by a bold right double quote U+201D. 
+the text may include multiple paragraphs.
+the text after the right double quote inside parenthesis is known as the "cite"
+
+the columns saved in database table for each record are:
+"book" - which is the name of the Word document being parsed.
+"page" - the number of the page found in the footer of the word document where the beginning of the matching text is found.
+"text-word" - the characters and formatting saved exactly how they appear in the word document
+"cite" - the characters after the matching text inside the set of parenthesis.
+
+
+

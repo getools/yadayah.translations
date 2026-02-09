@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+FROM nginx:alpine
+
+COPY yy.prompt.translation-display.txt /usr/share/nginx/html/index.html
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Translation Display</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .filters { margin-bottom: 20px; }
+        .filter-group { margin-bottom: 10px; }
+        label { font-weight: bold; display: block; margin-bottom: 5px; }
+        select, input { padding: 5px; width: 200px; }
+        button { padding: 8px 16px; background-color: #007bff; color: white; border: none; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        .results { margin-top: 20px; }
+        .section-break { margin-top: 15px; padding-top: 10px; border-top: 2px solid #ccc; font-weight: bold; }
+        .record { margin: 5px 0; padding: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Translation Display</h1>
+    
+    <div class="filters">
+        <div class="filter-group">
+            <label for="cite">Book</label>
+            <select id="cite" multiple size="5">
+                <option value="">All</option>
+            </select>
+        </div>
+        
+        <div class="filter-group">
+            <label for="chapter">Chapter</label>
+            <input type="number" id="chapter" placeholder="All" min="0">
+        </div>
+        
+        <div class="filter-group">
+            <label for="verse">Verse</label>
+            <input type="number" id="verse" placeholder="All" min="0">
+        </div>
+        
+        <button onclick="fetchResults()">Go</button>
+    </div>
+    
+    <div id="results" class="results"></div>
+
+    <script>
+        async function loadCites() {
+            const response = await fetch('/api/cites');
+            const cites = await response.json();
+            const select = document.getElementById('cite');
+            cites.forEach(cite => {
+                const option = document.createElement('option');
+                option.value = cite.id;
+                option.textContent = cite.label;
+                select.appendChild(option);
+            });
+        }
+
+        async function fetchResults() {
+            const cite = Array.from(document.getElementById('cite').selectedOptions).map(o => o.value);
+            const chapter = document.getElementById('chapter').value || null;
+            const verse = document.getElementById('verse').value || null;
+
+            const params = new URLSearchParams({
+                cite: cite.join(','),
+                chapter: chapter,
+                verse: verse
+            });
+
+            const response = await fetch(`/api/translations?${params}`);
+            const records = await response.json();
+            displayResults(records);
+        }
+
+        function displayResults(records) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+            
+            let lastCite = null, lastChapter = null, lastVerse = null;
+
+            records.forEach(record => {
+                if (lastCite !== record.cite || lastChapter !== record.cite_chapter || lastVerse !== record.cite_verse) {
+                    const breakDiv = document.createElement('div');
+                    breakDiv.className = 'section-break';
+                    breakDiv.textContent = `${record.cite} ${record.cite_chapter}:${record.cite_verse}`;
+                    resultsDiv.appendChild(breakDiv);
+                    
+                    lastCite = record.cite;
+                    lastChapter = record.cite_chapter;
+                    lastVerse = record.cite_verse;
+                }
+
+                const recordDiv = document.createElement('div');
+                recordDiv.className = 'record';
+                recordDiv.textContent = `${record.book} - Page ${record.page}: ${record.text}`;
+                resultsDiv.appendChild(recordDiv);
+            });
+        }
+
+        loadCites();
+    </script>
+</body>
+</html>
