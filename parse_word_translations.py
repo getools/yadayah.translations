@@ -759,8 +759,13 @@ def extract_translations_from_doc(doc_path: Path) -> List[Dict[str, any]]:
         page_number = None
         cite_search_text = ""  # Accumulate text after right quote for cite search
 
+        # Bold-cite path: captures bold paragraphs ending with citation (no curly quotes)
+        bold_cite_html = []
+        bold_cite_start_para = None
+
         for para_idx, paragraph in enumerate(doc.paragraphs):
             logging.debug(f"Paragraph {para_idx}: {paragraph.text[:50]}...")
+            para_extracted = False  # Track if this paragraph was already handled
 
             # Track where this paragraph's HTML contributions start
             para_html_start = len(accumulated_html) if state == ExtractionState.EXTRACTING else None
@@ -784,6 +789,10 @@ def extract_translations_from_doc(doc_path: Path) -> List[Dict[str, any]]:
                         char_offset = sum(len(paragraph.runs[i].text) for i in range(run_idx))
                         para_extract_start = char_offset + text.index(LEFT_QUOTE) + 1
                         start_paragraph_index = para_idx
+
+                        # Clear bold-cite buffer when entering quote-delimited extraction
+                        bold_cite_html = []
+                        bold_cite_start_para = None
 
                         # Page number will be filled in by COM automation after extraction
                         page_number = None
@@ -972,6 +981,7 @@ def extract_translations_from_doc(doc_path: Path) -> List[Dict[str, any]]:
                         }
                         translations.append(translation)
                         logging.info(f"Extracted cite-terminated translation #{len(translations)} from {book_name}")
+                        para_extracted = True
 
                     state = ExtractionState.SEARCHING
                     accumulated_html = []
@@ -1011,6 +1021,7 @@ def extract_translations_from_doc(doc_path: Path) -> List[Dict[str, any]]:
                     logging.info(f"Extracted translation #{len(translations)} from {book_name}")
                     logging.debug(f"  Cite: {cite_name} {cite_chapter}:{cite_verse}")
                     logging.debug(f"  Text preview: {full_text[:100]}...")
+                    para_extracted = True
                 else:
                     logging.debug(f"Skipped translation without cite at paragraph {start_paragraph_index}")
 
@@ -1019,6 +1030,123 @@ def extract_translations_from_doc(doc_path: Path) -> List[Dict[str, any]]:
                 accumulated_html = []
                 cite_search_text = ""
                 page_number = None
+
+            # Bold-cite detection: bold paragraphs ending with citation, no curly quotes
+            if state == ExtractionState.SEARCHING and not para_extracted and LEFT_QUOTE not in paragraph.text:
+                para_text = replace_unicode_chars(paragraph.text)
+                stripped_pt = para_text.rstrip()
+
+                # Check if first non-empty run is bold
+                first_run_bold = False
+                for r in paragraph.runs:
+                    if r.text.strip():
+                        first_run_bold = bool(r.bold)
+                        break
+
+                if first_run_bold and stripped_pt:
+                    # Check if paragraph ends with a citation
+                    cite_found_bc = False
+                    raw_cite_bc = None
+                    cite_start_pos_bc = None
+
+                    if stripped_pt.endswith(')'):
+                        depth = 0
+                        paren_start = None
+                        for i in range(len(stripped_pt) - 1, -1, -1):
+                            if stripped_pt[i] == ')':
+                                depth += 1
+                            elif stripped_pt[i] == '(':
+                                depth -= 1
+                                if depth == 0:
+                                    paren_start = i
+                                    break
+                        if paren_start is not None:
+                            cite_content = stripped_pt[paren_start + 1:-1].strip()
+                            if re.search(r'\d+:\d+', cite_content):
+                                cite_found_bc = True
+                                raw_cite_bc = cite_content
+                                cite_start_pos_bc = paren_start
+
+                    if cite_found_bc:
+                        # Build HTML for this paragraph (excluding the trailing cite)
+                        current_html = []
+                        char_pos = 0
+                        for r in paragraph.runs:
+                            r_text = replace_unicode_chars(r.text)
+                            r_end = char_pos + len(r_text)
+
+                            if char_pos >= cite_start_pos_bc:
+                                break
+
+                            eff_end = min(len(r_text), cite_start_pos_bc - char_pos)
+                            keep = r_text[:eff_end]
+                            if keep:
+                                fmt = keep
+                                fn = None
+                                try:
+                                    if r.font and r.font.name and r.font.name != 'Times New Roman':
+                                        fn = r.font.name
+                                except:
+                                    pass
+                                if fn:
+                                    fmt = f'<span class="{fn}">{fmt}</span>'
+                                if r.underline:
+                                    fmt = f"<u>{fmt}</u>"
+                                if r.italic:
+                                    fmt = f"<i>{fmt}</i>"
+                                if r.bold:
+                                    fmt = f"<b>{fmt}</b>"
+                                current_html.append(fmt)
+
+                            char_pos = r_end
+
+                        # Combine with accumulated bold buffer (for multi-paragraph translations)
+                        if bold_cite_html:
+                            bold_cite_html.append('<br>')
+                        bold_cite_html.extend(current_html)
+
+                        # Parse citation and save
+                        cite_name, cite_chapter, cite_verse, cite_verse_end, cite_note = parse_cite(raw_cite_bc)
+                        cite_hebrew, cite_common = split_cite_name(cite_name)
+                        full_text = consolidate_html("".join(bold_cite_html))
+
+                        if (cite_name or cite_chapter) and full_text.strip():
+                            start_para = bold_cite_start_para if bold_cite_start_para is not None else para_idx
+                            translation = {
+                                "book": book_name,
+                                "page": None,
+                                "text_word": full_text,
+                                "cite": cite_name,
+                                "cite_hebrew": cite_hebrew,
+                                "cite_common": cite_common,
+                                "cite_chapter": cite_chapter,
+                                "cite_verse": cite_verse,
+                                "cite_verse_end": cite_verse_end,
+                                "cite_note": cite_note,
+                                "_para_idx": start_para
+                            }
+                            translations.append(translation)
+                            logging.info(f"Extracted bold-cite translation #{len(translations)} from {book_name}")
+
+                        # Reset bold-cite buffer
+                        bold_cite_html = []
+                        bold_cite_start_para = None
+                    else:
+                        # Bold paragraph without cite - accumulate for potential multi-paragraph
+                        if not bold_cite_html:
+                            bold_cite_start_para = para_idx
+                        else:
+                            bold_cite_html.append('<br>')
+                        for r in paragraph.runs:
+                            bold_cite_html.append(format_run_as_html(r))
+                elif not first_run_bold:
+                    # Non-bold paragraph - clear bold-cite buffer
+                    bold_cite_html = []
+                    bold_cite_start_para = None
+            elif state != ExtractionState.SEARCHING:
+                # Clear bold-cite buffer when in extracting/found_quote state
+                bold_cite_html = []
+                bold_cite_start_para = None
 
         # Handle case where we finished the document while still searching for cite
         if state == ExtractionState.FOUND_QUOTE and len(accumulated_html) > 0:
@@ -1135,7 +1263,8 @@ def update_cite_book_ids(conn) -> int:
             UPDATE translation t
             SET translation_cite_book_id = cbm.cite_book_id
             FROM cite_book_map cbm
-            WHERE t.translation_cite_hebrew = cbm.cite_book_map_hebrew
+            WHERE (t.translation_cite_hebrew = cbm.cite_book_map_hebrew
+                   OR REPLACE(REPLACE(t.translation_cite_hebrew, E'\u2019', ''''), E'\u2018', '''') = cbm.cite_book_map_hebrew)
               AND t.translation_cite_book_id IS NULL
         """)
         count = cursor.rowcount
