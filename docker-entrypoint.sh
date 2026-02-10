@@ -9,15 +9,15 @@ if [ ! -f /var/www/html/js/tinymce/tinymce.min.js ]; then
 fi
 
 # Initialize user passwords (hash any NULL passwords with bcrypt)
-# Retry up to 10 times in case MySQL is still starting
+# Retry up to 10 times in case PostgreSQL is still starting
 for i in $(seq 1 10); do
     php -r '
-$host = getenv("DB_HOST") ?: "db";
-$name = getenv("DB_NAME") ?: "yada_translations";
-$user = getenv("DB_USER") ?: "yada";
-$pass = getenv("DB_PASS") ?: "yada_pass";
+$host = getenv("PG_HOST") ?: "postgres";
+$name = getenv("PG_DB")   ?: "yada";
+$user = getenv("PG_USER") ?: "postgres";
+$pass = getenv("PG_PASS") ?: "yada_password";
 try {
-    $pdo = new PDO("mysql:host=$host;dbname=$name;charset=utf8mb4", $user, $pass);
+    $pdo = new PDO("pgsql:host=$host;dbname=$name", $user, $pass);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $stmt = $pdo->query("SELECT yy_user_key FROM yy_user WHERE yy_user_pass IS NULL");
     $users = $stmt->fetchAll(PDO::FETCH_ASSOC);

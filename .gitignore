@@ -5,3 +5,7 @@ NUL
 *.csv
 test_open.vbs
 .claude/
+strongs-hebrew.json
+strongs_scraped.json
+strongs_matches.sql
+unlinked_words.txt

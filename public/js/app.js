@@ -354,6 +354,7 @@ $(function () {
 
         apiCall('translations.php?verse_key=' + currentVerseKey).done(function (data) {
             renderTranslationCards(data);
+            processWordLinks($('#translations-list'));
             $('#translations-section').show();
             if (pendingEdit) {
                 var key = pendingEdit;
@@ -363,6 +364,121 @@ $(function () {
                 if (t) showForm(t);
             }
         });
+
+        // Also load published (docx-imported) translations for this verse
+        loadImportedTranslations(chapterText, verseText);
+    }
+
+    function loadImportedTranslations(chapterNum, verseNum) {
+        if (!currentScrollKey) return;
+        var url = 'display-translations.php?scroll_key=' + currentScrollKey +
+            '&chapter=' + encodeURIComponent(chapterNum) +
+            '&verse=' + encodeURIComponent(verseNum);
+        console.log('[WordPopup] loadImportedTranslations: scroll=' + currentScrollKey + ' ch=' + chapterNum + ' v=' + verseNum);
+        $.ajax({ url: '/api/' + url, dataType: 'json' }).done(function (data) {
+            console.log('[WordPopup] display-translations returned ' + (data ? data.length : 0) + ' translations');
+            if (!data || data.length === 0) {
+                $('#imported-translations-section').hide();
+                return;
+            }
+            $('#imported-translations-title').text('Published Translations (' + data.length + ')');
+
+            // Collect all italic words from all translations (via regex on the HTML)
+            var wordsMap = {};
+            $.each(data, function (_, t) {
+                var html = t.translation_text_word || '';
+                var re = /<i[^>]*>([^<]+)<\/i>/gi;
+                var m;
+                while ((m = re.exec(html)) !== null) {
+                    var raw = m[1].trim();
+                    if (!raw) continue;
+                    var parts = normalizeWord(raw).split(/\s+/);
+                    for (var j = 0; j < parts.length; j++) {
+                        var w = parts[j].replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                        if (w.length > 1) wordsMap[w.toLowerCase()] = true;
+                    }
+                }
+            });
+            var wordList = Object.keys(wordsMap);
+            if (wordList.length === 0) {
+                renderImportedCards(data, null);
+                $('#imported-translations-section').show();
+                return;
+            }
+
+            // Look up all words, then render with links embedded
+            console.log('[WordPopup] looking up ' + wordList.length + ' words: ' + wordList.slice(0, 10).join(', '));
+            $.ajax({
+                url: '/api/word-lookup.php?words=' + encodeURIComponent(wordList.join('|')),
+                dataType: 'json'
+            }).done(function (lookup) {
+                console.log('[WordPopup] word-lookup returned ' + (lookup ? Object.keys(lookup).length : 0) + ' matches');
+                renderImportedCards(data, lookup);
+                $('#imported-translations-section').show();
+            }).fail(function () {
+                renderImportedCards(data, null);
+                $('#imported-translations-section').show();
+            });
+        }).fail(function () {
+            $('#imported-translations-section').hide();
+        });
+    }
+
+    function renderImportedCards(translations, wordLookup) {
+        var $list = $('#imported-translations-list').empty();
+        var $status = $('#word-link-status');
+        var linked = 0;
+        $.each(translations, function (_, t) {
+            var meta = '';
+            if (t.translation_cite) meta += '<span><strong>Cite:</strong> ' + escHtml(t.translation_cite) + '</span>';
+            if (t.translation_book) meta += '<span><strong>Source:</strong> ' + escHtml(t.translation_book) + '</span>';
+            if (t.translation_page) meta += '<span><strong>Pg:</strong> ' + escHtml(t.translation_page) + '</span>';
+            var html = t.translation_text_word || '';
+            // Embed word links directly in the HTML before inserting into DOM
+            if (wordLookup && !$.isEmptyObject(wordLookup)) {
+                html = html.replace(/<i([^>]*)>([^<]+)<\/i>/gi, function (full, attrs, text) {
+                    var raw = text.trim();
+                    if (!raw) return full;
+                    var normalized = normalizeWord(raw).toLowerCase();
+                    var w = normalized.replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                    var info = null;
+                    if (w && wordLookup[w]) {
+                        info = wordLookup[w];
+                    } else {
+                        var parts = normalized.split(/\s+/);
+                        for (var j = 0; j < parts.length; j++) {
+                            var p = parts[j].replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                            if (p && wordLookup[p]) { info = wordLookup[p]; break; }
+                        }
+                    }
+                    if (info) {
+                        var wid = 'w' + (++wordInfoCounter);
+                        wordInfoStore[wid] = info;
+                        linked++;
+                        return '<i' + attrs + ' class="word-link" data-wid="' + wid + '">' + text + '</i>';
+                    }
+                    return full;
+                });
+            }
+            var card = '<div class="translation-card imported-card">' +
+                '<div class="translation-meta">' + meta + '</div>' +
+                '<div class="translation-preview">' + html + '</div>' +
+                '</div>';
+            $list.append(card);
+        });
+        var matchCount = wordLookup ? Object.keys(wordLookup).length : 0;
+        console.log('[WordPopup] renderImportedCards: ' + matchCount + ' definitions, ' + linked + ' linked words, wordInfoStore keys:', Object.keys(wordInfoStore).length);
+        if (linked > 0) {
+            $status.html(matchCount + ' word definitions found, ' + linked + ' clickable words <span style="color:#3498db;">(click any dotted-underlined word)</span>');
+        } else {
+            $status.text(matchCount + ' word definitions found, ' + linked + ' clickable words');
+        }
+        // Verify DOM has the word-link elements
+        var domLinks = $list.find('.word-link');
+        console.log('[WordPopup] DOM verification: ' + domLinks.length + ' .word-link elements in #imported-translations-list');
+        if (domLinks.length > 0) {
+            console.log('[WordPopup] First word-link: tag=' + domLinks[0].tagName + ', wid=' + $(domLinks[0]).attr('data-wid') + ', text="' + $(domLinks[0]).text() + '"');
+        }
     }
 
     function renderTranslationCards(translations) {
@@ -392,7 +508,141 @@ $(function () {
     function hideTranslations() {
         $('#translations-section').hide();
         $('#translations-list').empty();
+        $('#imported-translations-section').hide();
+        $('#imported-translations-list').empty();
     }
+
+    // ════════════════════════════════════════════
+    // WORD POPUP (italic word lookup)
+    // ════════════════════════════════════════════
+    // Global word info store (avoids jQuery .data() issues)
+    var wordInfoStore = {};
+    var wordInfoCounter = 0;
+
+    function normalizeWord(text) {
+        return text.replace(/[\u2018\u2019\u2032]/g, "'").replace(/[\u2013\u2014]/g, '-').trim();
+    }
+
+    function processWordLinks($container) {
+        var words = {};
+        var $targets = $container.find('.translation-preview').find('span.word, i');
+        $targets.each(function () {
+            var raw = $(this).text().trim();
+            if (!raw) return;
+            var parts = normalizeWord(raw).split(/\s+/);
+            for (var i = 0; i < parts.length; i++) {
+                var w = parts[i].replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                if (w.length > 1) words[w.toLowerCase()] = true;
+            }
+        });
+        var wordList = Object.keys(words);
+        if (wordList.length === 0) return;
+
+        var $status = $('#word-link-status');
+        $status.text('Looking up ' + wordList.length + ' words...');
+
+        $.ajax({
+            url: '/api/word-lookup.php?words=' + encodeURIComponent(wordList.join('|')),
+            dataType: 'json'
+        }).done(function (data) {
+            var matchCount = data ? Object.keys(data).length : 0;
+            if (!data || $.isEmptyObject(data)) {
+                $status.text('Word lookup: 0 matches from ' + wordList.length + ' words');
+                return;
+            }
+            var linked = 0;
+            $container.find('.translation-preview').find('span.word, i').each(function () {
+                var $el = $(this);
+                var raw = $el.text().trim();
+                if (!raw) return;
+                var normalized = normalizeWord(raw).toLowerCase();
+                var w = normalized.replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                var info = null;
+                if (w && data[w]) {
+                    info = data[w];
+                } else {
+                    var parts = normalized.split(/\s+/);
+                    for (var i = 0; i < parts.length; i++) {
+                        var p = parts[i].replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                        if (p && data[p]) { info = data[p]; break; }
+                    }
+                }
+                if (info) {
+                    var wid = 'w' + (++wordInfoCounter);
+                    wordInfoStore[wid] = info;
+                    $el.addClass('word-link').attr('data-wid', wid);
+                    linked++;
+                }
+            });
+            $status.text('Word lookup: ' + matchCount + ' matches, ' + linked + ' clickable words linked');
+        }).fail(function (xhr, status, err) {
+            $status.text('Word lookup failed: ' + status + ' ' + err);
+        });
+    }
+
+    function showWordPopup(info, anchorEl) {
+        closeWordPopup();
+        var rect = anchorEl.getBoundingClientRect();
+
+        var grammarParts = [];
+        if (info.word_flag_gender_m) grammarParts.push('m');
+        if (info.word_flag_gender_f) grammarParts.push('f');
+        if (info.word_flag_plural) grammarParts.push('pl');
+        if (info.word_flag_noun) grammarParts.push('noun');
+        if (info.word_flag_verb) grammarParts.push('verb');
+        if (info.word_flag_adjective) grammarParts.push('adj');
+        if (info.word_flag_adverb) grammarParts.push('adv');
+        if (info.word_flag_preposition) grammarParts.push('prep');
+        if (info.word_flag_conjunction) grammarParts.push('conj');
+        if (info.word_flag_subst) grammarParts.push('subst');
+
+        var html = '<div class="word-popup" id="word-popup">';
+        if (info.word_yt) {
+            html += '<div class="font_yt">' + escHtml(info.word_yt) + '</div>';
+        }
+        if (info.word_hebrew) {
+            html += '<div class="font_mh">' + escHtml(info.word_hebrew) + '</div>';
+        }
+        if (info.word_strongs) {
+            html += '<div><a class="word-strongs-link" href="http://lexiconcordance.com/hebrew/' + encodeURIComponent(info.word_strongs.trim()) + '.html" target="_blank">' + escHtml(info.word_strongs.trim()) + '</a></div>';
+        }
+        if (grammarParts.length > 0) {
+            html += '<div class="word-grammar">' + escHtml(grammarParts.join(' ')) + '</div>';
+        }
+        if (info.word_definition) {
+            html += '<hr>';
+            html += '<div class="word-definition">' + escHtml(info.word_definition) + '</div>';
+        }
+        html += '</div>';
+
+        var $overlay = $('<div class="word-popup-overlay" id="word-popup-overlay"></div>');
+        $overlay.on('click', closeWordPopup);
+        $('body').append($overlay).append(html);
+
+        var $popup = $('#word-popup');
+        var popupH = $popup.outerHeight();
+        var popupW = $popup.outerWidth();
+        var top = rect.bottom + 6;
+        var left = rect.left;
+        if (top + popupH > window.innerHeight) top = rect.top - popupH - 6;
+        if (left + popupW > window.innerWidth) left = window.innerWidth - popupW - 10;
+        if (left < 10) left = 10;
+        $popup.css({ top: top + 'px', left: left + 'px' });
+    }
+
+    function closeWordPopup() {
+        $('#word-popup').remove();
+        $('#word-popup-overlay').remove();
+    }
+
+    $(document).on('click', '.word-link', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var wid = $(this).attr('data-wid');
+        var info = wid ? wordInfoStore[wid] : null;
+        console.log('[WordPopup] click on .word-link, wid=' + wid + ', info=' + (info ? 'found' : 'MISSING'));
+        if (info) showWordPopup(info, this);
+    });
 
     // ════════════════════════════════════════════
     // TRANSLATION FORM

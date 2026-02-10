@@ -158,6 +158,23 @@ select:focus, input:focus {
 .translation-actions { display: flex; gap: 8px; }
 .no-translations { color: #999; font-style: italic; padding: 20px 0; text-align: center; }
 
+/* ── Imported translations ── */
+.imported-title {
+    margin: 24px 0 12px 0;
+    padding-top: 16px;
+    border-top: 2px solid #e0e0e0;
+    color: #5d6d7e;
+    font-size: 1.05rem;
+}
+.imported-card {
+    background: #f5f7fa;
+    border-color: #d5dbdf;
+}
+.imported-card .translation-preview {
+    border-left-color: #7f8c8d;
+    max-height: none;
+}
+
 /* ── Error messages ── */
 .error-messages {
     background: #fdecea;
@@ -206,6 +223,69 @@ select:focus, input:focus {
     font-size: 0.8rem;
     border: 1px solid #ddd;
     border-radius: 3px;
+}
+
+/* ── Word popup ── */
+.word-link {
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: #3498db;
+    color: #2c3e50;
+}
+.word-link:hover {
+    text-decoration-style: solid;
+    text-decoration-color: #2980b9;
+    background: rgba(52,152,219,0.08);
+}
+
+.word-popup-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 999;
+}
+
+.word-popup {
+    position: fixed;
+    width: 300px;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    padding: 16px;
+    z-index: 1000;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.word-popup .font_yt {
+    font-size: 1.1rem;
+    color: #1a5276;
+}
+
+.word-popup .font_mh {
+    font-size: 1.2rem;
+    direction: rtl;
+    color: #333;
+}
+
+.word-popup .word-strongs-link {
+    color: #3498db;
+    text-decoration: none;
+}
+.word-popup .word-strongs-link:hover {
+    text-decoration: underline;
+}
+
+.word-popup .word-grammar {
+    font-size: 0.85rem;
+    color: #666;
+}
+
+.word-popup .word-definition {
+    font-size: 0.875rem;
+    color: #444;
+    word-wrap: break-word;
 }
 
 /* ── TinyMCE ── */

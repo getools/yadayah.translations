@@ -3,25 +3,124 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Translation Display</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Julius+Sans+One&display=swap" rel="stylesheet">
     <style>
+        @font-face {
+            font-family: "Yada Towrah";
+            src: url('fonts/YadaTowrah-Times.woff2') format('woff2');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+        }
         body { font-family: Arial, sans-serif; margin: 20px; }
-        .filters { margin-bottom: 20px; }
-        .filter-group { margin-bottom: 10px; }
-        .filter-group > label { font-weight: bold; display: block; margin-bottom: 5px; }
-        select, input[type="number"] { padding: 5px; width: 200px; }
+        .filters { margin-bottom: 20px; display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; justify-content: center; }
+        .filter-group { margin-bottom: 0; }
+        .filter-group > label { font-weight: bold; display: block; margin-bottom: 5px; padding-left: 2px; }
+        select { padding: 5px; width: 250px; }
+        input[type="number"] { padding: 5px; width: 35px; }
         .checkbox-row { display: flex; align-items: center; gap: 8px; }
         .checkbox-row label { font-weight: normal; }
-        button { padding: 8px 16px; background-color: #007bff; color: white; border: none; cursor: pointer; }
-        button:hover { background-color: #0056b3; }
+        button { padding: 8px 16px; background-color: #31345A; color: white; border: none; cursor: pointer; }
+        button:hover { background-color: #6A6F83; }
         .results { margin-top: 20px; }
         .section-break { margin-top: 15px; padding: 10px 0; border-top: 3px solid #999; border-bottom: 2px solid #ccc; font-weight: bold; }
+        .section-break a:hover { text-decoration: underline; }
         .record { margin: 5px 0; padding: 5px; }
-        #chapter-verse-filters { display: none; }
+        .record p { margin: 0.4em 0; padding: 0 10px; text-indent: 2em; }
+        #chapter-verse-filters { display: flex; gap: 16px; }
+
+        /* Word popup */
+        .word-link {
+            cursor: pointer;
+            text-decoration: underline;
+            text-decoration-style: dotted;
+            text-decoration-color: #3498db;
+            color: #2c3e50;
+        }
+        .word-link:hover {
+            text-decoration-style: solid;
+            text-decoration-color: #2980b9;
+            background: rgba(52,152,219,0.08);
+        }
+        .word-popup-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 999;
+        }
+        .word-popup {
+            position: fixed;
+            width: 320px;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+            padding: 16px;
+            z-index: 1000;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+        .word-popup .wp-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+        .word-popup .wp-top-left { }
+        .word-popup .wp-top-right { text-align: right; }
+        .word-popup .wp-yt { font-family: "Yada Towrah", serif; font-size: 1.1rem; color: #1a5276; }
+        .word-popup .wp-spellings { font-size: 0.85rem; color: #555; }
+        .word-popup .wp-hebrew { font-size: 1.2rem; direction: rtl; color: #333; }
+        .word-popup .wp-strongs a { color: #3498db; text-decoration: none; }
+        .word-popup .wp-strongs a:hover { text-decoration: underline; }
+        .word-popup .wp-grammar { font-size: 0.85rem; color: #666; margin-bottom: 4px; }
+        .word-popup .wp-definition { font-size: 0.875rem; color: #444; word-wrap: break-word; }
+        .word-popup hr { border: none; border-top: 1px solid #eee; margin: 8px 0; }
+
+        /* Site header - matching yadayah.com Elementor header */
+        header {
+            display: flex; flex-direction: column; align-items: center;
+            padding: 10px 0 5px;
+            background: url('https://yadayah.com/wp-content/uploads/2026/01/ece62274-0549-438b-ba78-ab8c6980a9a7.jpg') center/cover no-repeat;
+            margin: -20px -20px 20px -20px;
+        }
+        header .header-inner {
+            display: flex; flex-direction: column; align-items: center;
+            width: 100%; max-width: 1140px; margin: 0 auto;
+        }
+        header .header-logos { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+        header .header-logos a:first-child img { width: 81px; height: 90px; }
+        header .header-logos a:last-child img { width: 352px; height: auto; }
+        header nav {
+            display: flex; flex-direction: row; justify-content: center;
+            gap: 0 35px; padding: 15px 0; flex-wrap: wrap;
+        }
+        header nav a {
+            text-decoration: none; color: #E5C86C;
+            font-family: "Julius Sans One", sans-serif;
+            font-size: 1.2em; font-weight: 700;
+        }
+        header nav a:hover { color: #fff; }
     </style>
 </head>
 <body>
-    <h1>Translation Display</h1>
+    <header>
+        <div class="header-inner">
+            <div class="header-logos">
+                <a href="https://yadayah.com/"><img src="https://yadayah.com/wp-content/uploads/2026/01/logo.Manowrah.00081x00090.png" alt=""></a>
+                <a href="https://yadayah.com/"><img src="https://yadayah.com/wp-content/uploads/2026/01/yy.YadaYahowah.002.0352x0040.png" alt="Yada Yahowah"></a>
+            </div>
+            <nav>
+                <a href="https://yadayah.com/books">Books</a>
+                <a href="https://yadayah.com/blog">Blog</a>
+                <a href="https://yadayah.com/timeline">Timeline</a>
+                <a href="https://yadayah.com/media">Media</a>
+                <a href="https://yadayah.com/Craig_Winn">Craig&nbsp;Winn</a>
+                <a href="https://yadayah.com/music">Music</a>
+                <a href="https://yadayah.com/resources">Resources</a>
+            </nav>
+        </div>
+    </header>
 
     <div class="filters">
         <div class="filter-group">
@@ -37,7 +136,7 @@
                 <div class="checkbox-row">
                     <input type="checkbox" id="chapter-all" checked>
                     <label for="chapter-all">All</label>
-                    <input type="number" id="chapter" min="1" style="display: none;">
+                    <input type="number" id="chapter" min="1">
                 </div>
             </div>
 
@@ -46,104 +145,341 @@
                 <div class="checkbox-row">
                     <input type="checkbox" id="verse-all" checked>
                     <label for="verse-all">All</label>
-                    <input type="number" id="verse" min="1" style="display: none;">
+                    <input type="number" id="verse" min="1">
                 </div>
             </div>
         </div>
 
         <button onclick="fetchResults()">Go</button>
     </div>
+    <div id="result-count" style="font-size: 0.85rem; color: #555; margin-bottom: 5px;"></div>
 
+    <div id="initial-prompt" style="text-align: center; margin-top: 80px; font-size: 1.5rem; color: #666;">Select Translation Filters and Hit 'Go'</div>
+    <div id="word-link-status" style="font-size: 0.8rem; color: #888; margin-bottom: 5px;"></div>
     <div id="results" class="results"></div>
 
     <script>
+        // ── Word info store ──
+        var wordInfoStore = {};
+        var wordInfoCounter = 0;
+
+        function normalizeWord(text) {
+            return text.replace(/[\u2018\u2019\u2032]/g, "'").replace(/[\u2013\u2014]/g, '-').trim();
+        }
+
+        function escHtml(str) {
+            if (str == null) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // ── Load cite books ──
         async function loadCiteBooks() {
-            const response = await fetch('/api/cite-books.php');
-            const books = await response.json();
-            const select = document.getElementById('cite');
-            books.forEach(book => {
-                const option = document.createElement('option');
+            var response = await fetch('/api/cite-books.php');
+            var books = await response.json();
+            var select = document.getElementById('cite');
+            books.forEach(function(book) {
+                var option = document.createElement('option');
                 option.value = book.cite_book_id;
                 option.textContent = book.cite_book_hebrew + ' / ' + book.cite_book_common;
                 select.appendChild(option);
             });
         }
 
-        document.getElementById('cite').addEventListener('change', function() {
-            const filters = document.getElementById('chapter-verse-filters');
-            filters.style.display = this.value ? 'block' : 'none';
-        });
-
         document.getElementById('chapter-all').addEventListener('change', function() {
-            document.getElementById('chapter').style.display = this.checked ? 'none' : 'inline-block';
             if (this.checked) document.getElementById('chapter').value = '';
         });
 
+        document.getElementById('chapter').addEventListener('input', function() {
+            document.getElementById('chapter-all').checked = !this.value;
+        });
+
         document.getElementById('verse-all').addEventListener('change', function() {
-            document.getElementById('verse').style.display = this.checked ? 'none' : 'inline-block';
             if (this.checked) document.getElementById('verse').value = '';
         });
 
-        async function fetchResults() {
-            const citeId = document.getElementById('cite').value;
-            const chapterAll = document.getElementById('chapter-all').checked;
-            const verseAll = document.getElementById('verse-all').checked;
-            const chapter = !chapterAll ? document.getElementById('chapter').value : '';
-            const verse = !verseAll ? document.getElementById('verse').value : '';
+        document.getElementById('verse').addEventListener('input', function() {
+            document.getElementById('verse-all').checked = !this.value;
+        });
 
-            const params = new URLSearchParams();
+        // ── Fetch and display results ──
+        async function fetchResults() {
+            var citeId = document.getElementById('cite').value;
+            var chapterAll = document.getElementById('chapter-all').checked;
+            var verseAll = document.getElementById('verse-all').checked;
+            var chapter = !chapterAll ? document.getElementById('chapter').value : '';
+            var verse = !verseAll ? document.getElementById('verse').value : '';
+
+            var params = new URLSearchParams();
             if (citeId) params.set('cite_book_id', citeId);
             if (chapter) params.set('chapter', chapter);
             if (verse) params.set('verse', verse);
 
-            const response = await fetch('/api/display-translations.php?' + params);
-            const records = await response.json();
-            displayResults(records);
+            try {
+                var response = await fetch('/api/display-translations.php?' + params);
+                var records = await response.json();
+                await displayResults(records);
+            } catch (err) {
+                console.error('[TranslationDisplay] fetchResults error:', err);
+            }
         }
 
-        function displayResults(records) {
-            const resultsDiv = document.getElementById('results');
+        async function displayResults(records) {
+            var resultsDiv = document.getElementById('results');
+            var countDiv = document.getElementById('result-count');
             resultsDiv.innerHTML = '';
+            wordInfoStore = {};
+            wordInfoCounter = 0;
+
+            var initialPrompt = document.getElementById('initial-prompt');
+            if (initialPrompt) initialPrompt.style.display = 'none';
+
+            countDiv.textContent = records.length + ' translation' + (records.length !== 1 ? 's' : '') + ' found';
 
             if (records.length === 0) {
                 resultsDiv.textContent = 'No translations found.';
                 return;
             }
 
-            let lastCite = null, lastChapter = null, lastVerse = null;
+            // Step 1: Collect all italic words from all records
+            var wordsMap = {};
+            records.forEach(function(record) {
+                var html = record.translation_text_word || '';
+                var re = /<i[^>]*>([^<]+)<\/i>/gi;
+                var m;
+                while ((m = re.exec(html)) !== null) {
+                    var raw = m[1].trim();
+                    if (!raw) continue;
+                    var parts = normalizeWord(raw).split(/\s+/);
+                    for (var j = 0; j < parts.length; j++) {
+                        var w = parts[j].replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                        if (w.length > 1) wordsMap[w.toLowerCase()] = true;
+                    }
+                }
+            });
 
-            records.forEach(record => {
-                if (lastCite !== record.translation_cite || lastChapter !== record.translation_cite_chapter || lastVerse !== record.translation_cite_verse) {
-                    const breakDiv = document.createElement('div');
+            var wordList = Object.keys(wordsMap);
+            console.log('[TranslationDisplay] Extracted ' + wordList.length + ' unique italic words:', wordList.slice(0, 20));
+
+            // Step 2: Look up words, then render
+            var wordLookup = null;
+            if (wordList.length > 0) {
+                try {
+                    var lookupResp = await fetch('/api/word-lookup.php', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'text/plain' },
+                        body: wordList.join('|')
+                    });
+                    var lookupText = await lookupResp.text();
+                    console.log('[TranslationDisplay] word-lookup raw response (' + lookupText.length + ' chars):', lookupText.substring(0, 200));
+                    wordLookup = JSON.parse(lookupText);
+                    console.log('[TranslationDisplay] word-lookup returned ' + Object.keys(wordLookup).length + ' matches:', Object.keys(wordLookup));
+                } catch (err) {
+                    console.error('[TranslationDisplay] word-lookup failed:', err);
+                }
+            }
+
+            renderRecords(records, resultsDiv, wordLookup);
+
+            // After render: attach click handlers directly to each word-link element
+            var wordLinks = resultsDiv.querySelectorAll('.word-link');
+            console.log('[TranslationDisplay] Found ' + wordLinks.length + ' .word-link elements in DOM after render');
+            var statusEl = document.getElementById('word-link-status');
+            if (wordLinks.length > 0) {
+                statusEl.textContent = wordLinks.length + ' clickable word links found (click underlined italic words for details)';
+            } else {
+                statusEl.textContent = '';
+            }
+            wordLinks.forEach(function(el) {
+                el.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var wid = this.getAttribute('data-wid');
+                    var info = wid ? wordInfoStore[wid] : null;
+                    console.log('[TranslationDisplay] word-link clicked, wid=' + wid + ', info=' + (info ? 'found' : 'null'));
+                    if (info) showWordPopup(info, this);
+                });
+            });
+        }
+
+        function renderRecords(records, resultsDiv, wordLookup) {
+            var lastCiteBookId = null, lastChapter = null, lastVerse = null;
+            var linkCount = 0;
+
+            records.forEach(function(record) {
+                // Show section header when cite_book_id, chapter, or verse changes
+                if (lastCiteBookId !== record.translation_cite_book_id ||
+                    lastChapter !== record.translation_cite_chapter ||
+                    lastVerse !== record.translation_cite_verse) {
+                    var breakDiv = document.createElement('div');
                     breakDiv.className = 'section-break';
-                    const ch = record.translation_cite_chapter != null ? ' ' + record.translation_cite_chapter : '';
-                    const vs = record.translation_cite_verse != null ? ':' + record.translation_cite_verse : '';
-                    const citeName = record.cite_book_hebrew ? record.cite_book_hebrew + ' / ' + record.cite_book_common : (record.translation_cite || 'Unknown');
-                    breakDiv.textContent = citeName + ch + vs;
+                    var citeName = record.cite_book_hebrew
+                        ? record.cite_book_hebrew + ' / ' + record.cite_book_common
+                        : (record.translation_cite || 'Unknown');
+                    var ref = '';
+                    if (record.translation_cite_chapter != null) {
+                        ref += ' ' + record.translation_cite_chapter;
+                        if (record.translation_cite_verse != null) {
+                            ref += ':' + record.translation_cite_verse;
+                            if (record.translation_cite_verse_end != null) {
+                                ref += '-' + record.translation_cite_verse_end;
+                            }
+                        }
+                    }
+                    if (record.yy_volume_flip_code && record.translation_page) {
+                        var hdrUrl = 'https://book.yadayah.com/books/' + encodeURIComponent(record.yy_volume_flip_code) + '/#p=' + record.translation_page;
+                        var hdrLink = document.createElement('a');
+                        hdrLink.href = hdrUrl;
+                        hdrLink.target = '_blank';
+                        hdrLink.textContent = citeName + ref;
+                        hdrLink.style.color = 'inherit';
+                        hdrLink.style.textDecoration = 'none';
+                        breakDiv.appendChild(hdrLink);
+                    } else {
+                        breakDiv.textContent = citeName + ref;
+                    }
                     resultsDiv.appendChild(breakDiv);
-
-                    lastCite = record.translation_cite;
+                    lastCiteBookId = record.translation_cite_book_id;
                     lastChapter = record.translation_cite_chapter;
                     lastVerse = record.translation_cite_verse;
                 }
 
-                const recordDiv = document.createElement('div');
+                var recordDiv = document.createElement('div');
                 recordDiv.className = 'record';
-                const bookName = record.translation_book.replace(/^YY-/i, '');
-                const flipCode = record.yy_volume_flip_code;
-                const page = record.translation_page;
-                let bookPage;
+                var bookName = record.translation_book.replace(/^YY-/i, '');
+                var flipCode = record.yy_volume_flip_code;
+                var page = record.translation_page;
+                var bookPage;
                 if (flipCode && page) {
-                    const url = 'https://book.yadayah.com/books/' + encodeURIComponent(flipCode) + '/#p=' + page;
+                    var url = 'https://book.yadayah.com/books/' + encodeURIComponent(flipCode) + '/#p=' + page;
                     bookPage = '<a href="' + url + '" target="_blank"><strong>' + bookName + '</strong> - Page ' + page + '</a>';
                 } else {
                     bookPage = '<strong>' + bookName + '</strong> - Page ' + (page || '?');
                 }
-                recordDiv.innerHTML = bookPage + ':<br>' + record.translation_text_word;
+
+                // Pre-embed word links into HTML before DOM insertion
+                var html = record.translation_text_word || '';
+                if (wordLookup && typeof wordLookup === 'object' && !Array.isArray(wordLookup)) {
+                    html = html.replace(/<i([^>]*)>([^<]+)<\/i>/gi, function(full, attrs, text) {
+                        var raw = text.trim();
+                        if (!raw) return full;
+                        // Split into tokens preserving whitespace/punctuation between words
+                        var tokens = text.split(/(\s+)/);
+                        var anyMatch = false;
+                        var result = tokens.map(function(token) {
+                            if (/^\s+$/.test(token)) return token; // whitespace separator
+                            var normalized = normalizeWord(token).toLowerCase();
+                            var w = normalized.replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                            if (w && wordLookup[w]) {
+                                var wid = 'w' + (++wordInfoCounter);
+                                wordInfoStore[wid] = wordLookup[w];
+                                linkCount++;
+                                anyMatch = true;
+                                return '<i' + attrs + ' class="word-link" data-wid="' + wid + '">' + token + '</i>';
+                            }
+                            return '<i' + attrs + '>' + token + '</i>';
+                        }).join('');
+                        if (anyMatch) return result;
+                        return full;
+                    });
+                }
+
+                // Convert <br> to <p> paragraph tags
+                var paragraphs = html.split(/<br\s*\/?>/gi);
+                if (paragraphs.length > 1) {
+                    html = paragraphs.map(function(p) {
+                        var trimmed = p.trim();
+                        return trimmed ? '<p>' + trimmed + '</p>' : '';
+                    }).join('');
+                } else {
+                    html = '<p>' + html + '</p>';
+                }
+
+                recordDiv.innerHTML = bookPage + ':' + html;
                 resultsDiv.appendChild(recordDiv);
             });
+
+            console.log('[TranslationDisplay] renderRecords: embedded ' + linkCount + ' word links, wordInfoStore has ' + Object.keys(wordInfoStore).length + ' entries');
         }
 
+        // ── Show word popup ──
+        function showWordPopup(info, anchorEl) {
+            closeWordPopup();
+            var rect = anchorEl.getBoundingClientRect();
+
+            var grammarParts = [];
+            if (info.word_flag_gender_m) grammarParts.push('m');
+            if (info.word_flag_gender_f) grammarParts.push('f');
+            if (info.word_flag_plural) grammarParts.push('pl');
+            if (info.word_flag_noun) grammarParts.push('noun');
+            if (info.word_flag_verb) grammarParts.push('verb');
+            if (info.word_flag_adjective) grammarParts.push('adj');
+            if (info.word_flag_adverb) grammarParts.push('adv');
+            if (info.word_flag_preposition) grammarParts.push('prep');
+            if (info.word_flag_conjunction) grammarParts.push('conj');
+            if (info.word_flag_subst) grammarParts.push('subst');
+
+            var html = '';
+            var hasLeft = info.word_spellings && info.word_spellings.length > 0;
+            var hasRight = info.word_yt || info.word_hebrew;
+            if (hasLeft || hasRight) {
+                html += '<div class="wp-top">';
+                html += '<div class="wp-top-left">';
+                if (hasLeft) {
+                    html += '<div class="wp-spellings">' + info.word_spellings.map(function(s) { return '<div>' + escHtml(s) + '</div>'; }).join('') + '</div>';
+                }
+                html += '</div>';
+                html += '<div class="wp-top-right">';
+                if (info.word_yt) {
+                    html += '<div class="wp-yt">' + escHtml(info.word_yt) + '</div>';
+                }
+                if (info.word_hebrew) {
+                    html += '<div class="wp-hebrew">' + escHtml(info.word_hebrew) + '</div>';
+                }
+                html += '</div>';
+                html += '</div>';
+            }
+            if (info.word_strongs) {
+                html += '<div class="wp-strongs"><a href="http://lexiconcordance.com/hebrew/' + encodeURIComponent(info.word_strongs.trim()) + '.html" target="_blank">' + escHtml(info.word_strongs.trim()) + '</a></div>';
+            }
+            if (grammarParts.length > 0) {
+                html += '<div class="wp-grammar">' + escHtml(grammarParts.join(' ')) + '</div>';
+            }
+            if (info.word_definition) {
+                html += '<hr>';
+                html += '<div class="wp-definition">' + escHtml(info.word_definition) + '</div>';
+            }
+
+            var overlay = document.createElement('div');
+            overlay.className = 'word-popup-overlay';
+            overlay.id = 'word-popup-overlay';
+            overlay.addEventListener('click', closeWordPopup);
+            document.body.appendChild(overlay);
+
+            var popup = document.createElement('div');
+            popup.className = 'word-popup';
+            popup.id = 'word-popup';
+            popup.innerHTML = html;
+            document.body.appendChild(popup);
+
+            var popupH = popup.offsetHeight;
+            var popupW = popup.offsetWidth;
+            var top = rect.bottom + 6;
+            var left = rect.left;
+            if (top + popupH > window.innerHeight) top = rect.top - popupH - 6;
+            if (left + popupW > window.innerWidth) left = window.innerWidth - popupW - 10;
+            if (left < 10) left = 10;
+            popup.style.top = top + 'px';
+            popup.style.left = left + 'px';
+        }
+
+        function closeWordPopup() {
+            var popup = document.getElementById('word-popup');
+            var overlay = document.getElementById('word-popup-overlay');
+            if (popup) popup.remove();
+            if (overlay) overlay.remove();
+        }
+
+        // ── Init ──
         loadCiteBooks();
     </script>
 </body>

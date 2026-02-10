@@ -37,7 +37,7 @@ switch ($method) {
         $stmt = $db->prepare("
             INSERT INTO yy_user_preference (yy_user_key, yy_preference_name, yy_preference_value)
             VALUES (?, ?, ?)
-            ON DUPLICATE KEY UPDATE yy_preference_value = VALUES(yy_preference_value)
+            ON CONFLICT (yy_user_key, yy_preference_name) DO UPDATE SET yy_preference_value = EXCLUDED.yy_preference_value
         ");
         $stmt->execute([$user['user_key'], $data['name'], $value]);
         jsonResponse(['saved' => true]);

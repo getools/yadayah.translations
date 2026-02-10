@@ -16,6 +16,7 @@ import re
 import sys
 import argparse
 import logging
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional
 from enum import Enum
@@ -166,35 +167,22 @@ def init_database(conn) -> None:
         # Create translation table if it doesn't exist
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS translation (
-                id SERIAL PRIMARY KEY,
-                book VARCHAR(255) NOT NULL,
-                page INTEGER,
-                text_word TEXT NOT NULL,
-                cite VARCHAR(500),
-                cite_hebrew VARCHAR(255),
-                cite_common VARCHAR(255),
-                cite_chapter INTEGER,
-                cite_verse INTEGER,
-                cite_verse_end SMALLINT,
-                cite_note VARCHAR(500),
-                cite_book_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                translation_id SERIAL PRIMARY KEY,
+                translation_book VARCHAR(255) NOT NULL,
+                translation_page INTEGER,
+                translation_text_word TEXT NOT NULL,
+                translation_cite VARCHAR(500),
+                translation_cite_hebrew VARCHAR(255),
+                translation_cite_common VARCHAR(255),
+                translation_cite_chapter INTEGER,
+                translation_cite_verse INTEGER,
+                translation_cite_verse_end SMALLINT,
+                translation_cite_note VARCHAR(500),
+                translation_cite_book_id INTEGER,
+                translation_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                yy_volume_id INTEGER
             )
         """)
-
-        # Add columns if they don't exist (migration)
-        for col in ('cite_chapter INTEGER', 'cite_verse INTEGER',
-                     'cite_hebrew VARCHAR(255)', 'cite_common VARCHAR(255)',
-                     'cite_verse_end SMALLINT', 'cite_note VARCHAR(500)',
-                     'cite_book_id INTEGER'):
-            col_name = col.split()[0]
-            cursor.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'translation' AND column_name = %s
-            """, (col_name,))
-            if not cursor.fetchone():
-                cursor.execute(f"ALTER TABLE translation ADD COLUMN {col}")
-                logging.info(f"Added column '{col_name}' to translation table")
 
         # Create cite table
         cursor.execute("""
@@ -229,10 +217,10 @@ def init_database(conn) -> None:
 
         # Create indexes
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_book ON translation(book)
+            CREATE INDEX IF NOT EXISTS idx_book ON translation(translation_book)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_page ON translation(page)
+            CREATE INDEX IF NOT EXISTS idx_page ON translation(translation_page)
         """)
 
         conn.commit()
@@ -246,13 +234,16 @@ def init_database(conn) -> None:
         sys.exit(1)
 
 
-def get_page_numbers_for_doc_com(doc_path: str, para_indices: List[int], timeout: int = 120) -> Dict[int, int]:
+def get_page_numbers_for_doc_com(doc_path: str, para_texts: Dict[int, str], timeout: int = 120) -> Dict[int, int]:
     """
     Get page numbers for one document using a VBScript that automates Word.
 
+    Uses text-based Find to locate paragraphs instead of index-based lookup,
+    avoiding the mismatch between python-docx and COM paragraph indexing.
+
     Args:
         doc_path: Absolute path to .docx file
-        para_indices: List of 0-based paragraph indices
+        para_texts: Dict mapping para_index -> first ~150 chars of paragraph text
         timeout: Seconds to wait before giving up
 
     Returns:
@@ -260,12 +251,18 @@ def get_page_numbers_for_doc_com(doc_path: str, para_indices: List[int], timeout
     """
     import subprocess, tempfile
 
-    if not para_indices:
+    if not para_texts:
         return {}
 
-    inp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
-    for idx in para_indices:
-        inp.write(f"{idx}\n")
+    # Sort by para index so searches progress through the document in order
+    sorted_items = sorted(para_texts.items(), key=lambda x: x[0])
+
+    # Write search texts to temp file: para_idx|search_text
+    inp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-16')
+    for idx, text in sorted_items:
+        # Escape pipe characters in text and trim
+        safe_text = text.replace('|', ' ').replace('\r', ' ').replace('\n', ' ')
+        inp.write(f"{idx}|{safe_text}\n")
     inp.close()
 
     out = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
@@ -273,14 +270,14 @@ def get_page_numbers_for_doc_com(doc_path: str, para_indices: List[int], timeout
 
     vbs_content = f'''
 Dim word, fso, inputFile, outputFile
-Dim line, paraIdx, pageNum, ci
+Dim line, parts, paraIdx, searchText, pageNum
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set word = CreateObject("Word.Application")
 word.Visible = False
 word.DisplayAlerts = 0
 
-Set inputFile = fso.OpenTextFile("{inp.name}", 1, False)
+Set inputFile = fso.OpenTextFile("{inp.name}", 1, False, -1)
 Set outputFile = fso.CreateTextFile("{out.name}", True, False)
 
 WScript.StdErr.WriteLine "Opening document..."
@@ -288,17 +285,39 @@ Dim doc
 Set doc = word.Documents.Open("{doc_path}", , True)
 WScript.StdErr.WriteLine "Opened, paragraphs: " & doc.Paragraphs.Count
 
+Dim rng
+Dim lastPos
+lastPos = 0
+
 Do While Not inputFile.AtEndOfStream
     line = inputFile.ReadLine()
-    paraIdx = CInt(line)
-    ci = paraIdx + 1
-    If ci <= doc.Paragraphs.Count Then
-        On Error Resume Next
-        pageNum = doc.Paragraphs(ci).Range.Information(3)
-        If Err.Number = 0 Then
-            outputFile.WriteLine paraIdx & "|" & pageNum
+    If Len(line) > 0 Then
+        Dim pipePos
+        pipePos = InStr(line, "|")
+        If pipePos > 0 Then
+            paraIdx = Left(line, pipePos - 1)
+            searchText = Mid(line, pipePos + 1)
+
+            If Len(searchText) > 0 Then
+                Set rng = doc.Content.Duplicate
+                rng.SetRange lastPos, doc.Content.End
+                rng.Find.ClearFormatting
+                rng.Find.Text = searchText
+                rng.Find.Forward = True
+                rng.Find.Wrap = 0
+                rng.Find.MatchWildcards = False
+                rng.Find.MatchCase = True
+
+                On Error Resume Next
+                rng.Find.Execute
+                If Err.Number = 0 And rng.Find.Found Then
+                    pageNum = rng.Information(1)
+                    outputFile.WriteLine paraIdx & "|" & pageNum
+                    lastPos = rng.Start
+                End If
+                On Error GoTo 0
+            End If
         End If
-        On Error GoTo 0
     End If
 Loop
 
@@ -359,6 +378,7 @@ WScript.StdErr.WriteLine "Done"
                 pass
 
 
+
 def build_page_map_from_xml(doc_path: Path) -> Dict[int, int]:
     """
     Build a paragraph-to-page map from XML page breaks and section restarts.
@@ -366,57 +386,63 @@ def build_page_map_from_xml(doc_path: Path) -> Dict[int, int]:
     Fallback method when COM automation is unavailable or times out.
     Uses lastRenderedPageBreak and explicit page breaks from the XML.
 
+    Returns python-docx-compatible indices (top-level paragraphs only),
+    but tracks page breaks in ALL paragraphs including those inside tables.
+
     Args:
         doc_path: Path to .docx file
 
     Returns:
-        Dict mapping 0-based paragraph index -> estimated page number
+        Dict mapping python-docx 0-based paragraph index -> estimated page number
     """
-    from lxml import etree
-
     doc = Document(str(doc_path))
     nsmap = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 
-    # Find section page number restarts
-    section_starts = {}  # para_idx -> restart page number
     body = doc.element.body
-    para_elements = body.findall('.//w:p', nsmap)
 
-    # Check each section's pgNumType for page number restart
+    # Use findall for both to get consistent Python object identities
+    direct_paras = body.findall('w:p', nsmap)
+    all_paras = body.findall('.//w:p', nsmap)
+    top_level_ids = set(id(p) for p in direct_paras)
+
+    # Find section page number restarts (keyed by absolute para index)
+    section_starts = {}
     for sect in body.findall('.//w:sectPr', nsmap):
         pg_num = sect.find('w:pgNumType', nsmap)
         if pg_num is not None:
             start_val = pg_num.get(f'{{{nsmap["w"]}}}start')
             if start_val:
-                # Find which paragraph this section applies to
                 parent = sect.getparent()
                 if parent.tag == f'{{{nsmap["w"]}}}body':
                     # Last sectPr in body - applies to last paragraph
                     pass
                 elif parent.tag == f'{{{nsmap["w"]}}}pPr':
                     p_elem = parent.getparent()
-                    for pi, pe in enumerate(para_elements):
+                    for pi, pe in enumerate(all_paras):
                         if pe is p_elem:
                             section_starts[pi] = int(start_val)
                             break
 
-    # Build page map using page breaks
+    # Build page map tracking ALL paragraphs but only recording top-level ones
     page = 1
     para_to_page = {}
+    docx_idx = 0
 
-    for pi, para_elem in enumerate(para_elements):
+    for abs_idx, para_elem in enumerate(all_paras):
         # Check for section restart
-        if pi in section_starts:
-            page = section_starts[pi]
+        if abs_idx in section_starts:
+            page = section_starts[abs_idx]
 
-        para_to_page[pi] = page
+        # Only record page for top-level paragraphs (matching doc.paragraphs)
+        if id(para_elem) in top_level_ids:
+            para_to_page[docx_idx] = page
+            docx_idx += 1
 
-        # Check for page breaks within this paragraph
+        # Check for page breaks within this paragraph (including table paras)
+        # Only count lastRenderedPageBreak (placed by Word on last save);
+        # explicit <w:br type="page"> breaks are already reflected in lastRenderedPageBreak
         for br in para_elem.findall('.//w:lastRenderedPageBreak', nsmap):
             page += 1
-        for br in para_elem.findall('.//w:br', nsmap):
-            if br.get(f'{{{nsmap["w"]}}}type') == 'page':
-                page += 1
 
     return para_to_page
 
@@ -424,6 +450,9 @@ def build_page_map_from_xml(doc_path: Path) -> Dict[int, int]:
 def get_all_page_numbers(doc_para_map: Dict[str, List[int]]) -> Dict[str, Dict[int, int]]:
     """
     Get page numbers for all documents. Tries COM per document, falls back to XML.
+
+    Uses text-based Find in VBScript to locate paragraphs, avoiding mismatches
+    between python-docx and COM paragraph indexing.
 
     Args:
         doc_para_map: Dict mapping absolute doc path -> list of 0-based paragraph indices
@@ -454,24 +483,56 @@ def get_all_page_numbers(doc_para_map: Dict[str, List[int]]) -> Dict[str, Dict[i
 
         logging.info(f"  {doc_name} ({file_size_mb:.1f}MB, {len(indices)} paras, timeout {timeout}s)")
 
-        page_map = get_page_numbers_for_doc_com(doc_path, indices, timeout=timeout)
+        # Get paragraph text for text-based Find (avoids index mapping issues)
+        doc = Document(str(doc_path))
+        para_texts = {}
+        for idx in indices:
+            if idx < len(doc.paragraphs):
+                raw_text = doc.paragraphs[idx].text.strip()
+                # Use first 150 chars as search text (enough for uniqueness)
+                snippet = raw_text[:150] if len(raw_text) > 150 else raw_text
+                if snippet:
+                    para_texts[idx] = snippet
+
+        page_map = get_page_numbers_for_doc_com(doc_path, para_texts, timeout=timeout)
 
         if page_map:
             all_page_numbers[doc_path] = page_map
             com_success += 1
             logging.info(f"    COM: {len(page_map)}/{len(indices)} page numbers")
         else:
-            # Fall back to XML-based page estimation
-            # Subtract 6 because first 6 pages are unnumbered front matter
-            logging.info(f"    COM failed, using XML fallback (subtracting 6 for front matter)")
+            # Try re-saving via python-docx to create a clean copy (strips problematic elements)
+            logging.info(f"    COM failed on original, trying clean copy via python-docx...")
             try:
-                full_page_map = build_page_map_from_xml(Path(doc_path))
-                page_map = {idx: max(1, full_page_map.get(idx, 7) - 6) for idx in indices}
-                all_page_numbers[doc_path] = page_map
-                xml_fallback += 1
-                logging.info(f"    XML: {len(page_map)} page numbers (estimated, -6 adjusted)")
+                clean_dir = tempfile.mkdtemp()
+                clean_path = os.path.join(clean_dir, "clean_copy.docx")
+                clean_doc = Document(str(doc_path))
+                clean_doc.save(clean_path)
+                page_map = get_page_numbers_for_doc_com(clean_path, para_texts, timeout=timeout)
+                try:
+                    os.unlink(clean_path)
+                    os.rmdir(clean_dir)
+                except:
+                    pass
             except Exception as e:
-                logging.warning(f"    XML fallback also failed: {e}")
+                logging.warning(f"    Clean copy attempt failed: {e}")
+                page_map = {}
+
+            if page_map:
+                all_page_numbers[doc_path] = page_map
+                com_success += 1
+                logging.info(f"    COM (clean copy): {len(page_map)}/{len(indices)} page numbers")
+            else:
+                # Fall back to XML-based page mapping using lastRenderedPageBreak + pgNumType restarts
+                logging.info(f"    COM failed on clean copy too, using XML fallback")
+                try:
+                    full_page_map = build_page_map_from_xml(Path(doc_path))
+                    page_map = {idx: full_page_map.get(idx, 1) for idx in indices}
+                    all_page_numbers[doc_path] = page_map
+                    xml_fallback += 1
+                    logging.info(f"    XML: {len(page_map)} page numbers (from lastRenderedPageBreak + pgNumType)")
+                except Exception as e:
+                    logging.warning(f"    XML fallback also failed: {e}")
 
     logging.info(f"Page numbers: {com_success} docs via COM, {xml_fallback} docs via XML fallback")
     return all_page_numbers
@@ -1007,8 +1068,10 @@ def save_translation(conn, translation_data: Dict[str, any]) -> bool:
         cursor = conn.cursor()
 
         cursor.execute("""
-            INSERT INTO translation (book, page, text_word, cite, cite_hebrew, cite_common,
-                                     cite_chapter, cite_verse, cite_verse_end, cite_note)
+            INSERT INTO translation (translation_book, translation_page, translation_text_word,
+                                     translation_cite, translation_cite_hebrew, translation_cite_common,
+                                     translation_cite_chapter, translation_cite_verse,
+                                     translation_cite_verse_end, translation_cite_note)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             translation_data['book'],
@@ -1044,8 +1107,8 @@ def populate_cite_table(conn) -> int:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO cite (label)
-            SELECT DISTINCT cite FROM translation
-            WHERE cite IS NOT NULL
+            SELECT DISTINCT translation_cite FROM translation
+            WHERE translation_cite IS NOT NULL
             ON CONFLICT (label) DO NOTHING
         """)
         count = cursor.rowcount
@@ -1070,10 +1133,10 @@ def update_cite_book_ids(conn) -> int:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE translation t
-            SET cite_book_id = cbm.cite_book_id
+            SET translation_cite_book_id = cbm.cite_book_id
             FROM cite_book_map cbm
-            WHERE t.cite_hebrew = cbm.cite_book_map_hebrew
-              AND t.cite_book_id IS NULL
+            WHERE t.translation_cite_hebrew = cbm.cite_book_map_hebrew
+              AND t.translation_cite_book_id IS NULL
         """)
         count = cursor.rowcount
         conn.commit()

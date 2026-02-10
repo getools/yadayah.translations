@@ -152,7 +152,7 @@ function handlePost(PDO $db, array $user): void {
         isset($data['yy_translation_sort']) && $data['yy_translation_sort'] !== '' ? (int)$data['yy_translation_sort'] : 0,
     ]);
 
-    $newKey = $db->lastInsertId();
+    $newKey = $db->lastInsertId('yy_translation_yy_translation_key_seq');
 
     $stmt = $db->prepare("
         SELECT t.*, s.yah_scroll_label_yy, s.yah_scroll_label_common,

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Yada Yah Translation Entry</title>
-    <link rel="stylesheet" href="css/app.css">
+    <link rel="stylesheet" href="css/app.css?v=9">
 </head>
 <body>
     <!-- Login -->
@@ -74,6 +74,11 @@
                     <button id="btn-add" class="btn btn-primary">Add New Translation</button>
                 </div>
                 <div id="translations-list"></div>
+                <div id="imported-translations-section" style="display: none;">
+                    <h3 id="imported-translations-title" class="imported-title">Published Translations</h3>
+                    <div id="imported-translations-list"></div>
+                    <div id="word-link-status" style="font-size:0.8rem;color:#888;margin-top:8px;"></div>
+                </div>
             </div>
 
             <!-- Translation Entry Form -->
@@ -175,6 +180,6 @@
 
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="js/tinymce/tinymce.min.js"></script>
-    <script src="js/app.js"></script>
+    <script src="js/app.js?v=9"></script>
 </body>
 </html>

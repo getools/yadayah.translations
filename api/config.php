@@ -20,15 +20,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 function getDb(): PDO {
     static $pdo = null;
     if ($pdo === null) {
-        $host = getenv('DB_HOST') ?: 'db';
-        $name = getenv('DB_NAME') ?: 'yada_translations';
-        $user = getenv('DB_USER') ?: 'yada';
-        $pass = getenv('DB_PASS') ?: 'yada_pass';
-        $dsn = "mysql:host=$host;dbname=$name;charset=utf8mb4";
+        $host = getenv('PG_HOST') ?: 'postgres';
+        $name = getenv('PG_DB')   ?: 'yada';
+        $user = getenv('PG_USER') ?: 'postgres';
+        $pass = getenv('PG_PASS') ?: 'yada_password';
+        $dsn = "pgsql:host=$host;dbname=$name";
         $pdo = new PDO($dsn, $user, $pass, [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
         ]);
     }
     return $pdo;
@@ -56,5 +55,5 @@ function requireAuth(): array {
 }
 
 function setCurrentUser(PDO $db, int $userKey): void {
-    $db->exec("SET @current_user_key = " . intval($userKey));
+    $db->exec("SET app.current_user_key = '" . intval($userKey) . "'");
 }
