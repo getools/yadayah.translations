@@ -257,12 +257,13 @@ def get_page_numbers_for_doc_com(doc_path: str, para_texts: Dict[int, str], time
     # Sort by para index so searches progress through the document in order
     sorted_items = sorted(para_texts.items(), key=lambda x: x[0])
 
-    # Write search texts to temp file: para_idx|search_text
+    # Write search texts to temp file: para_idx<TAB>search_text
     inp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-16')
     for idx, text in sorted_items:
-        # Escape pipe characters in text and trim
-        safe_text = text.replace('|', ' ').replace('\r', ' ').replace('\n', ' ')
-        inp.write(f"{idx}|{safe_text}\n")
+        safe_text = text.replace('\t', ' ').replace('\r', ' ').replace('\n', ' ')
+        # Escape ^ for Word Find (^ is a special char prefix in Word's Find, e.g. ^p=paragraph)
+        safe_text = safe_text.replace('^', '^^')
+        inp.write(f"{idx}\t{safe_text}\n")
     inp.close()
 
     out = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
@@ -292,11 +293,11 @@ lastPos = 0
 Do While Not inputFile.AtEndOfStream
     line = inputFile.ReadLine()
     If Len(line) > 0 Then
-        Dim pipePos
-        pipePos = InStr(line, "|")
-        If pipePos > 0 Then
-            paraIdx = Left(line, pipePos - 1)
-            searchText = Mid(line, pipePos + 1)
+        Dim tabPos
+        tabPos = InStr(line, vbTab)
+        If tabPos > 0 Then
+            paraIdx = Left(line, tabPos - 1)
+            searchText = Mid(line, tabPos + 1)
 
             If Len(searchText) > 0 Then
                 Set rng = doc.Content.Duplicate
@@ -312,7 +313,7 @@ Do While Not inputFile.AtEndOfStream
                 rng.Find.Execute
                 If Err.Number = 0 And rng.Find.Found Then
                     pageNum = rng.Information(1)
-                    outputFile.WriteLine paraIdx & "|" & pageNum
+                    outputFile.WriteLine paraIdx & vbTab & pageNum
                     lastPos = rng.Start
                 End If
                 On Error GoTo 0
@@ -352,7 +353,7 @@ WScript.StdErr.WriteLine "Done"
                         continue
                     if line.startswith('\ufeff'):
                         line = line[1:]
-                    parts = line.split('|')
+                    parts = line.split('\t')
                     if len(parts) >= 2:
                         page_map[int(parts[0])] = int(parts[1])
 

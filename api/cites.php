@@ -6,5 +6,5 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 }
 
 $pdo = getDb();
-$stmt = $pdo->query("SELECT id, label, sort FROM cite ORDER BY sort DESC, label ASC");
+$stmt = $pdo->query("SELECT id, label, sort FROM yy_cite ORDER BY sort DESC, label ASC");
 jsonResponse($stmt->fetchAll());

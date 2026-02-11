@@ -17,7 +17,7 @@ if ($citeIds === '') {
         SELECT DISTINCT translation_cite_chapter
         FROM translation
         WHERE translation_cite_chapter IS NOT NULL
-          AND translation_cite IN (SELECT label FROM cite WHERE id IN ($placeholders))
+          AND translation_cite IN (SELECT label FROM yy_cite WHERE id IN ($placeholders))
         ORDER BY translation_cite_chapter
     ");
     $stmt->execute($ids);

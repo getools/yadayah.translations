@@ -326,7 +326,7 @@
                         }
                     }
                     if (record.yy_volume_flip_code) {
-                        var hdrUrl = 'https://book.yadayah.com/books/' + encodeURIComponent(record.yy_volume_flip_code) + '/#p=' + (record.translation_page || 1);
+                        var hdrUrl = 'https://book.yadayah.com/books/' + encodeURIComponent(record.yy_volume_flip_code) + '/' + (record.translation_page ? '#p=' + record.translation_page : '');
                         var hdrLink = document.createElement('a');
                         hdrLink.href = hdrUrl;
                         hdrLink.target = '_blank';
@@ -350,10 +350,10 @@
                 var page = record.translation_page;
                 var bookPage;
                 if (flipCode) {
-                    var url = 'https://book.yadayah.com/books/' + encodeURIComponent(flipCode) + '/#p=' + (page || 1);
-                    bookPage = '<a href="' + url + '" target="_blank"><strong>' + bookName + '</strong> - Page ' + (page || 1) + '</a>';
+                    var url = 'https://book.yadayah.com/books/' + encodeURIComponent(flipCode) + '/' + (page ? '#p=' + page : '');
+                    bookPage = '<a href="' + url + '" target="_blank"><strong>' + bookName + '</strong> - Page ' + (page || '?') + '</a>';
                 } else {
-                    bookPage = '<strong>' + bookName + '</strong> - Page ' + (page || 1);
+                    bookPage = '<strong>' + bookName + '</strong> - Page ' + (page || '?');
                 }
 
                 // Pre-embed word links into HTML before DOM insertion

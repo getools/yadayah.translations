@@ -19,7 +19,7 @@ if ($citeBookId !== null) {
     $conditions[] = "t.translation_cite_book_id = ?";
     $params[] = $citeBookId;
 } elseif ($scrollKey !== null) {
-    $conditions[] = "t.translation_cite_book_id IN (SELECT cite_book_id FROM cite_book WHERE yah_scroll_key = ?)";
+    $conditions[] = "t.translation_cite_book_id IN (SELECT cite_book_id FROM yy_cite_book WHERE yah_scroll_key = ?)";
     $params[] = $scrollKey;
 }
 
@@ -43,7 +43,7 @@ $stmt = $pdo->prepare("
            cb.cite_book_hebrew, cb.cite_book_common
     FROM translation t
     LEFT JOIN yy_volume v ON v.yy_volume_file = t.translation_book
-    LEFT JOIN cite_book cb ON t.translation_cite_book_id = cb.cite_book_id
+    LEFT JOIN yy_cite_book cb ON t.translation_cite_book_id = cb.cite_book_id
     $where
     ORDER BY cb.cite_book_sort ASC, cb.cite_book_hebrew ASC, t.translation_cite_chapter ASC, t.translation_cite_verse ASC, t.translation_book, t.translation_page
 ");

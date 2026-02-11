@@ -15,7 +15,7 @@ $params = [];
 if ($citeIds !== '') {
     $ids = array_map('intval', explode(',', $citeIds));
     $placeholders = implode(',', array_fill(0, count($ids), '?'));
-    $conditions[] = "translation_cite IN (SELECT label FROM cite WHERE id IN ($placeholders))";
+    $conditions[] = "translation_cite IN (SELECT label FROM yy_cite WHERE id IN ($placeholders))";
     $params = $ids;
 }
 
