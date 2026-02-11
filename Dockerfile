@@ -21,6 +21,9 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# Set default.html as the directory index
+RUN sed -i 's/DirectoryIndex .*/DirectoryIndex default.html index.html index.php/' /etc/apache2/mods-enabled/dir.conf
+
 EXPOSE 80
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["apache2-foreground"]
