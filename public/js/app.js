@@ -114,16 +114,18 @@ $(function () {
     // ════════════════════════════════════════════
     // SELECT HELPERS
     // ════════════════════════════════════════════
-    function populateSelect($sel, items, valueField, textFn) {
-        $sel.empty().append('<option value="">-- Select --</option>');
+    function populateSelect($sel, items, valueField, textFn, defaultLabel) {
+        var label = defaultLabel || '-- Select --';
+        $sel.empty().append('<option value="">' + label + '</option>');
         $.each(items, function (_, item) {
             $sel.append($('<option>').val(item[valueField]).text(textFn(item)));
         });
         $sel.prop('disabled', false);
     }
 
-    function resetSelect($sel) {
-        $sel.empty().append('<option value="">-- Select --</option>').prop('disabled', true);
+    function resetSelect($sel, defaultLabel) {
+        var label = defaultLabel || '-- Select --';
+        $sel.empty().append('<option value="">' + label + '</option>').prop('disabled', true);
     }
 
     // ════════════════════════════════════════════
@@ -238,9 +240,13 @@ $(function () {
         initEditor();
         // Load scrolls
         apiCall('scrolls.php').done(function (data) {
-            populateSelect($('#scroll'), data, 'yah_scroll_key', function (s) {
-                return s.yah_scroll_label_yy + ' / ' + s.yah_scroll_label_common;
+            var $sel = $('#scroll');
+            $sel.empty().append('<option value="">-- Select --</option>');
+            $sel.append('<option value="all">All</option>');
+            $.each(data, function (_, s) {
+                $sel.append($('<option>').val(s.yah_scroll_key).text(s.yah_scroll_label_yy + ' / ' + s.yah_scroll_label_common));
             });
+            $sel.prop('disabled', false);
         });
         // Load series
         apiCall('series.php').done(function (data) {
@@ -259,7 +265,7 @@ $(function () {
         apiCall('chapters.php?scroll_key=' + scrollKey).done(function (data) {
             populateSelect($('#chapter'), data, 'yah_chapter_key', function (c) {
                 return c.yah_chapter_number;
-            });
+            }, 'All');
             if (cb) cb();
         });
     }
@@ -268,42 +274,48 @@ $(function () {
         apiCall('verses.php?chapter_key=' + chapterKey).done(function (data) {
             populateSelect($('#verse'), data, 'yah_verse_key', function (v) {
                 return v.yah_verse_number;
-            });
+            }, 'All');
             if (cb) cb();
         });
     }
 
     $('#scroll').on('change', function () {
         var key = $(this).val();
-        currentScrollKey = key || null;
         currentChapterKey = null;
         currentVerseKey = null;
-        resetSelect($('#chapter'));
-        resetSelect($('#verse'));
-        hideTranslations();
+        resetSelect($('#chapter'), 'All');
+        resetSelect($('#verse'), 'All');
         hideForm();
-        if (key) loadChaptersForScroll(key);
+        if (key === 'all') {
+            currentScrollKey = 'all';
+            loadTranslations();
+        } else if (key) {
+            currentScrollKey = key;
+            loadChaptersForScroll(key);
+            loadTranslations();
+        } else {
+            currentScrollKey = null;
+            hideTranslations();
+        }
     });
 
     $('#chapter').on('change', function () {
         var key = $(this).val();
         currentChapterKey = key || null;
         currentVerseKey = null;
-        resetSelect($('#verse'));
-        hideTranslations();
+        resetSelect($('#verse'), 'All');
         hideForm();
-        if (key) loadVersesForChapter(key);
+        if (key) {
+            loadVersesForChapter(key);
+        }
+        loadTranslations();
     });
 
     $('#verse').on('change', function () {
         var key = $(this).val();
         currentVerseKey = key || null;
         hideForm();
-        if (key) {
-            loadTranslations();
-        } else {
-            hideTranslations();
-        }
+        loadTranslations();
     });
 
     // ════════════════════════════════════════════
@@ -346,13 +358,33 @@ $(function () {
     // TRANSLATIONS LIST (verse view)
     // ════════════════════════════════════════════
     function loadTranslations() {
-        if (!currentVerseKey) return;
-        var scrollText = $('#scroll option:selected').text();
-        var chapterText = $('#chapter option:selected').text();
-        var verseText = $('#verse option:selected').text();
-        $('#translations-title').text('Translations for ' + scrollText + ' ' + chapterText + ':' + verseText);
+        if (!currentScrollKey) return;
 
-        apiCall('translations.php?verse_key=' + currentVerseKey).done(function (data) {
+        // Build API URL based on active filters
+        var url;
+        if (currentScrollKey === 'all') {
+            url = 'translations.php?all_translations=1';
+        } else {
+            url = 'translations.php?scroll_key=' + currentScrollKey;
+            if (currentChapterKey) url += '&chapter_key=' + currentChapterKey;
+            if (currentVerseKey) url += '&verse_key=' + currentVerseKey;
+        }
+
+        // Build title
+        var scrollText = $('#scroll option:selected').text();
+        var title = 'Translations';
+        if (currentScrollKey !== 'all') {
+            title += ' for ' + scrollText;
+            if (currentChapterKey) {
+                title += ' ' + $('#chapter option:selected').text();
+                if (currentVerseKey) {
+                    title += ':' + $('#verse option:selected').text();
+                }
+            }
+        }
+        $('#translations-title').text(title);
+
+        apiCall(url).done(function (data) {
             renderTranslationCards(data);
             processWordLinks($('#translations-list'));
             $('#translations-section').show();
@@ -365,8 +397,14 @@ $(function () {
             }
         });
 
-        // Also load published (docx-imported) translations for this verse
-        loadImportedTranslations(chapterText, verseText);
+        // Also load published (docx-imported) translations if filtered to a specific verse
+        if (currentVerseKey) {
+            var chapterText = $('#chapter option:selected').text();
+            var verseText = $('#verse option:selected').text();
+            loadImportedTranslations(chapterText, verseText);
+        } else {
+            $('#imported-translations-section').hide();
+        }
     }
 
     function loadImportedTranslations(chapterNum, verseNum) {

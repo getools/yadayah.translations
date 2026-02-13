@@ -75,11 +75,37 @@ function handleGet(PDO $db, array $user): void {
         jsonResponse($row);
     }
 
-    // Translations for a verse
+    // Translations with flexible filtering: scroll_key, chapter_key, verse_key
+    $scrollKey = $_GET['scroll_key'] ?? null;
+    $chapterKey = $_GET['chapter_key'] ?? null;
     $verseKey = $_GET['verse_key'] ?? null;
-    if (!$verseKey || !ctype_digit($verseKey)) {
-        errorResponse('verse_key, translation_key, or list=all is required');
+
+    // Must have at least one filter (or use list=all above)
+    if (!$verseKey && !$chapterKey && !$scrollKey) {
+        // Show all translations if 'all_translations' flag is set
+        if (isset($_GET['all_translations'])) {
+            $scrollKey = null; // no filter
+        } else {
+            errorResponse('verse_key, chapter_key, scroll_key, all_translations, translation_key, or list=all is required');
+        }
     }
+
+    $where = [];
+    $params = [];
+    if ($scrollKey && ctype_digit($scrollKey)) {
+        $where[] = 't.yah_scroll_key = ?';
+        $params[] = (int)$scrollKey;
+    }
+    if ($chapterKey && ctype_digit($chapterKey)) {
+        $where[] = 't.yah_chapter_key = ?';
+        $params[] = (int)$chapterKey;
+    }
+    if ($verseKey && ctype_digit($verseKey)) {
+        $where[] = 't.yah_verse_key = ?';
+        $params[] = (int)$verseKey;
+    }
+
+    $whereClause = count($where) > 0 ? 'WHERE ' . implode(' AND ', $where) : '';
 
     $stmt = $db->prepare("
         SELECT
@@ -111,11 +137,12 @@ function handleGet(PDO $db, array $user): void {
         JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
         JOIN yy_series ser ON ser.yy_series_key = t.yy_series_key
         JOIN yy_volume vol ON vol.yy_volume_key = t.yy_volume_key
-        JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
-        WHERE t.yah_verse_key = ?
-        ORDER BY t.yy_translation_sort DESC, t.yy_translation_dtime DESC
+        LEFT JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
+        $whereClause
+        ORDER BY s.yah_scroll_sort, c.yah_chapter_number, v.yah_verse_number,
+                 t.yy_translation_sort DESC, t.yy_translation_dtime DESC
     ");
-    $stmt->execute([(int)$verseKey]);
+    $stmt->execute($params);
     jsonResponse($stmt->fetchAll());
 }
 
