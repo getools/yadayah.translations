@@ -326,7 +326,7 @@
                         }
                     }
                     if (record.yy_volume_flip_code) {
-                        var hdrUrl = 'https://book.yadayah.com/books/' + encodeURIComponent(record.yy_volume_flip_code) + '/' + (record.translation_page ? '#p=' + record.translation_page : '');
+                        var hdrUrl = 'https://book.yadayah.com/books/' + encodeURIComponent(record.yy_volume_flip_code) + '/' + (record.translation_page ? '#p=' + (record.translation_page + 6) : '');
                         var hdrLink = document.createElement('a');
                         hdrLink.href = hdrUrl;
                         hdrLink.target = '_blank';
@@ -350,7 +350,7 @@
                 var page = record.translation_page;
                 var bookPage;
                 if (flipCode) {
-                    var url = 'https://book.yadayah.com/books/' + encodeURIComponent(flipCode) + '/' + (page ? '#p=' + page : '');
+                    var url = 'https://book.yadayah.com/books/' + encodeURIComponent(flipCode) + '/' + (page ? '#p=' + (page + 6) : '');
                     bookPage = '<a href="' + url + '" target="_blank"><strong>' + bookName + '</strong> - Page ' + (page || '?') + '</a>';
                 } else {
                     bookPage = '<strong>' + bookName + '</strong> - Page ' + (page || '?');
@@ -444,9 +444,10 @@
             if (grammarParts.length > 0) {
                 html += '<div class="wp-grammar">' + escHtml(grammarParts.join(' ')) + '</div>';
             }
-            if (info.word_definition) {
+            var def = info.word_definition_yy || info.word_definition_kirk;
+            if (def) {
                 html += '<hr>';
-                html += '<div class="wp-definition">' + escHtml(info.word_definition) + '</div>';
+                html += '<div class="wp-definition">' + escHtml(def) + '</div>';
             }
 
             var overlay = document.createElement('div');

@@ -32,10 +32,11 @@ $sql = "
            w.word_flag_gender_m, w.word_flag_gender_f, w.word_flag_plural,
            w.word_flag_noun, w.word_flag_verb, w.word_flag_adjective,
            w.word_flag_adverb, w.word_flag_preposition, w.word_flag_conjunction,
-           w.word_flag_subst, w.word_definition
+           w.word_flag_subst, w.word_definition_kirk, w.word_definition_yy
     FROM yy_word_spelling s
     JOIN yy_word w ON s.word_id = w.word_id
-    WHERE LOWER(s.word_spelling_text) IN ($placeholders)
+    WHERE w.word_active_flag = true
+      AND LOWER(s.word_spelling_text) IN ($placeholders)
     ORDER BY s.word_spelling_sort
 ";
 

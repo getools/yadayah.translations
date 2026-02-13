@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Word Admin - Yada Yah</title>
+    <link rel="stylesheet" href="css/app.css">
+    <style>
+        .search-bar { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; }
+        .search-bar input { flex: 1; max-width: 400px; }
+        .search-bar .result-count { font-size: 0.85rem; color: #777; }
+
+        #words-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+        #words-table th, #words-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #e0e0e0; }
+        #words-table thead th { background: #f8f9fa; font-weight: 600; color: #555; position: sticky; top: 0; }
+        #words-table tbody tr:hover { background: #eef6fc; cursor: pointer; }
+        #words-table .col-active { width: 50px; text-align: center; }
+        #words-table .col-strongs { width: 70px; }
+        #words-table .col-hebrew { width: 80px; direction: rtl; font-size: 1.1rem; }
+        #words-table .col-yt { width: 80px; }
+        #words-table .col-count { width: 60px; text-align: right; }
+        #words-table .col-def { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #words-table .col-spellings { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .active-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+        .active-dot.on { background: #27ae60; }
+        .active-dot.off { background: #ccc; }
+
+        .form-section { margin-bottom: 20px; }
+        .form-section h3 { margin: 0 0 12px 0; font-size: 1rem; color: #34495e; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+        .flags-row { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
+        .flag-item { display: flex; align-items: center; gap: 6px; font-size: 0.875rem; }
+        .flag-item input[type="checkbox"] { width: 16px; height: 16px; }
+        .flag-item label { margin: 0; font-weight: 500; }
+
+        textarea { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; font-family: inherit; resize: vertical; }
+
+        .spelling-list { list-style: none; padding: 0; margin: 0 0 8px 0; }
+        .spelling-item { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+        .spelling-item input { flex: 1; }
+        .spelling-item .btn-remove { background: none; border: none; color: #e74c3c; cursor: pointer; font-size: 1.2rem; padding: 0 4px; font-weight: bold; }
+        .spelling-item .btn-remove:hover { color: #c0392b; }
+        .spelling-item .sort-num { font-size: 0.75rem; color: #999; width: 20px; text-align: right; }
+        .spelling-count { font-size: 0.75rem; color: #3498db; background: #eef6fc; border-radius: 3px; padding: 2px 6px; min-width: 30px; text-align: center; }
+
+        .edit-panel { display: none; }
+        .edit-panel.active { display: block; }
+        .list-panel.hidden { display: none; }
+
+        .field-row { display: flex; gap: 16px; flex-wrap: wrap; }
+        .field-row .field { min-width: 0; }
+        .field-narrow { flex: 0 0 100px; min-width: 80px !important; }
+        .field-medium { flex: 0 0 200px; min-width: 150px !important; }
+        .field-readonly input { background: #f5f5f5; color: #777; }
+
+        /* Hebrew keyboard */
+        .hebrew-kb {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-top: 6px;
+            max-width: 440px;
+        }
+        .hebrew-kb button {
+            width: 36px; height: 36px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+            font-size: 1.15rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s;
+            padding: 0;
+            line-height: 1;
+        }
+        .hebrew-kb button:hover { background: #eef6fc; border-color: #3498db; }
+        .hebrew-kb button:active { background: #d4eaf7; }
+        .hebrew-kb button.kb-special {
+            font-size: 0.75rem;
+            color: #666;
+            width: auto;
+            padding: 0 10px;
+        }
+        .hebrew-kb-label { font-size: 0.8rem; color: #888; margin-top: 4px; }
+        .hebrew-kb button .kb-sub {
+            font-size: 0.55rem;
+            color: #999;
+            position: absolute;
+            bottom: 1px;
+            right: 3px;
+        }
+        .hebrew-kb button { position: relative; }
+    </style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="login-screen" class="login-screen">
+    <div class="login-card">
+        <h1>Word Admin</h1>
+        <div class="field">
+            <label for="login-user">Username</label>
+            <input type="text" id="login-user" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="login-pass">Password</label>
+            <input type="password" id="login-pass" autocomplete="current-password">
+        </div>
+        <div id="login-error" style="color:#c0392b;font-size:0.85rem;margin-bottom:12px;display:none;"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Login</button>
+    </div>
+</div>
+
+<!-- App -->
+<div id="app" class="container" style="display:none">
+    <div class="app-header">
+        <h1>Word Admin</h1>
+        <div class="user-info">
+            <span id="user-display"></span>
+            <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
+        </div>
+    </div>
+
+    <!-- List Panel -->
+    <div id="list-panel" class="list-panel">
+        <div class="card">
+            <div class="search-bar">
+                <input type="text" id="search-input" placeholder="Search by Strong's #, Hebrew, spelling, or definition..." autocomplete="off">
+                <button class="btn btn-primary btn-sm" onclick="doSearch()">Search</button>
+                <button class="btn btn-secondary btn-sm" onclick="clearSearch()">Clear</button>
+                <span id="result-count" class="result-count"></span>
+                <div style="margin-left:auto">
+                    <button class="btn btn-primary" onclick="newWord()">New Word</button>
+                </div>
+            </div>
+            <div class="table-wrap" style="max-height:70vh;overflow-y:auto">
+                <table id="words-table">
+                    <thead>
+                        <tr>
+                            <th class="col-active sortable" data-col="active">Active</th>
+                            <th class="col-strongs sortable" data-col="strongs">Strong's</th>
+                            <th class="col-hebrew sortable" data-col="hebrew">Hebrew</th>
+                            <th class="col-yt sortable" data-col="yt">YT</th>
+                            <th class="col-spellings">Spellings</th>
+                            <th class="col-def">Definition</th>
+                            <th class="col-count sortable" data-col="count">Count</th>
+                        </tr>
+                    </thead>
+                    <tbody id="words-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Panel -->
+    <div id="edit-panel" class="edit-panel">
+        <div class="card">
+            <div class="translations-header">
+                <h2 id="edit-title">New Word</h2>
+                <button class="btn btn-secondary btn-sm" onclick="cancelEdit()">Back to List</button>
+            </div>
+
+            <div id="edit-errors" class="error-messages" style="display:none"><ul></ul></div>
+
+            <div class="form-section">
+                <h3>Word Details</h3>
+                <div class="field-row">
+                    <div class="field field-narrow">
+                        <label for="f-strongs">Strong's #</label>
+                        <input type="text" id="f-strongs" maxlength="4" placeholder="0001">
+                    </div>
+                    <div class="field field-medium">
+                        <label for="f-hebrew">Hebrew</label>
+                        <input type="text" id="f-hebrew" dir="rtl" style="font-size:1.2rem" oninput="updateYtPreview()">
+                        <div class="hebrew-kb" id="hebrew-kb"></div>
+                        <div class="hebrew-kb-label">Click letters to insert. Backspace removes last character.</div>
+                    </div>
+                    <div class="field field-narrow field-readonly">
+                        <label for="f-yt">YT</label>
+                        <input type="text" id="f-yt" readonly>
+                    </div>
+                    <div class="field field-narrow" style="justify-content:flex-end">
+                        <label class="flag-item">
+                            <input type="checkbox" id="f-active">
+                            <label for="f-active">Active</label>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h3>Grammar</h3>
+                <div class="flags-row">
+                    <label class="flag-item"><input type="checkbox" id="f-gender-m"><label>Masculine</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-gender-f"><label>Feminine</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-plural"><label>Plural</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-noun"><label>Noun</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-verb"><label>Verb</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-adjective"><label>Adjective</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-adverb"><label>Adverb</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-preposition"><label>Preposition</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-conjunction"><label>Conjunction</label></label>
+                    <label class="flag-item"><input type="checkbox" id="f-subst"><label>Substantive</label></label>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h3>Definitions</h3>
+                <div class="field">
+                    <label for="f-def-yy">Definition (YY)</label>
+                    <textarea id="f-def-yy" rows="3"></textarea>
+                </div>
+                <div class="field">
+                    <label for="f-def-kirk">Definition (Kirk)</label>
+                    <textarea id="f-def-kirk" rows="3"></textarea>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h3>Spellings <span id="spelling-total" style="font-weight:normal;font-size:0.85rem;color:#3498db;margin-left:8px;"></span></h3>
+                <ul id="spelling-list" class="spelling-list"></ul>
+                <button class="btn btn-secondary btn-sm" onclick="addSpelling()">+ Add Spelling</button>
+            </div>
+
+            <div class="button-row">
+                <button class="btn btn-primary" onclick="saveWord()">Save</button>
+                <button class="btn btn-secondary" onclick="cancelEdit()">Cancel</button>
+                <div style="margin-left:auto">
+                    <button id="btn-delete" class="btn btn-danger" onclick="deleteWord()" style="display:none">Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+var API = 'api';
+var allWords = [];
+var editingWordId = null;
+var sortCol = 'strongs';
+var sortDir = 'asc';
+
+// ── Auth ──
+function checkAuth() {
+    fetch(API + '/auth.php', {credentials:'include'}).then(r=>r.json()).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+            loadWords();
+        }
+    });
+}
+
+function doLogin() {
+    var user = document.getElementById('login-user').value;
+    var pass = document.getElementById('login-pass').value;
+    var errEl = document.getElementById('login-error');
+    errEl.style.display = 'none';
+    fetch(API + '/auth.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({login: user, password: pass})
+    }).then(r=>r.json()).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+            loadWords();
+        } else {
+            errEl.textContent = d.error || 'Login failed';
+            errEl.style.display = '';
+        }
+    });
+}
+
+function doLogout() {
+    fetch(API + '/auth.php', {method:'DELETE', credentials:'include'}).then(function() {
+        location.reload();
+    });
+}
+
+document.getElementById('login-pass').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doLogin();
+});
+
+// ── Load words ──
+function loadWords() {
+    fetch(API + '/words.php?list=all', {credentials:'include'}).then(r=>r.json()).then(function(data) {
+        if (data.error) { alert(data.error); return; }
+        allWords = data;
+        renderTable(allWords);
+    });
+}
+
+function doSearch() {
+    var q = document.getElementById('search-input').value.trim();
+    if (!q) { renderTable(allWords); return; }
+    fetch(API + '/words.php?search=' + encodeURIComponent(q), {credentials:'include'}).then(r=>r.json()).then(function(data) {
+        if (data.error) { alert(data.error); return; }
+        renderTable(data);
+    });
+}
+
+function clearSearch() {
+    document.getElementById('search-input').value = '';
+    renderTable(allWords);
+}
+
+document.getElementById('search-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doSearch();
+});
+
+// ── Table ──
+function renderTable(words) {
+    var sorted = words.slice().sort(function(a, b) {
+        var va, vb;
+        switch (sortCol) {
+            case 'active': va = a.word_active_flag ? 1 : 0; vb = b.word_active_flag ? 1 : 0; break;
+            case 'strongs': va = a.word_strongs; vb = b.word_strongs; break;
+            case 'hebrew': va = a.word_hebrew || ''; vb = b.word_hebrew || ''; break;
+            case 'yt': va = a.word_yt || ''; vb = b.word_yt || ''; break;
+            case 'count': va = a.word_count_yy || 0; vb = b.word_count_yy || 0; break;
+            default: va = a.word_strongs; vb = b.word_strongs;
+        }
+        if (va < vb) return sortDir === 'asc' ? -1 : 1;
+        if (va > vb) return sortDir === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    document.getElementById('result-count').textContent = words.length + ' words';
+
+    var tbody = document.getElementById('words-tbody');
+    var html = '';
+    for (var i = 0; i < sorted.length; i++) {
+        var w = sorted[i];
+        var defPreview = w.word_definition_yy || w.word_definition_kirk || '';
+        if (defPreview.length > 80) defPreview = defPreview.substring(0, 80) + '...';
+        html += '<tr onclick="editWord(' + w.word_id + ')">';
+        html += '<td class="col-active"><span class="active-dot ' + (w.word_active_flag ? 'on' : 'off') + '"></span></td>';
+        html += '<td class="col-strongs">' + esc(w.word_strongs) + '</td>';
+        html += '<td class="col-hebrew">' + esc(w.word_hebrew) + '</td>';
+        html += '<td class="col-yt">' + esc(w.word_yt || '') + '</td>';
+        html += '<td class="col-spellings" title="' + esc(w.spellings_display || '') + '">' + esc(w.spellings_display || '') + '</td>';
+        html += '<td class="col-def" title="' + esc(defPreview) + '">' + esc(defPreview) + '</td>';
+        html += '<td class="col-count">' + (w.word_count_yy != null ? w.word_count_yy : '') + '</td>';
+        html += '</tr>';
+    }
+    tbody.innerHTML = html;
+
+    // Update sort indicators
+    var ths = document.querySelectorAll('#words-table .sortable');
+    for (var j = 0; j < ths.length; j++) {
+        ths[j].classList.remove('sort-asc', 'sort-desc');
+        if (ths[j].getAttribute('data-col') === sortCol) {
+            ths[j].classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+        }
+    }
+}
+
+document.getElementById('words-table').addEventListener('click', function(e) {
+    var th = e.target.closest('.sortable');
+    if (!th) return;
+    var col = th.getAttribute('data-col');
+    if (sortCol === col) {
+        sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        sortCol = col;
+        sortDir = 'asc';
+    }
+    doSearch();
+});
+
+// ── Edit ──
+function showEdit() {
+    document.getElementById('list-panel').classList.add('hidden');
+    document.getElementById('edit-panel').classList.add('active');
+    document.getElementById('edit-errors').style.display = 'none';
+}
+
+function cancelEdit() {
+    document.getElementById('edit-panel').classList.remove('active');
+    document.getElementById('list-panel').classList.remove('hidden');
+    editingWordId = null;
+}
+
+function newWord() {
+    editingWordId = null;
+    document.getElementById('edit-title').textContent = 'New Word';
+    document.getElementById('btn-delete').style.display = 'none';
+    clearForm();
+    document.getElementById('f-active').checked = true;
+    addSpelling();
+    showEdit();
+}
+
+function editWord(wordId) {
+    fetch(API + '/words.php?word_id=' + wordId, {credentials:'include'}).then(r=>r.json()).then(function(w) {
+        if (w.error) { alert(w.error); return; }
+        editingWordId = w.word_id;
+        document.getElementById('edit-title').textContent = 'Edit Word: ' + (w.word_strongs || '') + ' ' + (w.word_hebrew || '');
+        document.getElementById('btn-delete').style.display = '';
+
+        document.getElementById('f-strongs').value = w.word_strongs ? w.word_strongs.trim() : '';
+        document.getElementById('f-hebrew').value = w.word_hebrew || '';
+        document.getElementById('f-yt').value = w.word_yt || '';
+        document.getElementById('f-active').checked = !!w.word_active_flag;
+
+        document.getElementById('f-gender-m').checked = !!w.word_flag_gender_m;
+        document.getElementById('f-gender-f').checked = !!w.word_flag_gender_f;
+        document.getElementById('f-plural').checked = !!w.word_flag_plural;
+        document.getElementById('f-noun').checked = !!w.word_flag_noun;
+        document.getElementById('f-verb').checked = !!w.word_flag_verb;
+        document.getElementById('f-adjective').checked = !!w.word_flag_adjective;
+        document.getElementById('f-adverb').checked = !!w.word_flag_adverb;
+        document.getElementById('f-preposition').checked = !!w.word_flag_preposition;
+        document.getElementById('f-conjunction').checked = !!w.word_flag_conjunction;
+        document.getElementById('f-subst').checked = !!w.word_flag_subst;
+
+        document.getElementById('f-def-yy').value = w.word_definition_yy || '';
+        document.getElementById('f-def-kirk').value = w.word_definition_kirk || '';
+
+        var list = document.getElementById('spelling-list');
+        list.innerHTML = '';
+        if (w.spellings && w.spellings.length > 0) {
+            for (var i = 0; i < w.spellings.length; i++) {
+                addSpelling(w.spellings[i].word_spelling_text, w.spellings[i].word_spelling_count_yy);
+            }
+            updateSpellingTotal();
+        } else {
+            addSpelling();
+        }
+        showEdit();
+    });
+}
+
+function clearForm() {
+    document.getElementById('f-strongs').value = '';
+    document.getElementById('f-hebrew').value = '';
+    document.getElementById('f-yt').value = '';
+    document.getElementById('f-active').checked = true;
+    document.getElementById('spelling-total').textContent = '';
+    var flags = ['f-gender-m','f-gender-f','f-plural','f-noun','f-verb','f-adjective','f-adverb','f-preposition','f-conjunction','f-subst'];
+    for (var i = 0; i < flags.length; i++) document.getElementById(flags[i]).checked = false;
+    document.getElementById('f-def-yy').value = '';
+    document.getElementById('f-def-kirk').value = '';
+    document.getElementById('spelling-list').innerHTML = '';
+}
+
+// ── Spellings ──
+function updateSpellingTotal() {
+    var counts = document.querySelectorAll('#spelling-list .spelling-count');
+    var total = 0;
+    for (var i = 0; i < counts.length; i++) {
+        total += parseInt(counts[i].textContent) || 0;
+    }
+    var el = document.getElementById('spelling-total');
+    el.textContent = total > 0 ? '(Total count: ' + total + ')' : '';
+}
+
+function addSpelling(text, count) {
+    var list = document.getElementById('spelling-list');
+    var li = document.createElement('li');
+    li.className = 'spelling-item';
+    var num = list.children.length;
+    var countDisplay = (count != null && count !== '') ? '<span class="spelling-count" title="Occurrences in translations">' + count + '</span>' : '';
+    li.innerHTML = '<span class="sort-num">' + num + '</span>' +
+        '<input type="text" value="' + esc(text || '') + '" placeholder="Spelling variant">' +
+        countDisplay +
+        '<button type="button" class="btn-remove" onclick="removeSpelling(this)" title="Remove">&times;</button>';
+    list.appendChild(li);
+    if (!text) li.querySelector('input').focus();
+}
+
+function removeSpelling(btn) {
+    btn.closest('.spelling-item').remove();
+    renumberSpellings();
+}
+
+function renumberSpellings() {
+    var items = document.querySelectorAll('#spelling-list .spelling-item');
+    for (var i = 0; i < items.length; i++) {
+        items[i].querySelector('.sort-num').textContent = i;
+    }
+}
+
+function getSpellings() {
+    var items = document.querySelectorAll('#spelling-list .spelling-item input');
+    var result = [];
+    for (var i = 0; i < items.length; i++) {
+        var val = items[i].value.trim();
+        if (val) result.push(val);
+    }
+    return result;
+}
+
+// ── Save ──
+function saveWord() {
+    var data = {
+        word_strongs: document.getElementById('f-strongs').value,
+        word_hebrew: document.getElementById('f-hebrew').value,
+        word_active_flag: document.getElementById('f-active').checked,
+        word_flag_gender_m: document.getElementById('f-gender-m').checked,
+        word_flag_gender_f: document.getElementById('f-gender-f').checked,
+        word_flag_plural: document.getElementById('f-plural').checked,
+        word_flag_noun: document.getElementById('f-noun').checked,
+        word_flag_verb: document.getElementById('f-verb').checked,
+        word_flag_adjective: document.getElementById('f-adjective').checked,
+        word_flag_adverb: document.getElementById('f-adverb').checked,
+        word_flag_preposition: document.getElementById('f-preposition').checked,
+        word_flag_conjunction: document.getElementById('f-conjunction').checked,
+        word_flag_subst: document.getElementById('f-subst').checked,
+        word_definition_kirk: document.getElementById('f-def-kirk').value,
+        word_definition_yy: document.getElementById('f-def-yy').value,
+        spellings: getSpellings()
+    };
+
+    var method, url;
+    if (editingWordId) {
+        method = 'PUT';
+        url = API + '/words.php?word_id=' + editingWordId;
+    } else {
+        method = 'POST';
+        url = API + '/words.php';
+    }
+
+    fetch(url, {
+        method: method, credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(data)
+    }).then(r=>r.json()).then(function(resp) {
+        if (resp.errors) {
+            showErrors(resp.errors);
+            return;
+        }
+        if (resp.error) {
+            showErrors([resp.error]);
+            return;
+        }
+        cancelEdit();
+        loadWords();
+    });
+}
+
+// ── Delete ──
+function deleteWord() {
+    if (!editingWordId) return;
+    if (!confirm('Delete this word and all its spellings?')) return;
+    fetch(API + '/words.php?word_id=' + editingWordId, {
+        method: 'DELETE', credentials: 'include'
+    }).then(r=>r.json()).then(function(resp) {
+        if (resp.error) { alert(resp.error); return; }
+        cancelEdit();
+        loadWords();
+    });
+}
+
+// ── Errors ──
+function showErrors(errs) {
+    var el = document.getElementById('edit-errors');
+    var html = '<ul>';
+    for (var i = 0; i < errs.length; i++) html += '<li>' + esc(errs[i]) + '</li>';
+    html += '</ul>';
+    el.innerHTML = html;
+    el.style.display = '';
+    el.scrollIntoView({behavior:'smooth'});
+}
+
+// ── Util ──
+function esc(s) {
+    if (!s) return '';
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+// ── Hebrew-to-YT mapping (mirrors DB hebrew_to_yt trigger) ──
+var HEBREW_YT_MAP = {
+    '\u05D0':'a', '\u05D1':'b', '\u05D2':'c', '\u05D3':'d', '\u05D4':'e',
+    '\u05D5':'f', '\u05D6':'z', '\u05D7':'h', '\u05D8':'u', '\u05D9':'i',
+    '\u05DA':'k', '\u05DB':'k', '\u05DC':'l', '\u05DD':'m', '\u05DE':'m',
+    '\u05DF':'n', '\u05E0':'n', '\u05E1':'x', '\u05E2':'o', '\u05E3':'p',
+    '\u05E4':'p', '\u05E5':'y', '\u05E6':'y', '\u05E7':'q', '\u05E8':'r',
+    '\u05E9':'s', '\u05EA':'t'
+};
+
+function hebrewToYt(hebrew) {
+    if (!hebrew) return '';
+    // Strip nikkud/cantillation (U+0591-U+05C7)
+    var cleaned = '';
+    for (var i = 0; i < hebrew.length; i++) {
+        var cp = hebrew.charCodeAt(i);
+        if (cp < 0x0591 || cp > 0x05C7) cleaned += hebrew[i];
+    }
+    // Reverse (Hebrew RTL -> English LTR) and map
+    var result = '';
+    for (var i = cleaned.length - 1; i >= 0; i--) {
+        result += HEBREW_YT_MAP[cleaned[i]] || '';
+    }
+    return result;
+}
+
+function updateYtPreview() {
+    var hebrew = document.getElementById('f-hebrew').value;
+    document.getElementById('f-yt').value = hebrewToYt(hebrew);
+}
+
+// ── Hebrew keyboard ──
+var HEBREW_LETTERS = [
+    {ch:'\u05D0', name:'Aleph'},  {ch:'\u05D1', name:'Bet'},    {ch:'\u05D2', name:'Gimel'},
+    {ch:'\u05D3', name:'Dalet'},  {ch:'\u05D4', name:'He'},     {ch:'\u05D5', name:'Vav'},
+    {ch:'\u05D6', name:'Zayin'},  {ch:'\u05D7', name:'Chet'},   {ch:'\u05D8', name:'Tet'},
+    {ch:'\u05D9', name:'Yod'},    {ch:'\u05DB', name:'Kaf'},    {ch:'\u05DC', name:'Lamed'},
+    {ch:'\u05DE', name:'Mem'},    {ch:'\u05E0', name:'Nun'},    {ch:'\u05E1', name:'Samekh'},
+    {ch:'\u05E2', name:'Ayin'},   {ch:'\u05E4', name:'Pe'},     {ch:'\u05E6', name:'Tsade'},
+    {ch:'\u05E7', name:'Qof'},    {ch:'\u05E8', name:'Resh'},   {ch:'\u05E9', name:'Shin'},
+    {ch:'\u05EA', name:'Tav'},
+    {ch:'\u05DA', name:'Kaf\u00B7f'}, {ch:'\u05DD', name:'Mem\u00B7f'}, {ch:'\u05DF', name:'Nun\u00B7f'},
+    {ch:'\u05E3', name:'Pe\u00B7f'},  {ch:'\u05E5', name:'Tsade\u00B7f'}
+];
+
+function buildHebrewKeyboard() {
+    var kb = document.getElementById('hebrew-kb');
+    var html = '';
+    for (var i = 0; i < HEBREW_LETTERS.length; i++) {
+        var lt = HEBREW_LETTERS[i];
+        var yt = HEBREW_YT_MAP[lt.ch] || '';
+        html += '<button type="button" title="' + lt.name + ' \u2192 ' + yt + '" onclick="insertHebrew(\'' + lt.ch + '\')">' +
+                lt.ch + '<span class="kb-sub">' + yt + '</span></button>';
+    }
+    html += '<button type="button" class="kb-special" onclick="hebrewBackspace()" title="Remove last character">\u232B Backspace</button>';
+    kb.innerHTML = html;
+}
+
+function insertHebrew(ch) {
+    var input = document.getElementById('f-hebrew');
+    var start = input.selectionStart;
+    var end = input.selectionEnd;
+    var val = input.value;
+    input.value = val.substring(0, start) + ch + val.substring(end);
+    input.selectionStart = input.selectionEnd = start + ch.length;
+    input.focus();
+    updateYtPreview();
+}
+
+function hebrewBackspace() {
+    var input = document.getElementById('f-hebrew');
+    var pos = input.selectionStart;
+    var val = input.value;
+    if (pos > 0) {
+        input.value = val.substring(0, pos - 1) + val.substring(pos);
+        input.selectionStart = input.selectionEnd = pos - 1;
+    } else if (val.length > 0) {
+        input.value = val.substring(0, val.length - 1);
+    }
+    input.focus();
+    updateYtPreview();
+}
+
+buildHebrewKeyboard();
+
+// ── Init ──
+checkAuth();
+</script>
+</body>
+</html>
