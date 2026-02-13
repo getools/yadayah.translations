@@ -24,7 +24,7 @@ switch ($method) {
         }
 
         $db = getDb();
-        $stmt = $db->prepare('SELECT yy_user_key, yy_user_code, yy_user_pass, yy_user_name_full FROM yy_user WHERE yy_user_code = ?');
+        $stmt = $db->prepare('SELECT yy_user_key, yy_user_code, yy_user_pass, yy_user_name_full FROM yy_user WHERE LOWER(yy_user_code) = LOWER(?)');
         $stmt->execute([$data['login']]);
         $user = $stmt->fetch();
 

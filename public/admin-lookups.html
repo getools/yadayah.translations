@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lookups Admin - Yada Yah</title>
+    <link rel="stylesheet" href="css/app.css?v=9">
+    <style>
+        #lookup-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+        #lookup-table th, #lookup-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #e0e0e0; white-space: nowrap; }
+        #lookup-table thead th { background: #f8f9fa; font-weight: 600; color: #555; position: sticky; top: 0; }
+        #lookup-table tbody tr:hover { background: #eef6fc; cursor: pointer; }
+        #lookup-table tbody tr.selected { background: #d4eaf7; }
+        .table-selector { display: flex; gap: 16px; align-items: center; margin-bottom: 0; }
+        .table-selector select { min-width: 250px; }
+        .edit-panel { display: none; }
+        .edit-panel.active { display: block; }
+        .field-row { display: flex; gap: 16px; flex-wrap: wrap; }
+        .field-row .field { min-width: 0; }
+        textarea { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; font-family: inherit; resize: vertical; }
+        .row-count { font-size: 0.85rem; color: #777; }
+        .pk-display { font-size: 0.85rem; color: #999; background: #f5f5f5; padding: 8px 10px; border: 1px solid #e0e0e0; border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="login-screen" class="login-screen">
+    <div class="login-card">
+        <h1>Lookups Admin</h1>
+        <div id="login-error" class="error-messages" style="display:none;"></div>
+        <div class="field">
+            <label for="login-user">Login</label>
+            <input type="text" id="login-user" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="login-pass">Password</label>
+            <input type="password" id="login-pass" autocomplete="current-password">
+        </div>
+        <button id="btn-login" class="btn btn-primary" style="width:100%;margin-top:8px;">Sign In</button>
+    </div>
+</div>
+
+<!-- App -->
+<div id="app" class="container" style="display:none">
+    <div class="app-header">
+        <nav class="nav-tabs">
+            <a href="admin-translation.html" class="nav-tab">Translation</a>
+            <a href="admin-word.html" class="nav-tab">Word</a>
+            <a href="admin-lookups.html" class="nav-tab active">Lookups</a>
+        </nav>
+        <div class="user-info">
+            <span id="user-display"></span>
+            <button id="btn-logout" class="btn btn-secondary btn-sm">Logout</button>
+        </div>
+    </div>
+
+    <!-- Table Selector -->
+    <div class="card">
+        <div class="table-selector">
+            <div class="field" style="margin-bottom:0">
+                <label for="table-select">Table</label>
+                <select id="table-select">
+                    <option value="">-- Select a Table --</option>
+                    <option value="yah_scroll">yah_scroll</option>
+                    <option value="yah_chapter">yah_chapter</option>
+                    <option value="yah_verse">yah_verse</option>
+                    <option value="yy_chapter">yy_chapter</option>
+                    <option value="yy_letter">yy_letter</option>
+                    <option value="yy_cite">yy_cite</option>
+                    <option value="yy_cite_book">yy_cite_book</option>
+                    <option value="yy_cite_book_map">yy_cite_book_map</option>
+                    <option value="yy_series">yy_series</option>
+                    <option value="yy_user">yy_user</option>
+                    <option value="yy_volume">yy_volume</option>
+                </select>
+            </div>
+            <span id="row-count" class="row-count"></span>
+        </div>
+    </div>
+
+    <!-- List Panel -->
+    <div id="list-panel" style="display:none">
+        <div class="card">
+            <div class="translations-header">
+                <h2 id="list-title">Records</h2>
+                <button id="btn-add" class="btn btn-primary">Add New</button>
+            </div>
+            <div class="table-wrap" style="max-height:60vh;overflow-y:auto">
+                <table id="lookup-table">
+                    <thead id="lookup-thead"></thead>
+                    <tbody id="lookup-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Panel -->
+    <div id="edit-panel" class="edit-panel">
+        <div class="card">
+            <div class="translations-header">
+                <h2 id="edit-title">Edit Record</h2>
+                <button id="btn-back" class="btn btn-secondary btn-sm">Back to List</button>
+            </div>
+            <div id="edit-errors" class="error-messages" style="display:none"></div>
+            <div id="edit-fields"></div>
+            <div class="button-row">
+                <button id="btn-save" class="btn btn-primary">Save</button>
+                <button id="btn-cancel" class="btn btn-secondary">Cancel</button>
+                <div style="margin-left:auto">
+                    <button id="btn-delete" class="btn btn-danger" style="display:none">Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+var API = 'api';
+var currentTable = '';
+var currentMeta = null;
+var currentRows = [];
+var editingKey = null;
+var fkCache = {};
+
+// ── Auth ──
+function checkAuth() {
+    fetch(API + '/auth.php', {credentials:'include'}).then(function(r){return r.json();}).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+        }
+    });
+}
+
+document.getElementById('btn-login').addEventListener('click', function() {
+    var user = document.getElementById('login-user').value;
+    var pass = document.getElementById('login-pass').value;
+    var errEl = document.getElementById('login-error');
+    errEl.style.display = 'none';
+    fetch(API + '/auth.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({login: user, password: pass})
+    }).then(function(r){return r.json();}).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+        } else {
+            errEl.textContent = d.error || 'Login failed';
+            errEl.style.display = '';
+        }
+    });
+});
+
+document.getElementById('login-pass').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') document.getElementById('btn-login').click();
+});
+
+document.getElementById('btn-logout').addEventListener('click', function() {
+    fetch(API + '/auth.php', {method:'DELETE', credentials:'include'}).then(function() {
+        location.reload();
+    });
+});
+
+// ── Table selection ──
+document.getElementById('table-select').addEventListener('change', function() {
+    var table = this.value;
+    currentTable = table;
+    editingKey = null;
+    hideEdit();
+    if (!table) {
+        document.getElementById('list-panel').style.display = 'none';
+        document.getElementById('row-count').textContent = '';
+        return;
+    }
+    loadTable(table);
+});
+
+function loadTable(table) {
+    fkCache = {};
+    fetch(API + '/lookups.php?action=meta&table=' + table, {credentials:'include'})
+        .then(function(r){return r.json();})
+        .then(function(meta) {
+            currentMeta = meta;
+            loadRows(table);
+        });
+}
+
+function loadRows(table) {
+    fetch(API + '/lookups.php?action=list&table=' + table, {credentials:'include'})
+        .then(function(r){return r.json();})
+        .then(function(rows) {
+            currentRows = rows;
+            document.getElementById('row-count').textContent = rows.length + ' rows';
+            document.getElementById('list-title').textContent = table + ' (' + rows.length + ')';
+            renderList();
+            document.getElementById('list-panel').style.display = '';
+        });
+}
+
+// ── Render list ──
+function renderList() {
+    var cols = currentMeta.columns;
+    // Collect FK columns that need resolving
+    var fkCols = [];
+    for (var i = 0; i < cols.length; i++) {
+        if (cols[i].type === 'fk') fkCols.push(cols[i]);
+    }
+
+    var pending = fkCols.length;
+    if (pending === 0) { doRenderList(); return; }
+
+    for (var i = 0; i < fkCols.length; i++) {
+        (function(col) {
+            loadFkOptions(col.fk_table, function() {
+                pending--;
+                if (pending === 0) doRenderList();
+            });
+        })(fkCols[i]);
+    }
+}
+
+function doRenderList() {
+    var cols = currentMeta.columns;
+    var thead = document.getElementById('lookup-thead');
+    var html = '<tr>';
+    for (var i = 0; i < cols.length; i++) {
+        if (cols[i].type === 'password') continue;
+        html += '<th>' + esc(cols[i].label) + '</th>';
+    }
+    html += '<th>Actions</th></tr>';
+    thead.innerHTML = html;
+
+    var tbody = document.getElementById('lookup-tbody');
+    html = '';
+    for (var r = 0; r < currentRows.length; r++) {
+        var row = currentRows[r];
+        var pk = row[currentMeta.pk];
+        html += '<tr onclick="editRow(' + esc(String(pk)) + ')">';
+        for (var i = 0; i < cols.length; i++) {
+            var col = cols[i];
+            if (col.type === 'password') continue;
+            var val = row[col.name];
+            if (col.type === 'fk' && fkCache[col.fk_table]) {
+                val = fkLabel(col.fk_table, val);
+            }
+            if (col.type === 'textarea' && val && val.length > 60) {
+                val = val.substring(0, 60) + '...';
+            }
+            html += '<td>' + esc(val != null ? String(val) : '') + '</td>';
+        }
+        html += '<td><button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); editRow(' + esc(String(pk)) + ')">Edit</button></td>';
+        html += '</tr>';
+    }
+    tbody.innerHTML = html;
+}
+
+// ── FK options ──
+function loadFkOptions(fkTable, callback) {
+    if (fkCache[fkTable]) { if (callback) callback(); return; }
+    fetch(API + '/lookups.php?action=fk_options&fk_table=' + fkTable, {credentials:'include'})
+        .then(function(r){return r.json();})
+        .then(function(opts) {
+            fkCache[fkTable] = opts;
+            if (callback) callback();
+        });
+}
+
+function fkLabel(fkTable, value) {
+    if (!fkCache[fkTable] || value == null) return value;
+    var opts = fkCache[fkTable];
+    for (var i = 0; i < opts.length; i++) {
+        if (String(opts[i].value) === String(value)) return opts[i].label;
+    }
+    return value;
+}
+
+// ── Edit ──
+function showEdit() {
+    document.getElementById('list-panel').style.display = 'none';
+    document.getElementById('edit-panel').classList.add('active');
+    document.getElementById('edit-errors').style.display = 'none';
+}
+
+function hideEdit() {
+    document.getElementById('edit-panel').classList.remove('active');
+    document.getElementById('list-panel').style.display = '';
+    editingKey = null;
+}
+
+document.getElementById('btn-add').addEventListener('click', function() {
+    editingKey = null;
+    document.getElementById('edit-title').textContent = 'New ' + currentTable;
+    document.getElementById('btn-delete').style.display = 'none';
+    buildForm(null);
+    showEdit();
+});
+
+document.getElementById('btn-back').addEventListener('click', hideEdit);
+document.getElementById('btn-cancel').addEventListener('click', hideEdit);
+
+function editRow(pk) {
+    fetch(API + '/lookups.php?action=get&table=' + currentTable + '&key=' + pk, {credentials:'include'})
+        .then(function(r){return r.json();})
+        .then(function(row) {
+            if (row.error) { alert(row.error); return; }
+            editingKey = pk;
+            document.getElementById('edit-title').textContent = 'Edit ' + currentTable + ' #' + pk;
+            document.getElementById('btn-delete').style.display = '';
+            buildForm(row);
+            showEdit();
+        });
+}
+
+function buildForm(row) {
+    var cols = currentMeta.columns;
+    var container = document.getElementById('edit-fields');
+    container.innerHTML = '';
+
+    // Collect FK columns and load options if needed
+    var fkCols = [];
+    for (var i = 0; i < cols.length; i++) {
+        if (cols[i].type === 'fk') fkCols.push(cols[i]);
+    }
+
+    var pending = fkCols.length;
+    var doRender = function() {
+        var html = '';
+        for (var i = 0; i < cols.length; i++) {
+            var col = cols[i];
+            var val = row ? (row[col.name] != null ? row[col.name] : '') : '';
+            var fieldId = 'f-' + col.name;
+
+            if (col.type === 'pk') {
+                if (row) {
+                    html += '<div class="field" style="flex:0 0 120px;min-width:100px">';
+                    html += '<label>' + esc(col.label) + '</label>';
+                    html += '<div class="pk-display">' + esc(String(val)) + '</div>';
+                    html += '<input type="hidden" id="' + fieldId + '" value="' + esc(String(val)) + '">';
+                    html += '</div>';
+                }
+                continue;
+            }
+
+            html += '<div class="field">';
+            html += '<label for="' + fieldId + '">' + esc(col.label) + '</label>';
+
+            if (col.type === 'fk') {
+                html += '<select id="' + fieldId + '">';
+                html += '<option value="">-- Select --</option>';
+                var opts = fkCache[col.fk_table] || [];
+                for (var j = 0; j < opts.length; j++) {
+                    var sel = String(val) === String(opts[j].value) ? ' selected' : '';
+                    html += '<option value="' + esc(String(opts[j].value)) + '"' + sel + '>' + esc(opts[j].label) + '</option>';
+                }
+                html += '</select>';
+            } else if (col.type === 'textarea') {
+                html += '<textarea id="' + fieldId + '" rows="3">' + esc(String(val)) + '</textarea>';
+            } else if (col.type === 'password') {
+                html += '<input type="password" id="' + fieldId + '" value="" placeholder="' + (row ? 'Leave blank to keep current' : '') + '">';
+            } else if (col.type === 'int') {
+                html += '<input type="number" id="' + fieldId + '" value="' + esc(String(val)) + '">';
+            } else {
+                html += '<input type="text" id="' + fieldId + '" value="' + esc(String(val)) + '">';
+            }
+
+            html += '</div>';
+        }
+        container.innerHTML = html;
+    };
+
+    if (pending === 0) { doRender(); return; }
+    for (var i = 0; i < fkCols.length; i++) {
+        (function(col) {
+            loadFkOptions(col.fk_table, function() {
+                pending--;
+                if (pending === 0) doRender();
+            });
+        })(fkCols[i]);
+    }
+}
+
+// ── Save ──
+document.getElementById('btn-save').addEventListener('click', function() {
+    var cols = currentMeta.columns;
+    var data = {};
+    for (var i = 0; i < cols.length; i++) {
+        var col = cols[i];
+        var el = document.getElementById('f-' + col.name);
+        if (!el) continue;
+        if (col.type === 'pk') {
+            if (el.value) data[col.name] = el.value;
+            continue;
+        }
+        data[col.name] = el.value;
+    }
+
+    fetch(API + '/lookups.php?action=save&table=' + currentTable, {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    }).then(function(r){return r.json();}).then(function(resp) {
+        if (resp.error) {
+            showErrors([resp.error]);
+            return;
+        }
+        if (resp.errors) {
+            showErrors(resp.errors);
+            return;
+        }
+        hideEdit();
+        // Clear FK cache for this table in case display values changed
+        fkCache = {};
+        loadRows(currentTable);
+    });
+});
+
+// ── Delete ──
+document.getElementById('btn-delete').addEventListener('click', function() {
+    if (editingKey === null) return;
+    if (!confirm('Delete this record from ' + currentTable + '?')) return;
+    fetch(API + '/lookups.php?action=delete&table=' + currentTable + '&key=' + editingKey, {
+        method: 'DELETE', credentials: 'include'
+    }).then(function(r){return r.json();}).then(function(resp) {
+        if (resp.error) {
+            alert(resp.error);
+            return;
+        }
+        hideEdit();
+        loadRows(currentTable);
+    });
+});
+
+// ── Errors ──
+function showErrors(errs) {
+    var el = document.getElementById('edit-errors');
+    var html = '';
+    for (var i = 0; i < errs.length; i++) html += '<div>' + esc(errs[i]) + '</div>';
+    el.innerHTML = html;
+    el.style.display = '';
+    el.scrollIntoView({behavior:'smooth'});
+}
+
+// ── Util ──
+function esc(s) {
+    if (!s) return '';
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+// ── Init ──
+checkAuth();
+</script>
+</body>
+</html>

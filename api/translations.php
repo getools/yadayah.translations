@@ -43,7 +43,7 @@ function handleGet(PDO $db, array $user): void {
             JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
             JOIN yy_series ser ON ser.yy_series_key = t.yy_series_key
             JOIN yy_volume vol ON vol.yy_volume_key = t.yy_volume_key
-            JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
+            LEFT JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
             ORDER BY s.yah_scroll_sort, c.yah_chapter_number, v.yah_verse_number,
                      ser.yy_series_sort, vol.yy_volume_number, ych.yy_chapter_sort, t.yy_translation_page
         ");
@@ -64,7 +64,7 @@ function handleGet(PDO $db, array $user): void {
             JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
             JOIN yy_series ser ON ser.yy_series_key = t.yy_series_key
             JOIN yy_volume vol ON vol.yy_volume_key = t.yy_volume_key
-            JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
+            LEFT JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
             WHERE t.yy_translation_key = ?
         ");
         $stmt->execute([(int)$_GET['translation_key']]);
@@ -192,7 +192,7 @@ function handlePost(PDO $db, array $user): void {
         JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
         JOIN yy_series ser ON ser.yy_series_key = t.yy_series_key
         JOIN yy_volume vol ON vol.yy_volume_key = t.yy_volume_key
-        JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
+        LEFT JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
         WHERE t.yy_translation_key = ?
     ");
     $stmt->execute([(int)$newKey]);
@@ -264,7 +264,7 @@ function handlePut(PDO $db, array $user): void {
         JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
         JOIN yy_series ser ON ser.yy_series_key = t.yy_series_key
         JOIN yy_volume vol ON vol.yy_volume_key = t.yy_volume_key
-        JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
+        LEFT JOIN yy_chapter ych ON ych.yy_chapter_key = t.yy_chapter_key
         WHERE t.yy_translation_key = ?
     ");
     $stmt->execute([(int)$key]);

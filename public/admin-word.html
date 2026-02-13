@@ -177,6 +177,7 @@
         <nav class="nav-tabs">
             <a href="admin-translation.html" class="nav-tab">Translation</a>
             <a href="admin-word.html" class="nav-tab active">Word</a>
+            <a href="admin-lookups.html" class="nav-tab">Lookups</a>
         </nav>
         <div class="user-info">
             <span id="user-display"></span>
@@ -197,7 +198,7 @@
                 </div>
             </div>
             <div class="scripture-filter-bar">
-                <label>Book
+                <label>Scroll
                     <select id="filter-scroll" onchange="onScrollChange()">
                         <option value="">All</option>
                     </select>
@@ -405,7 +406,7 @@ function loadScrolls() {
         data.forEach(function(s) {
             var opt = document.createElement('option');
             opt.value = s.yah_scroll_key;
-            opt.textContent = s.yah_scroll_label_common;
+            opt.textContent = s.yah_scroll_label_yy + ' / ' + s.yah_scroll_label_common;
             sel.appendChild(opt);
         });
     });

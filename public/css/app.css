@@ -22,6 +22,7 @@ h2 { margin: 0 0 16px 0; color: #34495e; font-size: 1.25rem; }
     margin: -20px;
     padding: 20px;
     background: #f0f2f5;
+    width: 100vw;
 }
 .login-card {
     background: #fff;
@@ -237,14 +238,22 @@ select:focus, input:focus {
 }
 #translations-table tbody tr:hover { background: #eef6fc; cursor: pointer; }
 
-.sortable { cursor: pointer; user-select: none; }
+.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .sortable:hover { color: #3498db; }
-.sortable::after { content: ' \21C5'; font-size: 0.7em; color: #ccc; }
-.sortable:hover::after { color: #3498db; }
-.sortable.sort-asc::after { content: ' \25B2'; font-size: 0.7em; color: inherit; }
-.sortable.sort-desc::after { content: ' \25BC'; font-size: 0.7em; color: inherit; }
+.sortable .sort-icon { font-size: 0.7em; margin-left: 4px; color: #ccc; }
+.sortable:hover .sort-icon { color: #3498db; }
+.sortable.sort-none .sort-icon { color: #ccc; }
+.sortable.sort-asc .sort-icon { color: inherit; }
+.sortable.sort-desc .sort-icon { color: inherit; }
 
 .filter-row th { padding: 4px 4px 8px; background: #fff; }
+select.col-filter {
+    width: 100%;
+    padding: 3px 4px;
+    font-size: 0.78rem;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+}
 .col-filter {
     width: 100%;
     padding: 4px 6px;

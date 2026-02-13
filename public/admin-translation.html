@@ -30,6 +30,7 @@
             <nav class="nav-tabs">
                 <a href="admin-translation.html" class="nav-tab active">Translation</a>
                 <a href="admin-word.html" class="nav-tab">Word</a>
+                <a href="admin-lookups.html" class="nav-tab">Lookups</a>
             </nav>
             <div class="user-info">
                 <span id="user-display"></span>
@@ -39,15 +40,14 @@
 
         <!-- Tab Navigation -->
         <div class="tab-bar">
-            <button class="tab-btn active" data-tab="entry">Entry</button>
-            <button class="tab-btn" data-tab="list">Translations List</button>
+            <button class="tab-btn active" data-tab="list">List</button>
+            <button class="tab-btn" data-tab="entry">Entry</button>
         </div>
 
         <!-- ══ ENTRY TAB ══ -->
-        <div id="tab-entry" class="tab-content active">
+        <div id="tab-entry" class="tab-content">
             <!-- Scripture Reference -->
             <div class="card">
-                <h2>Scripture Reference</h2>
                 <div class="dropdown-row">
                     <div class="field">
                         <label for="scroll">Scroll</label>
@@ -58,13 +58,13 @@
                     <div class="field">
                         <label for="chapter">Chapter</label>
                         <select id="chapter" disabled>
-                            <option value="">-- Select --</option>
+                            <option value="">All</option>
                         </select>
                     </div>
                     <div class="field">
                         <label for="verse">Verse</label>
                         <select id="verse" disabled>
-                            <option value="">-- Select --</option>
+                            <option value="">All</option>
                         </select>
                     </div>
                 </div>
@@ -144,23 +144,18 @@
         </div>
 
         <!-- ══ LIST TAB ══ -->
-        <div id="tab-list" class="tab-content">
+        <div id="tab-list" class="tab-content active">
             <div class="card">
-                <h2>All Translations</h2>
+                <div class="translations-header">
+                    <h2>All Translations</h2>
+                    <div style="display:flex;gap:8px;">
+                        <button id="btn-load-all" class="btn btn-primary">Load All</button>
+                        <button id="btn-add-from-list" class="btn btn-primary">Add Translation</button>
+                    </div>
+                </div>
                 <div class="table-wrap">
                     <table id="translations-table">
                         <thead>
-                            <tr class="filter-row">
-                                <th><input type="text" class="col-filter" data-col="yah_scroll_label_yy" placeholder="Filter..."></th>
-                                <th><input type="text" class="col-filter" data-col="yah_scroll_label_common" placeholder="Filter..."></th>
-                                <th><input type="text" class="col-filter" data-col="yah_chapter_number" placeholder="Filter..."></th>
-                                <th><input type="text" class="col-filter" data-col="yah_verse_number" placeholder="Filter..."></th>
-                                <th><input type="text" class="col-filter" data-col="series_display" placeholder="Filter..."></th>
-                                <th><input type="text" class="col-filter" data-col="volume_display" placeholder="Filter..."></th>
-                                <th><input type="text" class="col-filter" data-col="yy_translation_page" placeholder="Filter..."></th>
-                                <th><input type="text" class="col-filter" data-col="yy_ch_number" placeholder="Filter..."></th>
-                                <th></th>
-                            </tr>
                             <tr>
                                 <th class="sortable" data-col="yah_scroll_label_yy" data-sort-key="yah_scroll_sort">Scroll (YY)</th>
                                 <th class="sortable" data-col="yah_scroll_label_common" data-sort-key="yah_scroll_sort">Scroll</th>
@@ -171,6 +166,17 @@
                                 <th class="sortable" data-col="yy_translation_page">Page</th>
                                 <th class="sortable" data-col="yy_ch_number" data-sort-key="yy_chapter_sort">YY Ch</th>
                                 <th>Actions</th>
+                            </tr>
+                            <tr class="filter-row">
+                                <th><select class="col-filter" data-col="yah_scroll_label_yy"><option value="">All</option></select></th>
+                                <th><select class="col-filter" data-col="yah_scroll_label_common"><option value="">All</option></select></th>
+                                <th><select class="col-filter" data-col="yah_chapter_number"><option value="">All</option></select></th>
+                                <th><select class="col-filter" data-col="yah_verse_number"><option value="">All</option></select></th>
+                                <th><select class="col-filter" data-col="series_display"><option value="">All</option></select></th>
+                                <th><select class="col-filter" data-col="volume_display"><option value="">All</option></select></th>
+                                <th><select class="col-filter" data-col="yy_translation_page"><option value="">All</option></select></th>
+                                <th><select class="col-filter" data-col="yy_ch_number"><option value="">All</option></select></th>
+                                <th></th>
                             </tr>
                         </thead>
                         <tbody id="translations-tbody"></tbody>

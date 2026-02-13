@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Glossary - Yada Yahowah</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Julius+Sans+One&display=swap" rel="stylesheet">
+    <style>
+        @font-face {
+            font-family: "Yada Towrah";
+            src: url('fonts/YadaTowrah-Times.woff2') format('woff2');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+        }
+        *, *::before, *::after { box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; margin: 20px; }
+
+        /* Site header - matching yadayah.com */
+        header {
+            display: flex; flex-direction: column; align-items: center;
+            padding: 10px 0 5px;
+            background: url('https://yadayah.com/wp-content/uploads/2026/01/yy_bg_bluewave.0004.jpg') center/cover no-repeat;
+            margin: -20px -20px 20px -20px;
+        }
+        header .header-inner {
+            display: flex; flex-direction: column; align-items: center;
+            width: 100%; max-width: 1140px; margin: 0 auto;
+        }
+        header .header-logos { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+        header .header-logos a:first-child img { width: 81px; height: 90px; }
+        header .header-logos a:last-child img { width: 352px; height: auto; }
+        header nav {
+            display: flex; flex-direction: row; justify-content: center;
+            gap: 0 35px; padding: 15px 0; flex-wrap: wrap;
+        }
+        header nav a {
+            text-decoration: none; color: #E5C86C;
+            font-family: "Julius Sans One", sans-serif;
+            font-size: 1.2em; font-weight: 700;
+        }
+        header nav a:hover { color: #fff; }
+        header nav a.active { color: #fff; text-decoration: underline; text-underline-offset: 5px; }
+        @media (max-width: 1024px) {
+            header nav a.hide-narrow { display: none; }
+        }
+        @media (max-width: 767px) {
+            header nav a.hide-narrower { display: none; }
+        }
+
+        /* Page title */
+        .page-title {
+            text-align: center;
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #2c3e50;
+            margin: 0 0 24px 0;
+        }
+
+        /* Letter grid */
+        .letter-grid {
+            display: grid;
+            grid-template-columns: repeat(11, 66px);
+            gap: 0px;
+            justify-content: center;
+            margin-bottom: 24px;
+        }
+        @media (max-width: 949px) {
+            .letter-grid { grid-template-columns: repeat(8, 66px); }
+        }
+        @media (max-width: 659px) {
+            .letter-grid { grid-template-columns: repeat(6, 66px); }
+        }
+        @media (max-width: 499px) {
+            .letter-grid { grid-template-columns: repeat(5, 66px); }
+        }
+        .letter-square {
+            width: 66px;
+            min-height: 66px;
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 6px 4px;
+            transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+        }
+        .letter-square:hover {
+            border-color: #3498db;
+            background: #eef6fc;
+        }
+        .letter-square.active {
+            border-color: #2980b9;
+            background: #d4eaf7;
+            box-shadow: 0 2px 8px rgba(52,152,219,0.25);
+        }
+        .letter-yt {
+            font-family: "Yada Towrah", serif;
+            font-size: 1.6rem;
+            color: #1a5276;
+            line-height: 1.2;
+        }
+        .letter-label {
+            font-size: 0.7rem;
+            color: #555;
+            text-align: center;
+            line-height: 1.2;
+            margin-top: 2px;
+        }
+
+        /* Letter overview */
+        .letter-overview {
+            display: none;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin-bottom: 24px;
+            line-height: 1.7;
+            color: #333;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        .letter-info {
+            margin-bottom: 12px;
+            font-size: 1rem;
+            color: #333;
+        }
+        .letter-info .yt-char {
+            font-family: "Yada Towrah", serif;
+        }
+
+        /* Word table */
+        .word-table-wrap {
+            display: none;
+            overflow-x: auto;
+        }
+        #word-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+        #word-table th, #word-table td {
+            padding: 8px 10px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        #word-table thead th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #555;
+            position: sticky;
+            top: 0;
+            white-space: nowrap;
+        }
+        #word-table tbody tr:hover { background: #eef6fc; }
+        #word-table .col-yt {
+            font-family: "Yada Towrah", serif;
+            font-size: 1rem;
+            color: #1a5276;
+        }
+        #word-table .col-hebrew {
+            font-size: 1.1rem;
+            direction: rtl;
+        }
+        #word-table .col-strongs a {
+            color: #3498db;
+            text-decoration: none;
+        }
+        #word-table .col-strongs a:hover { text-decoration: underline; }
+        #word-table .col-grammar { font-size: 0.8rem; color: #666; }
+        #word-table .col-translit { max-width: 120px; word-wrap: break-word; white-space: normal; }
+        #word-table .col-def { max-width: 400px; word-wrap: break-word; white-space: normal; }
+        .word-count { font-size: 0.85rem; color: #777; margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <div class="header-logos">
+                <a href="https://yadayah.com/"><img src="https://yadayah.com/wp-content/uploads/2026/01/logo.Manowrah.00081x00090.png" alt=""></a>
+                <a href="https://yadayah.com/"><img src="https://yadayah.com/wp-content/uploads/2026/01/yy.YadaYahowah.002.0352x0040.png" alt="Yada Yahowah"></a>
+            </div>
+            <nav>
+                <a href="https://yadayah.com/books">Books</a>
+                <a href="https://yadayah.com/blog">Blog</a>
+                <a href="https://yadayah.com/timeline">Timeline</a>
+                <a href="https://yadayah.com/media" class="hide-narrower">Media</a>
+                <a href="https://yadayah.com/Craig_Winn" class="hide-narrow">Craig&nbsp;Winn</a>
+                <a href="https://yadayah.com/music" class="hide-narrow">Music</a>
+                <a href="https://t.yadayah.com" class="active">Translations</a>
+                <a href="https://yadayah.com/resources" class="hide-narrow">Resources</a>
+            </nav>
+        </div>
+    </header>
+
+    <h1 class="page-title">Glossary</h1>
+
+    <div style="max-width:1024px;margin:0 auto;">
+    <div id="letter-grid" class="letter-grid"></div>
+
+    <div id="letter-overview" class="letter-overview"></div>
+
+    <div id="word-table-wrap" class="word-table-wrap">
+        <div id="word-count" class="word-count"></div>
+        <table id="word-table">
+            <thead>
+                <tr>
+                    <th>Ancient</th>
+                    <th>Modern</th>
+                    <th>Translit</th>
+                    <th>Strong's</th>
+                    <th>Grammar</th>
+                    <th>Definition</th>
+                    <th>Count</th>
+                </tr>
+            </thead>
+            <tbody id="word-tbody"></tbody>
+        </table>
+    </div>
+    </div>
+
+    <script>
+        var allLetters = [];
+        var letters = [];
+        var introLetter = null;
+        var selectedLetter = null;
+
+        function escHtml(str) {
+            if (str == null) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // Load letters
+        async function loadLetters() {
+            var resp = await fetch('/api/glossary.php?action=letters');
+            allLetters = await resp.json();
+            letters = [];
+            introLetter = null;
+            for (var i = 0; i < allLetters.length; i++) {
+                if (allLetters[i].letter_sort > 0) {
+                    letters.push(allLetters[i]);
+                } else {
+                    introLetter = allLetters[i];
+                }
+            }
+            renderLetterGrid();
+        }
+
+        function renderLetterGrid() {
+            var grid = document.getElementById('letter-grid');
+            var html = '';
+            for (var i = 0; i < letters.length; i++) {
+                var lt = letters[i];
+                html += '<div class="letter-square" data-index="' + i + '">';
+                html += '<span class="letter-yt">' + escHtml(lt.letter_yt) + '</span>';
+                html += '<span class="letter-label">' + escHtml(lt.letter_label) + '</span>';
+                html += '</div>';
+            }
+            grid.innerHTML = html;
+
+            grid.addEventListener('click', function(e) {
+                var sq = e.target.closest('.letter-square');
+                if (!sq) return;
+                var idx = parseInt(sq.getAttribute('data-index'));
+                selectLetter(idx);
+            });
+        }
+
+        function selectLetter(idx) {
+            var lt = letters[idx];
+            selectedLetter = lt;
+
+            // Highlight
+            var squares = document.querySelectorAll('.letter-square');
+            for (var i = 0; i < squares.length; i++) {
+                squares[i].classList.toggle('active', i === idx);
+            }
+
+            // Overview
+            var overviewEl = document.getElementById('letter-overview');
+            var hasOverview = lt.letter_overview && lt.letter_overview.trim();
+            var hasInfo = lt.letter_sort > 0;
+
+            if (hasInfo || hasOverview) {
+                var html = '';
+                if (hasInfo) {
+                    html += '<div class="letter-info">';
+                    html += 'Letter number ' + escHtml(String(lt.letter_sort)) + " of the Hebrew 'alephbeyth is ";
+                    html += '<b><i>' + escHtml(lt.letter_label) + '</i> - ' + escHtml(lt.letter_hebrew) + ' / <span class="yt-char">' + escHtml(lt.letter_yt) + '</span></b>.';
+                    html += '  The numerical value is ' + escHtml(String(lt.letter_numeric_value)) + '.';
+                    html += '</div>';
+                }
+                if (hasOverview) {
+                    html += lt.letter_overview;
+                }
+                overviewEl.innerHTML = html;
+                overviewEl.style.display = 'block';
+            } else {
+                overviewEl.style.display = 'none';
+            }
+
+            // Load words
+            loadWords(lt.letter_yt);
+        }
+
+        async function loadWords(letterYt) {
+            var resp = await fetch('/api/glossary.php?action=words&letter=' + encodeURIComponent(letterYt));
+            var words = await resp.json();
+            renderWordTable(words);
+        }
+
+        function buildGrammar(w) {
+            var parts = [];
+            if (w.word_flag_noun === true || w.word_flag_noun === 't') parts.push('noun');
+            if (w.word_flag_verb === true || w.word_flag_verb === 't') parts.push('verb');
+            if (w.word_flag_adjective === true || w.word_flag_adjective === 't') parts.push('adj');
+            if (w.word_flag_adverb === true || w.word_flag_adverb === 't') parts.push('adv');
+            if (w.word_flag_preposition === true || w.word_flag_preposition === 't') parts.push('prep');
+            if (w.word_flag_conjunction === true || w.word_flag_conjunction === 't') parts.push('conj');
+            if (w.word_flag_subst === true || w.word_flag_subst === 't') parts.push('subst');
+            if (w.word_flag_plural === true || w.word_flag_plural === 't') parts.push('pl');
+            if (w.word_gender === 'm') parts.push('masc');
+            else if (w.word_gender === 'f') parts.push('fem');
+            return parts.join(', ');
+        }
+
+        function getDefinition(w) {
+            return w.word_definition_yy || w.word_definition_kirk || w.word_definition_external || '';
+        }
+
+        function renderWordTable(words) {
+            var wrap = document.getElementById('word-table-wrap');
+            var tbody = document.getElementById('word-tbody');
+            var countEl = document.getElementById('word-count');
+
+            if (words.length === 0) {
+                countEl.textContent = 'No words found for this letter.';
+                tbody.innerHTML = '';
+                wrap.style.display = 'block';
+                return;
+            }
+
+            countEl.textContent = words.length + ' word' + (words.length !== 1 ? 's' : '');
+
+            var html = '';
+            for (var i = 0; i < words.length; i++) {
+                var w = words[i];
+                var strongs = w.word_strongs ? w.word_strongs.trim() : '';
+                var strongsLink = strongs
+                    ? '<a href="https://www.blueletterbible.org/lexicon/h' + escHtml(strongs) + '" target="_blank" rel="noopener">H' + escHtml(strongs) + '</a>'
+                    : '';
+                html += '<tr>';
+                html += '<td class="col-yt">' + escHtml(w.word_yt) + '</td>';
+                html += '<td class="col-hebrew">' + escHtml(w.word_hebrew) + '</td>';
+                html += '<td class="col-translit">' + escHtml(w.word_spellings) + '</td>';
+                html += '<td class="col-strongs">' + strongsLink + '</td>';
+                html += '<td class="col-grammar">' + escHtml(buildGrammar(w)) + '</td>';
+                html += '<td class="col-def">' + escHtml(getDefinition(w)) + '</td>';
+                html += '<td>' + (w.word_count_yy != null ? escHtml(String(w.word_count_yy)) : '') + '</td>';
+                html += '</tr>';
+            }
+            tbody.innerHTML = html;
+            wrap.style.display = 'block';
+        }
+
+        // Init
+        loadLetters();
+    </script>
+</body>
+</html>

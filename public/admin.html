@@ -7,19 +7,21 @@
     <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
-<h1>Admin</h1>
 
-<div id="login-screen" class="login-card">
-    <div class="field">
-        <label for="login-user">Login</label>
-        <input type="text" id="login-user" autocomplete="username">
+<div id="login-screen" class="login-screen">
+    <div class="login-card">
+        <h1>Admin</h1>
+        <div class="field">
+            <label for="login-user">Login</label>
+            <input type="text" id="login-user" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="login-pass">Password</label>
+            <input type="password" id="login-pass" autocomplete="current-password">
+        </div>
+        <div id="login-error" class="error-messages" style="display:none"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Login</button>
     </div>
-    <div class="field">
-        <label for="login-pass">Password</label>
-        <input type="password" id="login-pass" autocomplete="current-password">
-    </div>
-    <div id="login-error" class="error-messages" style="display:none"></div>
-    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Login</button>
 </div>
 
 <div id="app" class="container" style="display:none">
@@ -27,6 +29,7 @@
         <nav class="nav-tabs">
             <a href="admin-translation.html" class="nav-tab">Translation</a>
             <a href="admin-word.html" class="nav-tab">Word</a>
+            <a href="admin-lookups.html" class="nav-tab">Lookups</a>
         </nav>
         <div class="user-info">
             <span id="user-display"></span>

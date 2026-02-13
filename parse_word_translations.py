@@ -735,20 +735,28 @@ def consolidate_html(html: str) -> str:
 
 
 
-def extract_translations_from_doc(doc_path: Path) -> List[Dict[str, any]]:
+def extract_translations_from_doc(doc_path: Path, doc=None, detect_chapters=False) -> List[Dict[str, any]]:
     """
     Extract all translations from a Word document.
 
     Args:
         doc_path: Path to .docx file
+        doc: Optional pre-opened Document object (avoids re-opening the file)
+        detect_chapters: If True, also detect yy_chapter_# boundaries; returned
+            translations get '_chapter_num' key, and result includes '_chapters'
+            metadata entry as last element.
 
     Returns:
-        List of dictionaries with keys: book, page, text_word, cite, cite_chapter, cite_verse
+        List of dictionaries with keys: book, page, text_word, cite, cite_chapter, cite_verse.
+        If detect_chapters=True, the last element is a dict with key '_chapters'
+        containing a list of (para_idx, chapter_number) tuples.
     """
     translations = []
+    chapter_boundaries = []  # populated when detect_chapters=True
 
     try:
-        doc = Document(str(doc_path))
+        if doc is None:
+            doc = Document(str(doc_path))
         book_name = doc_path.stem  # Filename without extension
 
         logging.info(f"Processing document: {book_name}")
@@ -767,6 +775,16 @@ def extract_translations_from_doc(doc_path: Path) -> List[Dict[str, any]]:
         for para_idx, paragraph in enumerate(doc.paragraphs):
             logging.debug(f"Paragraph {para_idx}: {paragraph.text[:50]}...")
             para_extracted = False  # Track if this paragraph was already handled
+
+            # Detect chapter boundaries during the same iteration
+            if detect_chapters:
+                style = paragraph.style.name if paragraph.style else ''
+                if style in ('yy_chapter_#', 'Heading 1'):
+                    text = paragraph.text.strip()
+                    if text:
+                        first_line = text.split('\n')[0].strip()
+                        if first_line.isdigit():
+                            chapter_boundaries.append((para_idx, int(first_line)))
 
             # Track where this paragraph's HTML contributions start
             para_html_start = len(accumulated_html) if state == ExtractionState.EXTRACTING else None
@@ -1174,6 +1192,22 @@ def extract_translations_from_doc(doc_path: Path) -> List[Dict[str, any]]:
 
         if state == ExtractionState.EXTRACTING:
             logging.warning(f"Document {book_name} has unclosed translation (missing right quote)")
+
+        # Assign chapter numbers to translations if chapter detection was enabled
+        if detect_chapters and chapter_boundaries:
+            chapter_boundaries.sort(key=lambda x: x[0])
+            for t in translations:
+                pidx = t.get('_para_idx')
+                if pidx is not None:
+                    ch_num = None
+                    for bound_idx, c_num in chapter_boundaries:
+                        if pidx >= bound_idx:
+                            ch_num = c_num
+                        else:
+                            break
+                    t['_chapter_num'] = ch_num
+            # Append chapter metadata as a special entry
+            translations.append({'_chapters': chapter_boundaries})
 
         return translations
 

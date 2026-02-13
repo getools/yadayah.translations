@@ -254,8 +254,9 @@ $(function () {
                 return s.yy_series_name;
             });
         });
-        // Load list preferences
+        // Load list preferences then load list tab (default)
         loadPreferences();
+        loadAllTranslations();
     }
 
     // ════════════════════════════════════════════
@@ -806,6 +807,11 @@ $(function () {
 
     // ── Event handlers ──
     $('#btn-add').on('click', function () { showForm(null); });
+    $('#btn-load-all').on('click', function () { loadAllTranslations(); });
+    $('#btn-add-from-list').on('click', function () {
+        switchTab('entry');
+        showForm(null);
+    });
     $('#btn-save').on('click', function () { saveTranslation(); });
     $('#btn-cancel').on('click', function () { hideForm(); });
 
@@ -834,8 +840,35 @@ $(function () {
     function loadAllTranslations() {
         apiCall('translations.php?list=all').done(function (data) {
             allTranslations = data || [];
+            populateFilterDropdowns();
             applyPrefsToUI();
             renderTable();
+        });
+    }
+
+    function populateFilterDropdowns() {
+        $('.col-filter').each(function () {
+            var $sel = $(this);
+            var col = $sel.data('col');
+            var savedVal = $sel.val() || '';
+            var vals = {};
+            $.each(allTranslations, function (_, row) {
+                var v = row[col];
+                if (v != null && String(v) !== '') vals[String(v)] = true;
+            });
+            var sorted = Object.keys(vals);
+            // Sort numerically if all values are numbers, otherwise alphabetically
+            var allNumeric = sorted.every(function (v) { return !isNaN(v) && v !== ''; });
+            if (allNumeric) {
+                sorted.sort(function (a, b) { return Number(a) - Number(b); });
+            } else {
+                sorted.sort(function (a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); });
+            }
+            $sel.empty().append('<option value="">All</option>');
+            $.each(sorted, function (_, v) {
+                $sel.append($('<option>').val(v).text(v));
+            });
+            if (savedVal) $sel.val(savedVal);
         });
     }
 
@@ -869,14 +902,14 @@ $(function () {
         var filters = {};
         $('.col-filter').each(function () {
             var col = $(this).data('col');
-            var val = $(this).val().trim().toLowerCase();
+            var val = $(this).val();
             if (val) filters[col] = val;
         });
         if ($.isEmptyObject(filters)) return data;
         return data.filter(function (row) {
             for (var col in filters) {
-                var cellVal = String(row[col] == null ? '' : row[col]).toLowerCase();
-                if (cellVal.indexOf(filters[col]) === -1) return false;
+                var cellVal = String(row[col] == null ? '' : row[col]);
+                if (cellVal !== filters[col]) return false;
             }
             return true;
         });
@@ -906,47 +939,62 @@ $(function () {
         });
     }
 
-    // Column header sort
-    $(document).on('click', '.sortable', function () {
+    // Column header sort (3-state: none → asc → desc → none)
+    $(document).on('click', '.sortable', function (e) {
+        if ($(e.target).is('select')) return;
         var col = $(this).data('sort-key') || $(this).data('col');
         var currentDir = null;
         if (listPrefs.sorts && listPrefs.sorts.length === 1 && listPrefs.sorts[0].col === col) {
             currentDir = listPrefs.sorts[0].dir;
         }
-        var newDir = currentDir === 'asc' ? 'desc' : 'asc';
-        listPrefs.sorts = [{ col: col, dir: newDir }];
+        if (currentDir === null) {
+            listPrefs.sorts = [{ col: col, dir: 'asc' }];
+        } else if (currentDir === 'asc') {
+            listPrefs.sorts = [{ col: col, dir: 'desc' }];
+        } else {
+            listPrefs.sorts = [];
+        }
         updateSortIndicators();
         renderTable();
         savePreferences();
     });
 
     function updateSortIndicators() {
-        $('.sortable').removeClass('sort-asc sort-desc');
-        if (listPrefs.sorts && listPrefs.sorts.length === 1) {
-            var s = listPrefs.sorts[0];
-            $('.sortable').each(function () {
-                var sortKey = $(this).data('sort-key') || $(this).data('col');
-                if (sortKey === s.col) {
-                    $(this).addClass(s.dir === 'desc' ? 'sort-desc' : 'sort-asc');
-                }
-            });
-        }
+        $('.sortable').removeClass('sort-asc sort-desc sort-none');
+        $('.sortable').each(function () {
+            var $th = $(this);
+            var sortKey = $th.data('sort-key') || $th.data('col');
+            var $icon = $th.find('.sort-icon');
+            if ($icon.length === 0) {
+                $icon = $('<span class="sort-icon"></span>');
+                $th.append($icon);
+            }
+            var activeSort = null;
+            if (listPrefs.sorts && listPrefs.sorts.length === 1 && listPrefs.sorts[0].col === sortKey) {
+                activeSort = listPrefs.sorts[0].dir;
+            }
+            if (activeSort === 'asc') {
+                $th.addClass('sort-asc');
+                $icon.html('&#9650;'); // ▲
+            } else if (activeSort === 'desc') {
+                $th.addClass('sort-desc');
+                $icon.html('&#9660;'); // ▼
+            } else {
+                $th.addClass('sort-none');
+                $icon.html('&#8693;'); // ⇅
+            }
+        });
     }
 
-    // Column filters
-    var filterTimer;
-    $(document).on('input', '.col-filter', function () {
-        clearTimeout(filterTimer);
-        filterTimer = setTimeout(function () {
-            // Save filter state
-            listPrefs.filters = {};
-            $('.col-filter').each(function () {
-                var val = $(this).val().trim();
-                if (val) listPrefs.filters[$(this).data('col')] = val;
-            });
-            renderTable();
-            savePreferences();
-        }, 300);
+    // Column filters (dropdown selects)
+    $(document).on('change', '.col-filter', function () {
+        listPrefs.filters = {};
+        $('.col-filter').each(function () {
+            var val = $(this).val();
+            if (val) listPrefs.filters[$(this).data('col')] = val;
+        });
+        renderTable();
+        savePreferences();
     });
 
     // Edit from list

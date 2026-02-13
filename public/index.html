@@ -19,15 +19,20 @@
             font-display: swap;
         }
         body { font-family: Arial, sans-serif; margin: 20px; }
-        .filters { margin-bottom: 20px; display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; justify-content: center; }
+        .filters { margin-bottom: 20px; display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; justify-content: center; max-width: 1024px; margin-left: auto; margin-right: auto; }
         .filter-group { margin-bottom: 0; }
         .filter-group > label { font-weight: bold; display: block; margin-bottom: 5px; padding-left: 2px; }
         select { padding: 5px; width: 250px; }
-        input[type="number"] { padding: 5px; width: 35px; }
-        .checkbox-row { display: flex; align-items: center; gap: 8px; }
-        .checkbox-row label { font-weight: normal; }
-        button { padding: 8px 16px; background-color: #31345A; color: white; border: none; cursor: pointer; }
-        button:hover { background-color: #6A6F83; }
+        select:disabled { background: #e9ecef; cursor: not-allowed; color: #999; }
+        #chapter, #verse { width: 100px; }
+        button, .btn-link {
+            padding: 9px 22px; background-color: #31345A; color: white; border: none; cursor: pointer;
+            border-radius: 6px; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.3px;
+            transition: background-color 0.2s, box-shadow 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+        }
+        button:hover, .btn-link:hover { background-color: #4a4e7a; box-shadow: 0 3px 8px rgba(0,0,0,0.2); }
+        .btn-link { text-decoration: none; display: inline-block; margin-left: auto; }
         .results { margin-top: 20px; }
         .section-break { margin-top: 15px; padding: 10px 0; border-top: 3px solid #999; border-bottom: 2px solid #ccc; font-weight: bold; }
         .section-break a:hover { text-decoration: underline; }
@@ -81,7 +86,7 @@
         header {
             display: flex; flex-direction: column; align-items: center;
             padding: 10px 0 5px;
-            background: url('https://yadayah.com/wp-content/uploads/2026/01/ece62274-0549-438b-ba78-ab8c6980a9a7.jpg') center/cover no-repeat;
+            background: url('https://yadayah.com/wp-content/uploads/2026/01/yy_bg_bluewave.0004.jpg') center/cover no-repeat;
             margin: -20px -20px 20px -20px;
         }
         header .header-inner {
@@ -101,6 +106,13 @@
             font-size: 1.2em; font-weight: 700;
         }
         header nav a:hover { color: #fff; }
+        header nav a.active { color: #fff; text-decoration: underline; text-underline-offset: 5px; }
+        @media (max-width: 1024px) {
+            header nav a.hide-narrow { display: none; }
+        }
+        @media (max-width: 767px) {
+            header nav a.hide-narrower { display: none; }
+        }
     </style>
 </head>
 <body>
@@ -114,10 +126,11 @@
                 <a href="https://yadayah.com/books">Books</a>
                 <a href="https://yadayah.com/blog">Blog</a>
                 <a href="https://yadayah.com/timeline">Timeline</a>
-                <a href="https://yadayah.com/media">Media</a>
-                <a href="https://yadayah.com/Craig_Winn">Craig&nbsp;Winn</a>
-                <a href="https://yadayah.com/music">Music</a>
-                <a href="https://yadayah.com/resources">Resources</a>
+                <a href="https://yadayah.com/media" class="hide-narrower">Media</a>
+                <a href="https://yadayah.com/Craig_Winn" class="hide-narrow">Craig&nbsp;Winn</a>
+                <a href="https://yadayah.com/music" class="hide-narrow">Music</a>
+                <a href="https://t.yadayah.com" class="active">Translations</a>
+                <a href="https://yadayah.com/resources" class="hide-narrow">Resources</a>
             </nav>
         </div>
     </header>
@@ -132,25 +145,22 @@
 
         <div id="chapter-verse-filters">
             <div class="filter-group">
-                <label>Chapter</label>
-                <div class="checkbox-row">
-                    <input type="checkbox" id="chapter-all" checked>
-                    <label for="chapter-all">All</label>
-                    <input type="number" id="chapter" min="1">
-                </div>
+                <label for="chapter">Chapter</label>
+                <select id="chapter" disabled>
+                    <option value="">All</option>
+                </select>
             </div>
 
             <div class="filter-group">
-                <label>Verse</label>
-                <div class="checkbox-row">
-                    <input type="checkbox" id="verse-all" checked>
-                    <label for="verse-all">All</label>
-                    <input type="number" id="verse" min="1">
-                </div>
+                <label for="verse">Verse</label>
+                <select id="verse" disabled>
+                    <option value="">All</option>
+                </select>
             </div>
         </div>
 
         <button onclick="fetchResults()">Go</button>
+        <a href="/glossary.html" class="btn-link">Glossary</a>
     </div>
     <div id="result-count" style="font-size: 0.85rem; color: #555; margin-bottom: 5px;"></div>
 
@@ -172,6 +182,9 @@
             return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
 
+        // ── Cite book data with scroll key mapping ──
+        var citeBookScrollMap = {};
+
         // ── Load cite books ──
         async function loadCiteBooks() {
             var response = await fetch('/api/cite-books.php');
@@ -182,32 +195,69 @@
                 option.value = book.cite_book_id;
                 option.textContent = book.cite_book_hebrew + ' / ' + book.cite_book_common;
                 select.appendChild(option);
+                if (book.yah_scroll_key) {
+                    citeBookScrollMap[book.cite_book_id] = book.yah_scroll_key;
+                }
             });
         }
 
-        document.getElementById('chapter-all').addEventListener('change', function() {
-            if (this.checked) document.getElementById('chapter').value = '';
+        // ── Cascading dropdowns: Book → Chapter → Verse ──
+        document.getElementById('cite').addEventListener('change', function() {
+            var chapterSel = document.getElementById('chapter');
+            var verseSel = document.getElementById('verse');
+            chapterSel.innerHTML = '<option value="">All</option>';
+            verseSel.innerHTML = '<option value="">All</option>';
+            verseSel.disabled = true;
+
+            var scrollKey = citeBookScrollMap[this.value];
+            if (!scrollKey) {
+                chapterSel.disabled = true;
+                return;
+            }
+
+            fetch('/api/display-chapters.php?scroll_key=' + scrollKey)
+                .then(function(r) { return r.json(); })
+                .then(function(chapters) {
+                    chapters.forEach(function(ch) {
+                        var opt = document.createElement('option');
+                        opt.value = ch.yah_chapter_number;
+                        opt.setAttribute('data-key', ch.yah_chapter_key);
+                        opt.textContent = ch.yah_chapter_number;
+                        chapterSel.appendChild(opt);
+                    });
+                    chapterSel.disabled = false;
+                });
         });
 
-        document.getElementById('chapter').addEventListener('input', function() {
-            document.getElementById('chapter-all').checked = !this.value;
-        });
+        document.getElementById('chapter').addEventListener('change', function() {
+            var verseSel = document.getElementById('verse');
+            verseSel.innerHTML = '<option value="">All</option>';
 
-        document.getElementById('verse-all').addEventListener('change', function() {
-            if (this.checked) document.getElementById('verse').value = '';
-        });
+            var selected = this.options[this.selectedIndex];
+            var chapterKey = selected ? selected.getAttribute('data-key') : null;
+            if (!chapterKey) {
+                verseSel.disabled = true;
+                return;
+            }
 
-        document.getElementById('verse').addEventListener('input', function() {
-            document.getElementById('verse-all').checked = !this.value;
+            fetch('/api/display-verses.php?chapter_key=' + chapterKey)
+                .then(function(r) { return r.json(); })
+                .then(function(verses) {
+                    verses.forEach(function(v) {
+                        var opt = document.createElement('option');
+                        opt.value = v.yah_verse_number;
+                        opt.textContent = v.yah_verse_number;
+                        verseSel.appendChild(opt);
+                    });
+                    verseSel.disabled = false;
+                });
         });
 
         // ── Fetch and display results ──
         async function fetchResults() {
             var citeId = document.getElementById('cite').value;
-            var chapterAll = document.getElementById('chapter-all').checked;
-            var verseAll = document.getElementById('verse-all').checked;
-            var chapter = !chapterAll ? document.getElementById('chapter').value : '';
-            var verse = !verseAll ? document.getElementById('verse').value : '';
+            var chapter = document.getElementById('chapter').value;
+            var verse = document.getElementById('verse').value;
 
             var params = new URLSearchParams();
             if (citeId) params.set('cite_book_id', citeId);
