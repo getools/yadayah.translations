@@ -36,13 +36,39 @@ h2 { margin: 0 0 16px 0; color: #34495e; font-size: 1.25rem; }
 /* ── App Header ── */
 .app-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    flex-wrap: wrap;
-    margin-bottom: 8px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #ddd;
+    padding-bottom: 0;
 }
-.app-header h1 { margin: 0; font-size: 1.4rem; }
-.user-info { display: flex; align-items: center; gap: 12px; font-size: 0.875rem; color: #666; }
+.app-header .nav-tabs {
+    display: flex;
+    gap: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.app-header .nav-tab {
+    padding: 10px 24px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #777;
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.2s, border-color 0.2s;
+}
+.app-header .nav-tab:hover { color: #333; }
+.app-header .nav-tab.active { color: #3498db; border-bottom-color: #3498db; }
+.user-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 0.875rem;
+    color: #666;
+    margin-left: auto;
+    padding-bottom: 8px;
+}
 
 /* ── Tabs ── */
 .tab-bar {
@@ -213,8 +239,10 @@ select:focus, input:focus {
 
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: #3498db; }
-.sortable.sort-asc::after { content: ' \25B2'; font-size: 0.7em; }
-.sortable.sort-desc::after { content: ' \25BC'; font-size: 0.7em; }
+.sortable::after { content: ' \21C5'; font-size: 0.7em; color: #ccc; }
+.sortable:hover::after { color: #3498db; }
+.sortable.sort-asc::after { content: ' \25B2'; font-size: 0.7em; color: inherit; }
+.sortable.sort-desc::after { content: ' \25BC'; font-size: 0.7em; color: inherit; }
 
 .filter-row th { padding: 4px 4px 8px; background: #fff; }
 .col-filter {

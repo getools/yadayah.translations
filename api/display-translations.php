@@ -9,43 +9,55 @@ $pdo = getDb();
 
 $citeBookId = isset($_GET['cite_book_id']) && $_GET['cite_book_id'] !== '' ? (int)$_GET['cite_book_id'] : null;
 $scrollKey  = isset($_GET['scroll_key']) && $_GET['scroll_key'] !== '' ? (int)$_GET['scroll_key'] : null;
-$chapter = isset($_GET['chapter']) && $_GET['chapter'] !== '' ? (int)$_GET['chapter'] : null;
-$verse   = isset($_GET['verse']) && $_GET['verse'] !== '' ? (int)$_GET['verse'] : null;
+$chapter    = isset($_GET['chapter']) && $_GET['chapter'] !== '' ? (int)$_GET['chapter'] : null;
+$verse      = isset($_GET['verse']) && $_GET['verse'] !== '' ? (int)$_GET['verse'] : null;
 
 $conditions = [];
 $params = [];
 
 if ($citeBookId !== null) {
-    $conditions[] = "t.translation_cite_book_id = ?";
+    // Map cite_book_id to yah_scroll_key via yy_cite_book
+    $conditions[] = "t.yah_scroll_key IN (SELECT yah_scroll_key FROM yy_cite_book WHERE cite_book_id = ?)";
     $params[] = $citeBookId;
 } elseif ($scrollKey !== null) {
-    $conditions[] = "t.translation_cite_book_id IN (SELECT cite_book_id FROM yy_cite_book WHERE yah_scroll_key = ?)";
+    $conditions[] = "t.yah_scroll_key = ?";
     $params[] = $scrollKey;
 }
 
 if ($chapter !== null) {
-    $conditions[] = "t.translation_cite_chapter = ?";
+    $conditions[] = "c.yah_chapter_number = ?";
     $params[] = $chapter;
 }
 
 if ($verse !== null) {
-    $conditions[] = "t.translation_cite_verse = ?";
+    $conditions[] = "v.yah_verse_number = ?";
     $params[] = $verse;
 }
 
 $where = count($conditions) > 0 ? 'WHERE ' . implode(' AND ', $conditions) : '';
 
 $stmt = $pdo->prepare("
-    SELECT t.translation_id, t.translation_book, t.translation_page, t.translation_text_word,
-           t.translation_cite, t.translation_cite_chapter, t.translation_cite_verse, t.translation_cite_verse_end,
-           t.translation_cite_book_id,
-           v.yy_volume_flip_code,
-           cb.cite_book_hebrew, cb.cite_book_common
-    FROM translation t
-    LEFT JOIN yy_volume v ON v.yy_volume_file = t.translation_book
-    LEFT JOIN yy_cite_book cb ON t.translation_cite_book_id = cb.cite_book_id
+    SELECT t.yy_translation_key AS translation_id,
+           vol.yy_volume_file AS translation_book,
+           t.yy_translation_page AS translation_page,
+           t.yy_translation_copy AS translation_text_word,
+           s.yah_scroll_label_yy || ' / ' || s.yah_scroll_label_common AS translation_cite,
+           s.yah_scroll_label_yy AS cite_book_hebrew,
+           s.yah_scroll_label_common AS cite_book_common,
+           c.yah_chapter_number AS translation_cite_chapter,
+           v.yah_verse_number AS translation_cite_verse,
+           NULL AS translation_cite_verse_end,
+           t.yah_scroll_key AS translation_cite_book_id,
+           vol.yy_volume_flip_code
+    FROM yy_translation t
+    JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
+    JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
+    JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
+    JOIN yy_volume vol ON vol.yy_volume_key = t.yy_volume_key
     $where
-    ORDER BY cb.cite_book_sort ASC, cb.cite_book_hebrew ASC, t.translation_cite_chapter ASC, t.translation_cite_verse ASC, t.translation_book, t.translation_page
+    ORDER BY s.yah_scroll_sort ASC, s.yah_scroll_label_yy ASC,
+             c.yah_chapter_number ASC, v.yah_verse_number ASC,
+             vol.yy_volume_file, t.yy_translation_page
 ");
 $stmt->execute($params);
 

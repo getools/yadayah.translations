@@ -43,7 +43,7 @@ function handleGet(PDO $db): void {
         $term = '%' . trim($_GET['search']) . '%';
         $stmt = $db->prepare("
             SELECT DISTINCT w.word_id, w.word_strongs, w.word_hebrew, w.word_yt, w.word_active_flag,
-                   w.word_definition_kirk, w.word_definition_yy, w.word_count_yy,
+                   w.word_definition_kirk, w.word_definition_yy, w.word_definition_external, w.word_count_yy,
                    (SELECT string_agg(s.word_spelling_text, ', ' ORDER BY s.word_spelling_sort, s.word_spelling_id)
                     FROM yy_word_spelling s WHERE s.word_id = w.word_id) AS spellings_display
             FROM yy_word w
@@ -54,10 +54,11 @@ function handleGet(PDO $db): void {
                OR s.word_spelling_text ILIKE ?
                OR w.word_definition_kirk ILIKE ?
                OR w.word_definition_yy ILIKE ?
+               OR w.word_definition_external ILIKE ?
             ORDER BY w.word_strongs
             LIMIT 200
         ");
-        $stmt->execute([$term, $term, $term, $term, $term, $term]);
+        $stmt->execute([$term, $term, $term, $term, $term, $term, $term]);
         jsonResponse($stmt->fetchAll());
     }
 
@@ -65,7 +66,7 @@ function handleGet(PDO $db): void {
     if (isset($_GET['list']) && $_GET['list'] === 'all') {
         $stmt = $db->query("
             SELECT w.word_id, w.word_strongs, w.word_hebrew, w.word_yt, w.word_active_flag,
-                   w.word_definition_kirk, w.word_definition_yy, w.word_count_yy,
+                   w.word_definition_kirk, w.word_definition_yy, w.word_definition_external, w.word_count_yy,
                    (SELECT string_agg(s.word_spelling_text, ', ' ORDER BY s.word_spelling_sort, s.word_spelling_id)
                     FROM yy_word_spelling s WHERE s.word_id = w.word_id) AS spellings_display
             FROM yy_word w
@@ -93,17 +94,16 @@ function handlePost(PDO $db, array $user): void {
     try {
         $stmt = $db->prepare("
             INSERT INTO yy_word (word_strongs, word_hebrew,
-                word_flag_gender_m, word_flag_gender_f, word_flag_plural,
+                word_gender, word_flag_plural,
                 word_flag_noun, word_flag_verb, word_flag_adjective,
                 word_flag_adverb, word_flag_preposition, word_flag_conjunction, word_flag_subst,
-                word_definition_kirk, word_definition_yy, word_active_flag)
+                word_definition_kirk, word_definition_yy, word_definition_external, word_active_flag)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $stmt->execute([
             str_pad(trim($data['word_strongs']), 4, '0', STR_PAD_LEFT),
             trim($data['word_hebrew']),
-            toBool($data, 'word_flag_gender_m'),
-            toBool($data, 'word_flag_gender_f'),
+            emptyToNull($data, 'word_gender'),
             toBool($data, 'word_flag_plural'),
             toBool($data, 'word_flag_noun'),
             toBool($data, 'word_flag_verb'),
@@ -114,6 +114,7 @@ function handlePost(PDO $db, array $user): void {
             toBool($data, 'word_flag_subst'),
             emptyToNull($data, 'word_definition_kirk'),
             emptyToNull($data, 'word_definition_yy'),
+            emptyToNull($data, 'word_definition_external'),
             !empty($data['word_active_flag']) ? 't' : 'f',
         ]);
         $wordId = (int)$db->lastInsertId('yy_word_word_id_seq');
@@ -157,17 +158,17 @@ function handlePut(PDO $db, array $user): void {
         $stmt = $db->prepare("
             UPDATE yy_word SET
                 word_strongs = ?, word_hebrew = ?,
-                word_flag_gender_m = ?, word_flag_gender_f = ?, word_flag_plural = ?,
+                word_gender = ?, word_flag_plural = ?,
                 word_flag_noun = ?, word_flag_verb = ?, word_flag_adjective = ?,
                 word_flag_adverb = ?, word_flag_preposition = ?, word_flag_conjunction = ?, word_flag_subst = ?,
-                word_definition_kirk = ?, word_definition_yy = ?, word_active_flag = ?
+                word_definition_kirk = ?, word_definition_yy = ?, word_definition_external = ?,
+                word_active_flag = ?
             WHERE word_id = ?
         ");
         $stmt->execute([
             str_pad(trim($data['word_strongs']), 4, '0', STR_PAD_LEFT),
             trim($data['word_hebrew']),
-            toBool($data, 'word_flag_gender_m'),
-            toBool($data, 'word_flag_gender_f'),
+            emptyToNull($data, 'word_gender'),
             toBool($data, 'word_flag_plural'),
             toBool($data, 'word_flag_noun'),
             toBool($data, 'word_flag_verb'),
@@ -178,6 +179,7 @@ function handlePut(PDO $db, array $user): void {
             toBool($data, 'word_flag_subst'),
             emptyToNull($data, 'word_definition_kirk'),
             emptyToNull($data, 'word_definition_yy'),
+            emptyToNull($data, 'word_definition_external'),
             !empty($data['word_active_flag']) ? 't' : 'f',
             $wordId,
         ]);
@@ -230,7 +232,7 @@ function insertSpellings(PDO $db, int $wordId, array $spellings): void {
     $sort = 0;
     foreach ($spellings as $sp) {
         $text = is_array($sp) ? ($sp['word_spelling_text'] ?? '') : (string)$sp;
-        $text = trim($text);
+        $text = strtolower(trim($text));
         if ($text !== '') {
             $count = countSpellingInTranslations($db, $text);
             $stmt->execute([$wordId, $text, $sort, $count]);

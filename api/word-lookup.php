@@ -29,10 +29,11 @@ $params = array_map('strtolower', $wordList);
 $sql = "
     SELECT w.word_id, s.word_spelling_text,
            w.word_yt, w.word_hebrew, w.word_strongs,
-           w.word_flag_gender_m, w.word_flag_gender_f, w.word_flag_plural,
+           w.word_gender, w.word_flag_plural,
            w.word_flag_noun, w.word_flag_verb, w.word_flag_adjective,
            w.word_flag_adverb, w.word_flag_preposition, w.word_flag_conjunction,
-           w.word_flag_subst, w.word_definition_kirk, w.word_definition_yy
+           w.word_flag_subst, w.word_definition_kirk, w.word_definition_yy,
+           w.word_definition_external
     FROM yy_word_spelling s
     JOIN yy_word w ON s.word_id = w.word_id
     WHERE w.word_active_flag = true

@@ -585,8 +585,9 @@ $(function () {
         var rect = anchorEl.getBoundingClientRect();
 
         var grammarParts = [];
-        if (info.word_flag_gender_m) grammarParts.push('m');
-        if (info.word_flag_gender_f) grammarParts.push('f');
+        if (info.word_gender === 'M') grammarParts.push('m');
+        else if (info.word_gender === 'F') grammarParts.push('f');
+        else if (info.word_gender === 'N') grammarParts.push('n');
         if (info.word_flag_plural) grammarParts.push('pl');
         if (info.word_flag_noun) grammarParts.push('noun');
         if (info.word_flag_verb) grammarParts.push('verb');
@@ -609,9 +610,14 @@ $(function () {
         if (grammarParts.length > 0) {
             html += '<div class="word-grammar">' + escHtml(grammarParts.join(' ')) + '</div>';
         }
-        if (info.word_definition) {
+        var defParts = [];
+        if (info.word_definition_yy) defParts.push(info.word_definition_yy);
+        if (info.word_definition_kirk) defParts.push(info.word_definition_kirk);
+        if (info.word_definition_external) defParts.push(info.word_definition_external);
+        if (info.word_definition) defParts.push(info.word_definition);
+        if (defParts.length > 0) {
             html += '<hr>';
-            html += '<div class="word-definition">' + escHtml(info.word_definition) + '</div>';
+            html += '<div class="word-definition">' + escHtml(defParts.join(' ')) + '</div>';
         }
         html += '</div>';
 

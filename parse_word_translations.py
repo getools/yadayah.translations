@@ -1251,6 +1251,62 @@ def populate_cite_table(conn) -> int:
         return 0
 
 
+def normalize_unicode_text(conn) -> int:
+    """
+    Normalize Unicode characters in translation text columns to ASCII equivalents.
+
+    Standardizes:
+      - Curly apostrophes U+2018/U+2019 → ASCII apostrophe 0x27
+      - Curly double quotes U+201C/U+201D → ASCII double quote 0x22
+      - En dash U+2013 / Em dash U+2014 → ASCII hyphen-minus 0x2D
+
+    Returns:
+        Number of rows updated
+    """
+    try:
+        cursor = conn.cursor()
+        total = 0
+
+        # Normalize translation_text_word, translation_cite, translation_cite_hebrew, translation_cite_common
+        for col in ['translation_text_word', 'translation_cite', 'translation_cite_hebrew', 'translation_cite_common']:
+            cursor.execute(f"""
+                UPDATE translation
+                SET {col} = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                    {col},
+                    E'\u2019', ''''),
+                    E'\u2018', ''''),
+                    E'\u201C', '"'),
+                    E'\u201D', '"'),
+                    E'\u2013', '-')
+                WHERE {col} LIKE '%' || E'\u2019' || '%'
+                   OR {col} LIKE '%' || E'\u2018' || '%'
+                   OR {col} LIKE '%' || E'\u201C' || '%'
+                   OR {col} LIKE '%' || E'\u201D' || '%'
+                   OR {col} LIKE '%' || E'\u2013' || '%'
+            """)
+            count = cursor.rowcount
+            if count > 0:
+                logging.info(f"  Normalized {count} rows in {col}")
+            total += count
+
+        # Also normalize em dash (rare but handle it)
+        cursor.execute("""
+            UPDATE translation
+            SET translation_text_word = REPLACE(translation_text_word, E'\u2014', '-')
+            WHERE translation_text_word LIKE '%' || E'\u2014' || '%'
+        """)
+        total += cursor.rowcount
+
+        conn.commit()
+        cursor.close()
+        logging.info(f"Unicode normalization complete: {total} total column updates")
+        return total
+    except psycopg2.Error as e:
+        logging.error(f"Unicode normalization failed: {e}")
+        conn.rollback()
+        return 0
+
+
 def update_cite_book_ids(conn) -> int:
     """
     Update translation.cite_book_id by looking up cite_hebrew in cite_book_map.
@@ -1417,6 +1473,7 @@ def main():
         # Populate cite table with distinct cite values
         if not args.dry_run and conn:
             populate_cite_table(conn)
+            normalize_unicode_text(conn)
             update_cite_book_ids(conn)
 
         logging.info(f"Files processed: {stats['files_processed']}")

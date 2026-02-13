@@ -6,6 +6,13 @@
     <title>Word Admin - Yada Yah</title>
     <link rel="stylesheet" href="css/app.css">
     <style>
+        @font-face {
+            font-family: "Yada Towrah";
+            src: url('fonts/YadaTowrah-Times.woff2') format('woff2');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+        }
         .search-bar { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; }
         .search-bar input { flex: 1; max-width: 400px; }
         .search-bar .result-count { font-size: 0.85rem; color: #777; }
@@ -14,13 +21,19 @@
         #words-table th, #words-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #e0e0e0; }
         #words-table thead th { background: #f8f9fa; font-weight: 600; color: #555; position: sticky; top: 0; }
         #words-table tbody tr:hover { background: #eef6fc; cursor: pointer; }
-        #words-table .col-active { width: 50px; text-align: center; }
-        #words-table .col-strongs { width: 70px; }
-        #words-table .col-hebrew { width: 80px; direction: rtl; font-size: 1.1rem; }
+        #words-table .col-active { width: 65px; text-align: center; }
+        #words-table .col-strongs { width: 80px; }
+        #words-table .col-hebrew { width: 90px; }
+        #words-table td.col-hebrew { direction: rtl; font-size: 1.1rem; }
         #words-table .col-yt { width: 80px; }
-        #words-table .col-count { width: 60px; text-align: right; }
+        #words-table td.col-yt { font-family: "Yada Towrah", serif; font-size: 1rem; }
+        #words-table .col-count { width: 70px; text-align: right; }
+        #words-table thead th.sortable { white-space: nowrap; }
         #words-table .col-def { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         #words-table .col-spellings { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #words-table .filter-row th { background: #f0f0f0; padding: 4px 6px; position: sticky; top: 33px; z-index: 1; }
+        .col-filter { width: 100%; padding: 3px 5px; font-size: 0.8rem; border: 1px solid #ccc; border-radius: 3px; box-sizing: border-box; }
+        select.col-filter { padding: 2px 3px; }
         .active-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
         .active-dot.on { background: #27ae60; }
         .active-dot.off { background: #ccc; }
@@ -93,6 +106,27 @@
         }
         .hebrew-kb button { position: relative; }
 
+        /* Filter Hebrew keyboard popover */
+        .filter-kb-popover {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            z-index: 100;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            padding: 8px;
+            max-width: 320px;
+        }
+        .filter-kb-popover.visible { display: block; }
+        .filter-kb-popover .hebrew-kb { margin: 0; max-width: none; }
+        .filter-kb-popover .hebrew-kb button { width: 30px; height: 30px; font-size: 1rem; }
+        .filter-kb-popover .hebrew-kb button .kb-sub { font-size: 0.5rem; }
+        .filter-kb-popover .hebrew-kb button.kb-special { font-size: 0.7rem; padding: 0 6px; }
+        .filter-row th { position: relative; }
+
         /* Loading indicator */
         .loading-overlay {
             display: flex;
@@ -136,7 +170,9 @@
 <!-- App -->
 <div id="app" class="container" style="display:none">
     <div class="app-header">
-        <h1>Word Admin</h1>
+        <nav class="nav-tabs">
+            <a href="admin.html" class="nav-tab active">Translation Admin</a>
+        </nav>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -155,7 +191,6 @@
                     <button class="btn btn-primary" onclick="newWord()">New Word</button>
                 </div>
             </div>
-            <div id="loading-indicator" class="loading-overlay"><span class="spinner"></span> Loading words...</div>
             <div class="table-wrap" style="max-height:70vh;overflow-y:auto">
                 <table id="words-table">
                     <thead>
@@ -167,6 +202,15 @@
                             <th class="col-spellings">Spellings</th>
                             <th class="col-def">Definition</th>
                             <th class="col-count sortable" data-col="count">Count</th>
+                        </tr>
+                        <tr class="filter-row">
+                            <th><select id="filter-active" class="col-filter" onchange="applyFilters()"><option value="">All</option><option value="1">Yes</option><option value="0">No</option></select></th>
+                            <th><input type="text" id="filter-strongs" class="col-filter" placeholder="..." oninput="applyFilters()"></th>
+                            <th><input type="text" id="filter-hebrew" class="col-filter" placeholder="..." dir="rtl" oninput="applyFilters()" onfocus="showFilterKb()" autocomplete="off"><div id="filter-kb-popover" class="filter-kb-popover"></div></th>
+                            <th><input type="text" id="filter-yt" class="col-filter" placeholder="..." oninput="applyFilters()"></th>
+                            <th><input type="text" id="filter-spellings" class="col-filter" placeholder="..." oninput="applyFilters()"></th>
+                            <th><input type="text" id="filter-def" class="col-filter" placeholder="..." oninput="applyFilters()"></th>
+                            <th><input type="text" id="filter-count" class="col-filter" placeholder="..." oninput="applyFilters()"></th>
                         </tr>
                     </thead>
                     <tbody id="words-tbody"></tbody>
@@ -196,9 +240,9 @@
                         <label for="f-hebrew">Hebrew</label>
                         <input type="text" id="f-hebrew" dir="rtl" style="font-size:1.2rem" oninput="updateYtPreview()">
                     </div>
-                    <div class="field field-narrow field-readonly">
+                    <div class="field field-readonly" style="flex:0 0 200px; min-width:150px">
                         <label for="f-yt">YT</label>
-                        <input type="text" id="f-yt" readonly>
+                        <input type="text" id="f-yt" readonly style="font-family:'Yada Towrah',serif; font-size:1.1rem">
                     </div>
                     <div class="field field-narrow" style="justify-content:flex-end">
                         <label class="flag-item">
@@ -214,8 +258,15 @@
             <div class="form-section">
                 <h3>Grammar</h3>
                 <div class="flags-row">
-                    <label class="flag-item"><input type="checkbox" id="f-gender-m"><label>Masculine</label></label>
-                    <label class="flag-item"><input type="checkbox" id="f-gender-f"><label>Feminine</label></label>
+                    <label class="flag-item">
+                        <label for="f-gender">Gender</label>
+                        <select id="f-gender" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.875rem">
+                            <option value="">Unknown</option>
+                            <option value="M">Masculine</option>
+                            <option value="F">Feminine</option>
+                            <option value="N">Neutral</option>
+                        </select>
+                    </label>
                     <label class="flag-item"><input type="checkbox" id="f-plural"><label>Plural</label></label>
                     <label class="flag-item"><input type="checkbox" id="f-noun"><label>Noun</label></label>
                     <label class="flag-item"><input type="checkbox" id="f-verb"><label>Verb</label></label>
@@ -236,6 +287,10 @@
                 <div class="field">
                     <label for="f-def-kirk">Definition (Kirk)</label>
                     <textarea id="f-def-kirk" rows="3"></textarea>
+                </div>
+                <div class="field">
+                    <label for="f-def-external">Definition (External)</label>
+                    <textarea id="f-def-external" rows="2"></textarea>
                 </div>
             </div>
 
@@ -309,9 +364,8 @@ document.getElementById('login-pass').addEventListener('keydown', function(e) {
 
 // ── Load words ──
 function loadWords() {
-    document.getElementById('loading-indicator').style.display = '';
+    document.getElementById('words-tbody').innerHTML = '<tr><td colspan="7" class="loading-overlay"><span class="spinner"></span> Loading words...</td></tr>';
     fetch(API + '/words.php?list=all', {credentials:'include'}).then(r=>r.json()).then(function(data) {
-        document.getElementById('loading-indicator').style.display = 'none';
         if (data.error) { alert(data.error); return; }
         allWords = data;
         renderTable(allWords);
@@ -329,6 +383,13 @@ function doSearch() {
 
 function clearSearch() {
     document.getElementById('search-input').value = '';
+    document.getElementById('filter-active').value = '';
+    document.getElementById('filter-strongs').value = '';
+    document.getElementById('filter-hebrew').value = '';
+    document.getElementById('filter-yt').value = '';
+    document.getElementById('filter-spellings').value = '';
+    document.getElementById('filter-def').value = '';
+    document.getElementById('filter-count').value = '';
     renderTable(allWords);
 }
 
@@ -337,8 +398,46 @@ document.getElementById('search-input').addEventListener('keydown', function(e) 
 });
 
 // ── Table ──
+var currentWords = []; // words currently in the table (before column filters)
+
+function applyFilters() {
+    renderTable(currentWords);
+}
+
+function getColumnFilters() {
+    return {
+        active: document.getElementById('filter-active').value,
+        strongs: document.getElementById('filter-strongs').value.trim().toLowerCase(),
+        hebrew: document.getElementById('filter-hebrew').value.trim().toLowerCase(),
+        yt: document.getElementById('filter-yt').value.trim().toLowerCase(),
+        spellings: document.getElementById('filter-spellings').value.trim().toLowerCase(),
+        def: document.getElementById('filter-def').value.trim().toLowerCase(),
+        count: document.getElementById('filter-count').value.trim()
+    };
+}
+
+function matchesFilters(w, f) {
+    if (f.active !== '' && ((f.active === '1') !== !!w.word_active_flag)) return false;
+    if (f.strongs && !(w.word_strongs || '').toLowerCase().startsWith(f.strongs)) return false;
+    if (f.hebrew && !(w.word_hebrew || '').toLowerCase().includes(f.hebrew)) return false;
+    if (f.yt && !(w.word_yt || '').toLowerCase().includes(f.yt)) return false;
+    if (f.spellings && !(w.spellings_display || '').toLowerCase().includes(f.spellings)) return false;
+    if (f.def) {
+        var defAll = ((w.word_definition_yy || '') + ' ' + (w.word_definition_kirk || '') + ' ' + (w.word_definition_external || '')).toLowerCase();
+        if (!defAll.includes(f.def)) return false;
+    }
+    if (f.count) {
+        var minCount = parseInt(f.count, 10);
+        if (!isNaN(minCount) && (w.word_count_yy == null || w.word_count_yy < minCount)) return false;
+    }
+    return true;
+}
+
 function renderTable(words) {
-    var sorted = words.slice().sort(function(a, b) {
+    currentWords = words;
+    var f = getColumnFilters();
+    var filtered = words.filter(function(w) { return matchesFilters(w, f); });
+    var sorted = filtered.slice().sort(function(a, b) {
         var va, vb;
         switch (sortCol) {
             case 'active': va = a.word_active_flag ? 1 : 0; vb = b.word_active_flag ? 1 : 0; break;
@@ -353,21 +452,25 @@ function renderTable(words) {
         return 0;
     });
 
-    document.getElementById('result-count').textContent = words.length + ' words';
+    document.getElementById('result-count').textContent = filtered.length + (filtered.length !== words.length ? ' / ' + words.length : '') + ' words';
 
     var tbody = document.getElementById('words-tbody');
     var html = '';
     for (var i = 0; i < sorted.length; i++) {
         var w = sorted[i];
-        var defPreview = w.word_definition_yy || w.word_definition_kirk || '';
-        if (defPreview.length > 80) defPreview = defPreview.substring(0, 80) + '...';
+        var defParts = [];
+        if (w.word_definition_yy) defParts.push(w.word_definition_yy);
+        if (w.word_definition_kirk) defParts.push(w.word_definition_kirk);
+        if (w.word_definition_external) defParts.push(w.word_definition_external);
+        var defFull = defParts.join(' ');
+        var defPreview = defFull.length > 80 ? defFull.substring(0, 80) + '...' : defFull;
         html += '<tr onclick="editWord(' + w.word_id + ')">';
         html += '<td class="col-active"><span class="active-dot ' + (w.word_active_flag ? 'on' : 'off') + '"></span></td>';
         html += '<td class="col-strongs">' + esc(w.word_strongs) + '</td>';
         html += '<td class="col-hebrew">' + esc(w.word_hebrew) + '</td>';
         html += '<td class="col-yt">' + esc(w.word_yt || '') + '</td>';
         html += '<td class="col-spellings" title="' + esc(w.spellings_display || '') + '">' + esc(w.spellings_display || '') + '</td>';
-        html += '<td class="col-def" title="' + esc(defPreview) + '">' + esc(defPreview) + '</td>';
+        html += '<td class="col-def" title="' + esc(defFull) + '">' + esc(defPreview) + '</td>';
         html += '<td class="col-count">' + (w.word_count_yy != null ? w.word_count_yy : '') + '</td>';
         html += '</tr>';
     }
@@ -384,6 +487,7 @@ function renderTable(words) {
 }
 
 document.getElementById('words-table').addEventListener('click', function(e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     var th = e.target.closest('.sortable');
     if (!th) return;
     var col = th.getAttribute('data-col');
@@ -431,8 +535,7 @@ function editWord(wordId) {
         document.getElementById('f-yt').value = w.word_yt || '';
         document.getElementById('f-active').checked = !!w.word_active_flag;
 
-        document.getElementById('f-gender-m').checked = !!w.word_flag_gender_m;
-        document.getElementById('f-gender-f').checked = !!w.word_flag_gender_f;
+        document.getElementById('f-gender').value = w.word_gender || '';
         document.getElementById('f-plural').checked = !!w.word_flag_plural;
         document.getElementById('f-noun').checked = !!w.word_flag_noun;
         document.getElementById('f-verb').checked = !!w.word_flag_verb;
@@ -444,6 +547,7 @@ function editWord(wordId) {
 
         document.getElementById('f-def-yy').value = w.word_definition_yy || '';
         document.getElementById('f-def-kirk').value = w.word_definition_kirk || '';
+        document.getElementById('f-def-external').value = w.word_definition_external || '';
 
         var list = document.getElementById('spelling-list');
         list.innerHTML = '';
@@ -465,10 +569,12 @@ function clearForm() {
     document.getElementById('f-yt').value = '';
     document.getElementById('f-active').checked = true;
     document.getElementById('spelling-total').textContent = '';
-    var flags = ['f-gender-m','f-gender-f','f-plural','f-noun','f-verb','f-adjective','f-adverb','f-preposition','f-conjunction','f-subst'];
+    document.getElementById('f-gender').value = '';
+    var flags = ['f-plural','f-noun','f-verb','f-adjective','f-adverb','f-preposition','f-conjunction','f-subst'];
     for (var i = 0; i < flags.length; i++) document.getElementById(flags[i]).checked = false;
     document.getElementById('f-def-yy').value = '';
     document.getElementById('f-def-kirk').value = '';
+    document.getElementById('f-def-external').value = '';
     document.getElementById('spelling-list').innerHTML = '';
 }
 
@@ -529,8 +635,7 @@ function saveWord() {
         word_strongs: document.getElementById('f-strongs').value,
         word_hebrew: document.getElementById('f-hebrew').value,
         word_active_flag: document.getElementById('f-active').checked,
-        word_flag_gender_m: document.getElementById('f-gender-m').checked,
-        word_flag_gender_f: document.getElementById('f-gender-f').checked,
+        word_gender: document.getElementById('f-gender').value,
         word_flag_plural: document.getElementById('f-plural').checked,
         word_flag_noun: document.getElementById('f-noun').checked,
         word_flag_verb: document.getElementById('f-verb').checked,
@@ -541,6 +646,7 @@ function saveWord() {
         word_flag_subst: document.getElementById('f-subst').checked,
         word_definition_kirk: document.getElementById('f-def-kirk').value,
         word_definition_yy: document.getElementById('f-def-yy').value,
+        word_definition_external: document.getElementById('f-def-external').value,
         spellings: getSpellings()
     };
 
@@ -687,6 +793,65 @@ function hebrewBackspace() {
 }
 
 buildHebrewKeyboard();
+
+// ── Filter Hebrew keyboard popover ──
+function buildFilterKb() {
+    var popover = document.getElementById('filter-kb-popover');
+    var html = '<div class="hebrew-kb">';
+    for (var i = 0; i < HEBREW_LETTERS.length; i++) {
+        var lt = HEBREW_LETTERS[i];
+        var yt = HEBREW_YT_MAP[lt.ch] || '';
+        html += '<button type="button" title="' + lt.name + '" onmousedown="insertFilterHebrew(\'' + lt.ch + '\'); event.preventDefault();">' +
+                lt.ch + '<span class="kb-sub">' + yt + '</span></button>';
+    }
+    html += '<button type="button" class="kb-special" onmousedown="filterHebrewBackspace(); event.preventDefault();" title="Remove last character">\u232B</button>';
+    html += '</div>';
+    popover.innerHTML = html;
+}
+
+function showFilterKb() {
+    document.getElementById('filter-kb-popover').classList.add('visible');
+}
+
+function hideFilterKb() {
+    document.getElementById('filter-kb-popover').classList.remove('visible');
+}
+
+function insertFilterHebrew(ch) {
+    var input = document.getElementById('filter-hebrew');
+    var start = input.selectionStart;
+    var end = input.selectionEnd;
+    var val = input.value;
+    input.value = val.substring(0, start) + ch + val.substring(end);
+    input.selectionStart = input.selectionEnd = start + ch.length;
+    input.focus();
+    applyFilters();
+}
+
+function filterHebrewBackspace() {
+    var input = document.getElementById('filter-hebrew');
+    var pos = input.selectionStart;
+    var val = input.value;
+    if (pos > 0) {
+        input.value = val.substring(0, pos - 1) + val.substring(pos);
+        input.selectionStart = input.selectionEnd = pos - 1;
+    } else if (val.length > 0) {
+        input.value = val.substring(0, val.length - 1);
+    }
+    input.focus();
+    applyFilters();
+}
+
+// Hide popover when clicking outside
+document.addEventListener('mousedown', function(e) {
+    var popover = document.getElementById('filter-kb-popover');
+    var filterInput = document.getElementById('filter-hebrew');
+    if (!popover.contains(e.target) && e.target !== filterInput) {
+        hideFilterKb();
+    }
+});
+
+buildFilterKb();
 
 // ── Init ──
 checkAuth();
