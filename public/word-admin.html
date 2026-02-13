@@ -57,8 +57,9 @@
             display: flex;
             flex-wrap: wrap;
             gap: 4px;
-            margin-top: 6px;
-            max-width: 440px;
+            margin-top: 8px;
+            margin-bottom: 4px;
+            max-width: 404px;
         }
         .hebrew-kb button {
             width: 36px; height: 36px;
@@ -91,6 +92,26 @@
             right: 3px;
         }
         .hebrew-kb button { position: relative; }
+
+        /* Loading indicator */
+        .loading-overlay {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: #777;
+            font-size: 0.95rem;
+        }
+        .spinner {
+            display: inline-block;
+            width: 20px; height: 20px;
+            border: 3px solid #ddd;
+            border-top-color: #3498db;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 10px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -134,6 +155,7 @@
                     <button class="btn btn-primary" onclick="newWord()">New Word</button>
                 </div>
             </div>
+            <div id="loading-indicator" class="loading-overlay"><span class="spinner"></span> Loading words...</div>
             <div class="table-wrap" style="max-height:70vh;overflow-y:auto">
                 <table id="words-table">
                     <thead>
@@ -173,8 +195,6 @@
                     <div class="field field-medium">
                         <label for="f-hebrew">Hebrew</label>
                         <input type="text" id="f-hebrew" dir="rtl" style="font-size:1.2rem" oninput="updateYtPreview()">
-                        <div class="hebrew-kb" id="hebrew-kb"></div>
-                        <div class="hebrew-kb-label">Click letters to insert. Backspace removes last character.</div>
                     </div>
                     <div class="field field-narrow field-readonly">
                         <label for="f-yt">YT</label>
@@ -187,6 +207,8 @@
                         </label>
                     </div>
                 </div>
+                <div class="hebrew-kb" id="hebrew-kb"></div>
+                <div class="hebrew-kb-label">Click letters to insert into Hebrew field. Backspace removes last character.</div>
             </div>
 
             <div class="form-section">
@@ -287,7 +309,9 @@ document.getElementById('login-pass').addEventListener('keydown', function(e) {
 
 // ── Load words ──
 function loadWords() {
+    document.getElementById('loading-indicator').style.display = '';
     fetch(API + '/words.php?list=all', {credentials:'include'}).then(r=>r.json()).then(function(data) {
+        document.getElementById('loading-indicator').style.display = 'none';
         if (data.error) { alert(data.error); return; }
         allWords = data;
         renderTable(allWords);
@@ -474,8 +498,12 @@ function addSpelling(text, count) {
 }
 
 function removeSpelling(btn) {
-    btn.closest('.spelling-item').remove();
+    var item = btn.closest('.spelling-item');
+    var text = item.querySelector('input').value.trim();
+    if (!confirm('Remove spelling' + (text ? ' "' + text + '"' : '') + '?')) return;
+    item.remove();
     renumberSpellings();
+    updateSpellingTotal();
 }
 
 function renumberSpellings() {
