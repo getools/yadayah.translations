@@ -16,6 +16,10 @@
         .search-bar { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; }
         .search-bar input { flex: 1; max-width: 400px; }
         .search-bar .result-count { font-size: 0.85rem; color: #777; }
+        .scripture-filter-bar { display: flex; gap: 16px; margin-bottom: 12px; align-items: center; }
+        .scripture-filter-bar label { display: flex; align-items: center; gap: 6px; font-size: 0.875rem; font-weight: 600; color: #555; }
+        .scripture-filter-bar select { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.875rem; min-width: 120px; }
+        .scripture-filter-bar select:disabled { background: #f0f0f0; color: #999; }
 
         #words-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
         #words-table th, #words-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #e0e0e0; }
@@ -190,6 +194,23 @@
                 <div style="margin-left:auto">
                     <button class="btn btn-primary" onclick="newWord()">New Word</button>
                 </div>
+            </div>
+            <div class="scripture-filter-bar">
+                <label>Book
+                    <select id="filter-scroll" onchange="onScrollChange()">
+                        <option value="">All</option>
+                    </select>
+                </label>
+                <label>Chapter
+                    <select id="filter-chapter" onchange="onChapterChange()" disabled>
+                        <option value="">All</option>
+                    </select>
+                </label>
+                <label>Verse
+                    <select id="filter-verse" onchange="onVerseChange()" disabled>
+                        <option value="">All</option>
+                    </select>
+                </label>
             </div>
             <div class="table-wrap" style="max-height:70vh;overflow-y:auto">
                 <table id="words-table">
@@ -370,6 +391,91 @@ function loadWords() {
         allWords = data;
         renderTable(allWords);
     });
+    loadScrolls();
+}
+
+// ── Scripture filter cascading dropdowns ──
+var scriptureWordIds = null; // null = no filter, Set = filtered word_ids
+
+function loadScrolls() {
+    fetch(API + '/scrolls.php', {credentials:'include'}).then(r=>r.json()).then(function(data) {
+        var sel = document.getElementById('filter-scroll');
+        sel.innerHTML = '<option value="">All</option>';
+        data.forEach(function(s) {
+            var opt = document.createElement('option');
+            opt.value = s.yah_scroll_key;
+            opt.textContent = s.yah_scroll_label_common;
+            sel.appendChild(opt);
+        });
+    });
+}
+
+function resetDropdown(id) {
+    var sel = document.getElementById(id);
+    sel.innerHTML = '<option value="">All</option>';
+    sel.disabled = true;
+}
+
+function onScrollChange() {
+    var scrollKey = document.getElementById('filter-scroll').value;
+    resetDropdown('filter-chapter');
+    resetDropdown('filter-verse');
+    if (scrollKey) {
+        fetch(API + '/chapters.php?scroll_key=' + scrollKey, {credentials:'include'}).then(r=>r.json()).then(function(data) {
+            var sel = document.getElementById('filter-chapter');
+            sel.innerHTML = '<option value="">All</option>';
+            data.forEach(function(c) {
+                var opt = document.createElement('option');
+                opt.value = c.yah_chapter_key;
+                opt.textContent = c.yah_chapter_number;
+                sel.appendChild(opt);
+            });
+            sel.disabled = false;
+        });
+    }
+    loadFilteredWordIds();
+}
+
+function onChapterChange() {
+    var chapterKey = document.getElementById('filter-chapter').value;
+    resetDropdown('filter-verse');
+    if (chapterKey) {
+        fetch(API + '/verses.php?chapter_key=' + chapterKey, {credentials:'include'}).then(r=>r.json()).then(function(data) {
+            var sel = document.getElementById('filter-verse');
+            sel.innerHTML = '<option value="">All</option>';
+            data.forEach(function(v) {
+                var opt = document.createElement('option');
+                opt.value = v.yah_verse_key;
+                opt.textContent = v.yah_verse_number;
+                sel.appendChild(opt);
+            });
+            sel.disabled = false;
+        });
+    }
+    loadFilteredWordIds();
+}
+
+function onVerseChange() {
+    loadFilteredWordIds();
+}
+
+function loadFilteredWordIds() {
+    var scrollKey = document.getElementById('filter-scroll').value;
+    if (!scrollKey) {
+        scriptureWordIds = null;
+        applyFilters();
+        return;
+    }
+    var url = API + '/words.php?filter_scroll=' + scrollKey;
+    var chapterKey = document.getElementById('filter-chapter').value;
+    if (chapterKey) url += '&filter_chapter=' + chapterKey;
+    var verseKey = document.getElementById('filter-verse').value;
+    if (verseKey) url += '&filter_verse=' + verseKey;
+
+    fetch(url, {credentials:'include'}).then(r=>r.json()).then(function(data) {
+        scriptureWordIds = new Set(data.word_ids || []);
+        applyFilters();
+    });
 }
 
 function doSearch() {
@@ -390,6 +496,10 @@ function clearSearch() {
     document.getElementById('filter-spellings').value = '';
     document.getElementById('filter-def').value = '';
     document.getElementById('filter-count').value = '';
+    document.getElementById('filter-scroll').value = '';
+    resetDropdown('filter-chapter');
+    resetDropdown('filter-verse');
+    scriptureWordIds = null;
     renderTable(allWords);
 }
 
@@ -417,6 +527,7 @@ function getColumnFilters() {
 }
 
 function matchesFilters(w, f) {
+    if (scriptureWordIds !== null && !scriptureWordIds.has(w.word_id)) return false;
     if (f.active !== '' && ((f.active === '1') !== !!w.word_active_flag)) return false;
     if (f.strongs && !(w.word_strongs || '').toLowerCase().startsWith(f.strongs)) return false;
     if (f.hebrew && !(w.word_hebrew || '').toLowerCase().includes(f.hebrew)) return false;

@@ -38,6 +38,41 @@ function handleGet(PDO $db): void {
         jsonResponse($word);
     }
 
+    // Filter word IDs by scripture scope (Book/Chapter/Verse)
+    if (isset($_GET['filter_scroll']) && ctype_digit($_GET['filter_scroll'])) {
+        $scrollKey = (int)$_GET['filter_scroll'];
+        $chapterKey = isset($_GET['filter_chapter']) && ctype_digit($_GET['filter_chapter']) ? (int)$_GET['filter_chapter'] : null;
+        $verseKey = isset($_GET['filter_verse']) && ctype_digit($_GET['filter_verse']) ? (int)$_GET['filter_verse'] : null;
+
+        $sql = "SELECT yy_translation_copy FROM yy_translation WHERE yah_scroll_key = ?";
+        $params = [$scrollKey];
+        if ($chapterKey) { $sql .= " AND yah_chapter_key = ?"; $params[] = $chapterKey; }
+        if ($verseKey) { $sql .= " AND yah_verse_key = ?"; $params[] = $verseKey; }
+
+        $stmt = $db->prepare($sql);
+        $stmt->execute($params);
+
+        $spellings = [];
+        while ($row = $stmt->fetch()) {
+            $copy = $row['yy_translation_copy'];
+            if ($copy && preg_match_all('/<span\s+class="word"[^>]*>(.*?)<\/span>/si', $copy, $m)) {
+                foreach ($m[1] as $w) {
+                    $clean = strtolower(trim(strip_tags($w)));
+                    if ($clean !== '') $spellings[$clean] = true;
+                }
+            }
+        }
+
+        if (empty($spellings)) { jsonResponse(['word_ids' => []]); }
+
+        $phs = implode(',', array_fill(0, count($spellings), '?'));
+        $stmt2 = $db->prepare("SELECT DISTINCT word_id FROM yy_word_spelling WHERE LOWER(word_spelling_text) IN ($phs)");
+        $stmt2->execute(array_keys($spellings));
+        $ids = array_map('intval', array_column($stmt2->fetchAll(), 'word_id'));
+
+        jsonResponse(['word_ids' => $ids]);
+    }
+
     // Search
     if (isset($_GET['search']) && trim($_GET['search']) !== '') {
         $term = '%' . trim($_GET['search']) . '%';
