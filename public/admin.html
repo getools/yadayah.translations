@@ -1,2 +1,85 @@
 <!DOCTYPE html>
-<html><head><meta http-equiv="refresh" content="0;url=admin-word.html"><script>location.replace('admin-word.html');</script></head></html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Yada Yah</title>
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<h1>Admin</h1>
+
+<div id="login-screen" class="login-card">
+    <div class="field">
+        <label for="login-user">Login</label>
+        <input type="text" id="login-user" autocomplete="username">
+    </div>
+    <div class="field">
+        <label for="login-pass">Password</label>
+        <input type="password" id="login-pass" autocomplete="current-password">
+    </div>
+    <div id="login-error" class="error-messages" style="display:none"></div>
+    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Login</button>
+</div>
+
+<div id="app" class="container" style="display:none">
+    <div class="app-header">
+        <nav class="nav-tabs">
+            <a href="admin-translation.html" class="nav-tab">Translation</a>
+            <a href="admin-word.html" class="nav-tab">Word</a>
+        </nav>
+        <div class="user-info">
+            <span id="user-display"></span>
+            <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
+        </div>
+    </div>
+</div>
+
+<script>
+var API = '/api';
+
+function checkAuth() {
+    fetch(API + '/auth.php', {credentials:'include'}).then(r=>r.json()).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+        }
+    });
+}
+
+function doLogin() {
+    var user = document.getElementById('login-user').value;
+    var pass = document.getElementById('login-pass').value;
+    var errEl = document.getElementById('login-error');
+    errEl.style.display = 'none';
+    fetch(API + '/auth.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({login: user, password: pass})
+    }).then(r=>r.json()).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+        } else {
+            errEl.textContent = d.error || 'Login failed';
+            errEl.style.display = '';
+        }
+    });
+}
+
+function doLogout() {
+    fetch(API + '/auth.php', {method:'DELETE', credentials:'include'}).then(function() {
+        location.reload();
+    });
+}
+
+document.getElementById('login-pass').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doLogin();
+});
+
+checkAuth();
+</script>
+</body>
+</html>
