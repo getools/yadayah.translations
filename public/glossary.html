@@ -23,7 +23,7 @@
             display: flex; flex-direction: column; align-items: center;
             padding: 10px 0 5px;
             background: url('https://yadayah.com/wp-content/uploads/2026/01/yy_bg_bluewave.0004.jpg') center/cover no-repeat;
-            margin: -20px -20px 20px -20px;
+            margin: -20px -20px 0 -20px;
             position: relative;
             overflow: hidden;
         }
@@ -60,6 +60,31 @@
         }
         @media (max-width: 767px) {
             header nav a.hide-narrower { display: none; }
+        }
+
+        /* Page tabs */
+        .page-tabs {
+            display: flex;
+            justify-content: center;
+            gap: 0;
+            margin: 0 -20px 20px -20px;
+            background: #f0f0f0;
+            border-bottom: 2px solid #ddd;
+        }
+        .page-tabs a {
+            padding: 12px 32px;
+            text-decoration: none;
+            font-family: "Julius Sans One", sans-serif;
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #666;
+            border-bottom: 3px solid transparent;
+            transition: color 0.2s, border-color 0.2s;
+        }
+        .page-tabs a:hover { color: #31345A; }
+        .page-tabs a.active {
+            color: #31345A;
+            border-bottom-color: #31345A;
         }
 
         /* Page title */
@@ -213,7 +238,10 @@
         </div>
     </header>
 
-    <h1 class="page-title">Glossary</h1>
+    <div class="page-tabs">
+        <a href="/">Translations</a>
+        <a href="/glossary.html" class="active">Glossary</a>
+    </div>
 
     <div style="max-width:1024px;margin:0 auto;">
     <div id="letter-grid" class="letter-grid"></div>
