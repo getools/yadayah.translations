@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>Translation Display</title>
+    <title>Yada Yah-Translations</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Julius+Sans+One&display=swap" rel="stylesheet">
@@ -88,10 +88,22 @@
             padding: 10px 0 5px;
             background: url('https://yadayah.com/wp-content/uploads/2026/01/yy_bg_bluewave.0004.jpg') center/cover no-repeat;
             margin: -20px -20px 20px -20px;
+            position: relative;
+            overflow: hidden;
+        }
+        header .header-video {
+            position: absolute;
+            top: 50%; left: 50%;
+            min-width: 100%; min-height: 100%;
+            transform: translate(-50%, -50%);
+            object-fit: cover;
+            z-index: 0;
         }
         header .header-inner {
             display: flex; flex-direction: column; align-items: center;
             width: 100%; max-width: 1140px; margin: 0 auto;
+            position: relative;
+            z-index: 1;
         }
         header .header-logos { display: flex; flex-direction: column; align-items: center; gap: 5px; }
         header .header-logos a:first-child img { width: 81px; height: 90px; }
@@ -117,6 +129,9 @@
 </head>
 <body>
     <header>
+        <video class="header-video" autoplay muted loop playsinline>
+            <source src="https://yadayah.com/resource/yy_bg_bluewave.0004-ezgif.1280x0768.webm" type="video/webm">
+        </video>
         <div class="header-inner">
             <div class="header-logos">
                 <a href="https://yadayah.com/"><img src="https://yadayah.com/wp-content/uploads/2026/01/logo.Manowrah.00081x00090.png" alt=""></a>
