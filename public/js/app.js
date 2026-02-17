@@ -535,7 +535,7 @@ $(function () {
             if (t.yy_translation_date) meta += '<span><strong>Date:</strong> ' + escHtml(t.yy_translation_date) + '</span>';
             var card = '<div class="translation-card" data-key="' + t.yy_translation_key + '">' +
                 '<div class="translation-meta">' + meta + '</div>' +
-                '<div class="translation-preview">' + (t.yy_translation_copy || '') + '</div>' +
+                '<div class="translation-preview">' + (t.yy_translation_copy || '') + '<span style="font-size:2pt;color:white"> ' + t.yy_translation_key + '</span></div>' +
                 '<div class="translation-actions">' +
                 '<button class="btn btn-primary btn-sm btn-edit">Edit</button>' +
                 '<button class="btn btn-danger btn-sm btn-delete">Delete</button>' +

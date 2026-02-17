@@ -33,7 +33,7 @@
         }
         button:hover, .btn-link:hover { background-color: #4a4e7a; box-shadow: 0 3px 8px rgba(0,0,0,0.2); }
         .btn-link { text-decoration: none; display: inline-block; margin-left: auto; }
-        .results { margin-top: 20px; }
+        .results { margin-top: 20px; max-width: 1024px; margin-left: auto; margin-right: auto; }
         .section-break { margin-top: 15px; padding: 10px 0; border-top: 3px solid #999; border-bottom: 2px solid #ccc; font-weight: bold; }
         .section-break a:hover { text-decoration: underline; }
         .record { margin: 5px 0; padding: 5px; }
@@ -443,11 +443,12 @@
                 var flipCode = record.yy_volume_flip_code;
                 var page = record.translation_page;
                 var bookPage;
+                var chapterName = record.yy_chapter_name || '';
                 if (flipCode) {
                     var url = 'https://book.yadayah.com/books/' + encodeURIComponent(flipCode) + '/' + (page ? '#p=' + (page + 6) : '');
-                    bookPage = '<a href="' + url + '" target="_blank"><strong>' + bookName + '</strong> - Page ' + (page || '?') + '</a>';
+                    bookPage = '<a href="' + url + '" target="_blank"><strong>' + bookName + '</strong>' + (chapterName ? ' - ' + chapterName : '') + ' - Page ' + (page || '?') + '</a>';
                 } else {
-                    bookPage = '<strong>' + bookName + '</strong> - Page ' + (page || '?');
+                    bookPage = '<strong>' + bookName + '</strong>' + (chapterName ? ' - ' + chapterName : '') + ' - Page ' + (page || '?');
                 }
 
                 // Pre-embed word links into HTML before DOM insertion
@@ -488,7 +489,7 @@
                     html = '<p>' + html + '</p>';
                 }
 
-                recordDiv.innerHTML = bookPage + ':' + html;
+                recordDiv.innerHTML = bookPage + ':' + html + '<span style="font-size:2pt;color:white"> ' + record.translation_id + '</span>';
                 resultsDiv.appendChild(recordDiv);
             });
 

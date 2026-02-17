@@ -24,7 +24,7 @@ switch ($action) {
             FROM yy_word w
             WHERE w.word_active_flag = true
               AND LEFT(w.word_yt, 1) = ?
-            ORDER BY w.word_yt ASC
+            ORDER BY w.word_strongs ASC
         ");
         $stmt->execute([$letter]);
         jsonResponse($stmt->fetchAll());

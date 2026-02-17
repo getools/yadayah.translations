@@ -48,7 +48,11 @@ $stmt = $pdo->prepare("
            v.yah_verse_number AS translation_cite_verse,
            NULL AS translation_cite_verse_end,
            t.yah_scroll_key AS translation_cite_book_id,
-           vol.yy_volume_flip_code
+           vol.yy_volume_flip_code,
+           (SELECT 'Chapter ' || ch.yy_chapter_number || ':' || ch.yy_chapter_name FROM yy_chapter ch
+            WHERE ch.yy_volume_key = t.yy_volume_key
+              AND ch.yy_chapter_page <= t.yy_translation_page
+            ORDER BY ch.yy_chapter_page DESC LIMIT 1) AS yy_chapter_name
     FROM yy_translation t
     JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
     JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
