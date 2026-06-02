@@ -78,7 +78,9 @@ for ($i = 0; $i < $maxBatch; $i++) {
 if ($logged > 0) {
     $noiseTerms = ['chrome-extension', 'moz-extension', 'safari-extension', 'window.ethereum',
         '__firefox__', 'ResizeObserver', 'googletagmanager', 'gtag', 'standardSelectors',
-        'Object Not Found Matching Id', 'The string did not match the expected pattern'];
+        'Object Not Found Matching Id', 'The string did not match the expected pattern',
+        'The operation was aborted',
+        'media resource was aborted by the user agent'];
     $resolveStmt = $db->prepare("UPDATE yy_monitor_event SET event_resolved_flag = TRUE, event_resolved_dtime = NOW(), event_action_taken = ? WHERE event_key = ? AND event_resolved_flag = FALSE");
     $pending = $db->prepare("SELECT event_key, event_message, event_detail FROM yy_monitor_event WHERE event_resolved_flag = FALSE AND event_dtime > NOW() - INTERVAL '5 minutes' ORDER BY event_dtime DESC LIMIT 30");
     $pending->execute();

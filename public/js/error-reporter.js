@@ -18,7 +18,13 @@
     // etc.) to a generic "Script error" reported at @0:0. Nothing we
     // can act on, and it spammed the monitor whenever a YouTube embed
     // went fullscreen on the search prototype.
-    /^Script error\.?$/i
+    /^Script error\.?$/i,
+    // Firefox AbortError when user navigates away — pending fetches are
+    // cancelled by the browser; no stack trace, not actionable.
+    /The operation was aborted\./i,
+    // bg-video.js calls videos[i].load() during a <source> swap which
+    // aborts the previous in-flight fetch — expected browser behavior.
+    /The fetching process for the media resource was aborted/i
   ];
 
   // Files whose errors we should not report (third-party bundles)
