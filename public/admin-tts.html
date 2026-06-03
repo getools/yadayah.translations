@@ -150,6 +150,7 @@
     <div class="tts-tabs">
         <button data-tab="defaults"      class="active">Defaults</button>
         <button data-tab="voices">Voices</button>
+        <button data-tab="customize" title="Train / clone a custom voice for a self-hosted provider">Customize</button>
         <button data-tab="pronunciations">Pronunciations</button>
         <button data-tab="pauses">Pauses</button>
         <button data-tab="fonts">Fonts</button>
@@ -231,7 +232,13 @@
             <h3>Voice catalog</h3>
             <p class="desc">Every voice Azure offers in your region. Uncheck a row to hide it from the picker dropdowns above. Click ▶ to hear a row's voice say the text from <em>Preview any voice</em>, using that section's Rate &amp; Pitch.</p>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:0.85rem;flex-wrap:wrap;">
-                <button type="button" id="vc-refresh-btn" onclick="refreshVoiceCatalog()" title="Pull the latest /voices/list from Azure and upsert into the catalog. Existing active flags are preserved." style="padding:5px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">Check for new voices</button>
+                <button type="button" id="vc-refresh-btn" onclick="refreshVoiceCatalog()" title="Pull the latest voice list from the selected provider (or every active provider when 'All providers' is chosen) and upsert into the catalog. Existing active flags are preserved." style="padding:5px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">Check for new voices</button>
+                <!-- Provider scope for the refresh button + the table below.
+                     "All providers" (default) lists every voice in the catalog
+                     and refreshes each active provider in turn. -->
+                <select id="vc-refresh-provider" onchange="loadVoiceCatalog()" title="Which provider to refresh / which provider's voices to display" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;background:#fff;">
+                    <option value="all">All providers</option>
+                </select>
                 <span id="vc-refresh-status" style="font-size:0.8rem;"></span>
                 <div style="flex:1 1 auto;"></div>
                 <span id="vc-summary" style="color:#666;font-size:0.8rem;font-variant-numeric:tabular-nums;"></span>
@@ -302,6 +309,57 @@
             </table>
             <audio id="vc-audio" controls preload="none" style="width:100%;margin-top:8px;display:none;"></audio>
             <div id="vc-status" class="status-msg"></div>
+        </div>
+    </div>
+
+    <!-- ── Customize tab — train / clone a custom voice ──────────────── -->
+    <div id="pane-customize" class="tts-pane">
+        <div class="tts-section">
+            <h3>Custom voice training</h3>
+            <p class="desc">Create a custom voice by uploading a clean reference clip to a self-hosted provider that supports voice cloning. Providers without customization (Kokoro, Azure Standard) are not listed. Azure Custom Neural Voice has a different workflow in Azure Speech Studio — not exposed here.</p>
+
+            <div style="display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap;margin-top:12px;">
+                <!-- LEFT: provider + form -->
+                <div style="flex:1 1 380px;min-width:320px;">
+                    <label style="font-weight:600;display:block;margin-bottom:6px;font-size:0.9rem;">Provider</label>
+                    <select id="cv-provider" onchange="onCustomizeProviderChange()" style="width:100%;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;background:#fff;">
+                        <option value="">— select a provider —</option>
+                    </select>
+
+                    <div id="cv-form" style="margin-top:14px;display:none;">
+                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Voice code <span style="color:#888;font-weight:normal;">(slug; will be prefixed per provider)</span></label>
+                        <input id="cv-code" type="text" placeholder="e.g. craig" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
+
+                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Display name</label>
+                        <input id="cv-name" type="text" placeholder='e.g. "Craig — calm narrator"' style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
+
+                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Description <span style="color:#888;font-weight:normal;">(optional)</span></label>
+                        <textarea id="cv-desc" rows="2" placeholder="When to pick this voice over others" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;font-family:inherit;resize:vertical;"></textarea>
+
+                        <div id="cv-extra-fields"></div>
+
+                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Reference audio</label>
+                        <input id="cv-audio" type="file" accept="audio/wav,audio/mp3,audio/x-wav,audio/mpeg" onchange="onCustomizeFilePicked(this)" style="font-size:0.85rem;">
+                        <audio id="cv-preview" controls style="display:none;width:100%;margin-top:6px;"></audio>
+
+                        <button type="button" id="cv-submit" onclick="submitCustomizeVoice()" style="margin-top:12px;padding:6px 14px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.9rem;">Train voice</button>
+                        <span id="cv-submit-status" style="margin-left:10px;font-size:0.82rem;color:#888;"></span>
+                    </div>
+                </div>
+
+                <!-- RIGHT: per-provider instructions panel -->
+                <div style="flex:1 1 320px;min-width:300px;">
+                    <h4 style="margin:0 0 6px;color:#5b4a00;">Provider-specific guidance</h4>
+                    <div id="cv-instructions" style="background:#fffbe6;border:1px solid #e4d27a;border-radius:4px;padding:10px 14px;color:#5b4a00;font-size:0.85rem;line-height:1.5;">
+                        <p style="font-style:italic;margin:0;">Select a provider above to see its data requirements and workflow.</p>
+                    </div>
+                </div>
+            </div>
+
+            <h4 style="margin:22px 0 8px;color:#31345A;">Existing custom voices</h4>
+            <div id="cv-list" style="font-size:0.85rem;color:#666;">
+                <em>None yet. Custom voices you train above will appear here.</em>
+            </div>
         </div>
     </div>
 
@@ -564,11 +622,132 @@ function activateTtsTab(tabName) {
     var pane = $('pane-' + tabName);
     if (pane) pane.classList.add('active');
     if (tabName === 'voices') { loadVoiceCatalog(); pvEnsureSeriesLoaded(); }
+    if (tabName === 'customize') initCustomizeTab();
     if (tabName === 'pronunciations') loadTunes();
     if (tabName === 'pauses') loadPauses();
     if (tabName === 'fonts')  loadFonts();
     if (tabName === 'books') loadVolumes();
     return true;
+}
+
+// ── Customize tab ──────────────────────────────────────────────────────
+// Static registry of providers that support voice customization. The list +
+// instructions are intentionally hardcoded (not driven by yy_tts) so the tab
+// is informative even before a provider row has been registered. When a
+// provider's engine isn't installed/active yet, the option is `disabled` and
+// shows a short reason. Updated as engines land on the box.
+var CUSTOMIZE_PROVIDERS = {
+    chatterbox: {
+        label: 'Chatterbox',
+        disabled: true,
+        reason: 'Upstream packaging bug (transformers 5.x pin vs. 4.x imports). Re-enable when chatterbox-tts publishes a working release.',
+        codePrefix: 'cb-',
+        instructions: {
+            data:     'One clean 5–15 s clip, single speaker, no music/noise, 16–24 kHz mono WAV.',
+            workflow: 'Zero-shot — the clip registers as a voice on submit.',
+            time:     'Instant.',
+        },
+    },
+    cosyvoice: {
+        label: 'CosyVoice 2',
+        codePrefix: 'cv-',
+        instructions: {
+            data:     'One clean 3–10 s clip (zero-shot) <em>or</em> ~30 min of paired audio + transcript (fine-tune).',
+            workflow: 'Zero-shot by default. A fine-tune toggle (below) trades the longer-data path for higher fidelity.',
+            time:     'Instant for zero-shot; ~30 min for fine-tune.',
+        },
+        extraFields: [
+            { id: 'cv-cosy-finetune', type: 'checkbox', label: 'Fine-tune (longer data required, slower; default off)' },
+        ],
+    },
+    qwen3: {
+        label: 'Qwen3-Omni',
+        codePrefix: 'qw-',
+        instructions: {
+            data:     'One <strong>10–30 s</strong> clip + optional style descriptor ("warm, measured").',
+            workflow: 'Zero-shot — the clip + style prompt register as a voice.',
+            time:     'Instant.',
+        },
+        extraFields: [
+            { id: 'cv-qwen-style', type: 'text', label: 'Style descriptor', placeholder: 'e.g. warm, measured, slightly dramatic' },
+        ],
+    },
+};
+
+var _customizeInit = false;
+function initCustomizeTab() {
+    if (_customizeInit) return;
+    _customizeInit = true;
+    var sel = document.getElementById('cv-provider');
+    if (!sel) return;
+    var opts = '<option value="">— select a provider —</option>';
+    Object.keys(CUSTOMIZE_PROVIDERS).forEach(function (k) {
+        var p = CUSTOMIZE_PROVIDERS[k];
+        opts += '<option value="' + k + '"' + (p.disabled ? ' disabled' : '') + '>'
+              + escapeHtml(p.label) + (p.disabled ? ' — unavailable' : '') + '</option>';
+    });
+    sel.innerHTML = opts;
+}
+
+function onCustomizeProviderChange() {
+    var sel = document.getElementById('cv-provider');
+    var key = sel ? sel.value : '';
+    var meta = CUSTOMIZE_PROVIDERS[key];
+    var form = document.getElementById('cv-form');
+    var ins  = document.getElementById('cv-instructions');
+    var extra = document.getElementById('cv-extra-fields');
+    if (!meta) {
+        if (form) form.style.display = 'none';
+        if (ins)  ins.innerHTML = '<p style="font-style:italic;margin:0;">Select a provider above to see its data requirements and workflow.</p>';
+        return;
+    }
+    if (form) form.style.display = '';
+    if (ins) {
+        var html = '<dl style="margin:0;">'
+                 + '<dt style="font-weight:700;margin-top:4px;">Data needed</dt><dd style="margin:0 0 8px;">' + meta.instructions.data + '</dd>'
+                 + '<dt style="font-weight:700;">Workflow</dt><dd style="margin:0 0 8px;">' + meta.instructions.workflow + '</dd>'
+                 + '<dt style="font-weight:700;">Time-to-voice</dt><dd style="margin:0;">' + meta.instructions.time + '</dd>'
+                 + '</dl>';
+        if (meta.reason) html += '<p style="margin:10px 0 0;color:#7a4a00;"><strong>Currently unavailable:</strong> ' + escapeHtml(meta.reason) + '</p>';
+        ins.innerHTML = html;
+    }
+    // Render provider-specific extra fields (Qwen3 style descriptor, CosyVoice
+    // fine-tune toggle, ...).
+    if (extra) {
+        if (meta.extraFields && meta.extraFields.length) {
+            extra.innerHTML = meta.extraFields.map(function (f) {
+                if (f.type === 'checkbox') {
+                    return '<label style="display:block;margin:8px 0 4px;font-size:0.85rem;"><input type="checkbox" id="' + f.id + '"> ' + escapeHtml(f.label) + '</label>';
+                }
+                return '<label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">' + escapeHtml(f.label) + '</label>'
+                     + '<input type="' + (f.type || 'text') + '" id="' + f.id + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">';
+            }).join('');
+        } else {
+            extra.innerHTML = '';
+        }
+    }
+    // Pre-fill the voice-code field with the provider's slug prefix.
+    var codeIn = document.getElementById('cv-code');
+    if (codeIn && !codeIn.value && meta.codePrefix) codeIn.value = meta.codePrefix;
+}
+
+function onCustomizeFilePicked(input) {
+    var audio = document.getElementById('cv-preview');
+    if (!input.files || !input.files[0] || !audio) { if (audio) audio.style.display = 'none'; return; }
+    audio.src = URL.createObjectURL(input.files[0]);
+    audio.style.display = '';
+}
+
+function submitCustomizeVoice() {
+    var s = document.getElementById('cv-submit-status');
+    if (!s) return;
+    // Backend upload endpoint isn't wired yet (needs POST /tts/voices on the
+    // box + a gpuRegisterVoice() helper in gpu-client.php). The form is the
+    // UI scaffold; once those land, this submit POSTs the multipart payload
+    // to /api/gpu-register-voice.php (or directly through gpu-client.php on
+    // an admin-only endpoint) and refreshes the catalog on success.
+    s.textContent = 'Backend not wired yet — UI scaffold only. Coming next: gpu-client.php upload endpoint.';
+    s.style.color = '#7a4a00';
 }
 document.querySelectorAll('.tts-tabs button').forEach(function(btn) {
     btn.addEventListener('click', function() {
@@ -605,6 +784,7 @@ async function bootstrap() {
         (ov.current.categories || []).forEach(c => { STATE.categories[c.tts_category] = c; });
     }
     populateSystemUI();
+    populateRefreshProviderDropdown();
     renderCategoryRows();
 }
 
@@ -1041,6 +1221,31 @@ var VC_DEFAULT_TEST_TEXT = 'Yahowah commanded the children of Yisraʾel to keep 
 // endpoint, so this is safe to run any time without re-enabling
 // previously-deactivated voices. New rows arrive with active_flag=false
 // — admins explicitly opt them in from the catalog table.
+// Returns the scope chosen in the vc-refresh-provider dropdown:
+//   ""  → all providers (no tts_key filter)
+//   "N" → just provider tts_key=N
+function getCatalogScopeKey() {
+    var sel = document.getElementById('vc-refresh-provider');
+    var v = sel ? sel.value : 'all';
+    return (v === '' || v === 'all') ? '' : v;
+}
+
+// Populate the dropdown from STATE.systems (loaded in bootstrap). Called once
+// providers are known, and again after a refresh when new providers may have
+// been registered.
+function populateRefreshProviderDropdown() {
+    var sel = document.getElementById('vc-refresh-provider');
+    if (!sel) return;
+    var prev = sel.value || 'all';
+    var html = '<option value="all">All providers</option>';
+    (STATE.systems || []).forEach(function (s) {
+        html += '<option value="' + s.tts_key + '">' + escapeHtml(s.tts_name || s.tts_code) + '</option>';
+    });
+    sel.innerHTML = html;
+    sel.value = prev;
+    if (sel.selectedIndex < 0) sel.value = 'all';
+}
+
 async function refreshVoiceCatalog() {
     var btn = $('vc-refresh-btn');
     // Inline span right next to the button stays visible after the
@@ -1048,14 +1253,22 @@ async function refreshVoiceCatalog() {
     // following a row update). #vc-status below the table is too far
     // down the page to be useful here.
     var s = $('vc-refresh-status');
-    if (btn) { btn.disabled = true; btn.textContent = 'Checking Azure…'; }
+    var scopeKey = getCatalogScopeKey();
+    if (btn) { btn.disabled = true; btn.textContent = scopeKey ? 'Checking…' : 'Checking all providers…'; }
     if (s)   { s.textContent = ''; s.style.color = '#666'; }
     try {
+        var body = { action:'refresh' };
+        if (scopeKey) body.tts_key = parseInt(scopeKey, 10);
         var r = await api('/admin-tts-voices.php', {
             method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ action:'refresh', tts_key: TTS_KEY }),
+            body: JSON.stringify(body),
         });
         var msg = (r.added|0) + ' added · ' + (r.updated|0) + ' updated · ' + (r.total|0) + ' total';
+        // If any provider was skipped (refresh not wired yet), surface that.
+        if (Array.isArray(r.providers)) {
+            var skipped = r.providers.filter(function (p) { return p.skipped; });
+            if (skipped.length) msg += ' · ' + skipped.length + ' provider(s) skipped';
+        }
         if (s) { s.textContent = msg; s.style.color = (r.added|0) > 0 ? '#2e7d32' : '#666'; }
         await loadVoiceCatalog();
     } catch (e) {
@@ -1070,7 +1283,9 @@ async function loadVoiceCatalog() {
     if (!tbody) return;
     var s = $('vc-status'); if (s) { s.textContent = 'Loading voices…'; s.className = 'status-msg'; }
     try {
-        var r = await api('/admin-tts-voices.php?action=list&tts_key=' + TTS_KEY);
+        var scopeKey = getCatalogScopeKey();
+        var url = '/admin-tts-voices.php?action=list' + (scopeKey ? ('&tts_key=' + scopeKey) : '');
+        var r = await api(url);
         VC_STATE.voices = r.voices || [];
         populateVoiceFilterOptions();
         if (s) {

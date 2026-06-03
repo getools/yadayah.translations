@@ -28,10 +28,13 @@ if ($method === 'POST') {
 }
 
 if ($method === 'GET' && $action === 'list') {
+    // tts_key is OPTIONAL — omit/zero = list across all providers (the
+    // "All providers" option in the Voices catalog dropdown). The Provider
+    // column distinguishes rows in the merged view.
     $ttsKey = (int)($_GET['tts_key'] ?? 0);
-    if (!$ttsKey) errorResponse('tts_key required');
-    $where  = ['tts_key = ?'];
-    $params = [$ttsKey];
+    $where  = [];
+    $params = [];
+    if ($ttsKey > 0) { $where[] = 'tts_key = ?'; $params[] = $ttsKey; }
     if (!empty($_GET['locale']))  { $where[] = 'tts_voice_locale = ?'; $params[] = $_GET['locale']; }
     if (!empty($_GET['gender']))  { $where[] = 'tts_voice_gender = ?'; $params[] = $_GET['gender']; }
     if (!empty($_GET['type']))    { $where[] = 'tts_voice_type ILIKE ?'; $params[] = '%' . $_GET['type'] . '%'; }
@@ -46,10 +49,11 @@ if ($method === 'GET' && $action === 'list') {
     }
     // JOIN yy_tts so each row carries its provider code/label — the Voices
     // catalog table renders that in the Provider column (in front of Voice).
+    $whereSql = $where ? (' WHERE ' . implode(' AND ', $where)) : '';
     $sql = "SELECT v.*, t.tts_code, t.tts_name
               FROM yy_tts_voice v
-         LEFT JOIN yy_tts t USING (tts_key)
-             WHERE " . implode(' AND ', $where)
+         LEFT JOIN yy_tts t USING (tts_key)"
+         . $whereSql
          . " ORDER BY tts_voice_locale, tts_voice_gender, tts_voice_label, tts_voice_code";
     $stmt = $db->prepare($sql);
     $stmt->execute($params);
@@ -62,23 +66,28 @@ if ($method === 'GET' && $action === 'list') {
     unset($r);
 
     // Summary: distinct locale list + total/active counts, for the UI filter
-    // dropdown and the header summary row.
+    // dropdown and the header summary row. Scope mirrors the list above —
+    // no tts_key = all providers.
+    $sumWhere = $ttsKey > 0 ? 'WHERE tts_key = ?' : '';
+    $sumParams = $ttsKey > 0 ? [$ttsKey] : [];
     $sumStmt = $db->prepare("
         SELECT COUNT(*) AS total,
                COUNT(*) FILTER (WHERE tts_voice_active_flag) AS active_count,
                MAX(tts_voice_download_dtime) AS last_refresh
-          FROM yy_tts_voice WHERE tts_key = ?
+          FROM yy_tts_voice $sumWhere
     ");
-    $sumStmt->execute([$ttsKey]);
+    $sumStmt->execute($sumParams);
     $summary = $sumStmt->fetch();
 
+    $localesWhere = $ttsKey > 0 ? 'WHERE tts_key = ? AND tts_voice_locale IS NOT NULL'
+                                : 'WHERE tts_voice_locale IS NOT NULL';
     $localesStmt = $db->prepare("
         SELECT tts_voice_locale, tts_voice_locale_name, COUNT(*) AS n
-          FROM yy_tts_voice WHERE tts_key = ? AND tts_voice_locale IS NOT NULL
+          FROM yy_tts_voice $localesWhere
          GROUP BY tts_voice_locale, tts_voice_locale_name
          ORDER BY tts_voice_locale
     ");
-    $localesStmt->execute([$ttsKey]);
+    $localesStmt->execute($sumParams);
     jsonResponse([
         'voices'  => $rows,
         'summary' => $summary,
@@ -128,14 +137,32 @@ if ($action === 'bulk_save') {
 
 if ($action === 'refresh') {
     $ttsKey = (int)($data['tts_key'] ?? 0);
-    if (!$ttsKey) errorResponse('tts_key required');
 
-    // Only Azure is implemented today. If the registry ever adds other
-    // providers, branch on $cfg['system']['tts_code'].
-    $cfg = loadTtsConfig($db, $ttsKey);
-    if (!$cfg['system'] || $cfg['system']['tts_code'] !== 'azure') {
-        errorResponse('refresh only supports tts_code=azure currently');
+    // tts_key optional — omit/zero = "All providers" (loop active rows in
+    // yy_tts). Each provider whose tts_code we don't yet know how to refresh
+    // (anything besides azure, today) is reported as skipped, not an error,
+    // so the bulk refresh succeeds even when local engines are listed.
+    if ($ttsKey > 0) {
+        $sysStmt = $db->prepare("SELECT * FROM yy_tts WHERE tts_key = ?");
+        $sysStmt->execute([$ttsKey]);
+    } else {
+        $sysStmt = $db->query("SELECT * FROM yy_tts WHERE tts_active_flag = TRUE ORDER BY tts_sort, tts_key");
     }
+    $systems = $sysStmt->fetchAll();
+    if (!$systems) errorResponse('no providers to refresh');
+
+    $totalAdded = 0; $totalUpdated = 0; $perProvider = [];
+
+    foreach ($systems as $sys) {
+        $provKey  = (int)$sys['tts_key'];
+        $provCode = $sys['tts_code'];
+        if ($provCode !== 'azure') {
+            $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                              'skipped' => 'refresh not yet wired for this provider'];
+            continue;
+        }
+        // Existing Azure refresh — runs once per matching row.
+        $cfg = loadTtsConfig($db, $provKey);
     $key = readEnv('AZURE_SPEECH_KEY');
     if (!$key) errorResponse('AZURE_SPEECH_KEY not set in .env');
     $region = $cfg['system']['tts_region'] ?? (readEnv('AZURE_SPEECH_REGION') ?: 'brazilsouth');
@@ -190,7 +217,7 @@ if ($action === 'refresh') {
             $styles    = is_array($v['StyleList'] ?? null)            ? $v['StyleList']            : [];
             $roles     = is_array($v['RolePlayList'] ?? null)         ? $v['RolePlayList']         : [];
             $upsert->execute([
-                $ttsKey, $code, $label,
+                $provKey, $code, $label,
                 $v['Locale']     ?? null,
                 $v['LocaleName'] ?? null,
                 $v['Gender']     ?? null,
@@ -208,19 +235,27 @@ if ($action === 'refresh') {
         $db->commit();
     } catch (Throwable $e) {
         if ($db->inTransaction()) $db->rollBack();
-        errorResponse('refresh failed: ' . $e->getMessage());
+        errorResponse('refresh failed for ' . $provCode . ': ' . $e->getMessage());
     }
 
-    // Total count after merge.
-    $tot = (int)$db->prepare("SELECT COUNT(*) FROM yy_tts_voice WHERE tts_key = ?")
-                  ->execute([$ttsKey]) ? null : null;
-    $totStmt = $db->prepare("SELECT COUNT(*) FROM yy_tts_voice WHERE tts_key = ?");
-    $totStmt->execute([$ttsKey]);
+        $totStmt = $db->prepare("SELECT COUNT(*) FROM yy_tts_voice WHERE tts_key = ?");
+        $totStmt->execute([$provKey]);
+        $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                          'added' => $added, 'updated' => $updated,
+                          'total' => (int)$totStmt->fetchColumn()];
+        $totalAdded   += $added;
+        $totalUpdated += $updated;
+    } // end foreach provider
+
+    // Whole-catalog totals — caller's UI shows total/active across the
+    // catalog after a refresh (matches the "all providers" filter view).
+    $grandStmt = $db->query("SELECT COUNT(*) FROM yy_tts_voice");
     jsonResponse([
-        'ok'      => true,
-        'added'   => $added,
-        'updated' => $updated,
-        'total'   => (int)$totStmt->fetchColumn(),
+        'ok'        => true,
+        'added'     => $totalAdded,
+        'updated'   => $totalUpdated,
+        'total'     => (int)$grandStmt->fetchColumn(),
+        'providers' => $perProvider,
     ]);
 }
 
