@@ -393,11 +393,12 @@ function applyTunes(string $text, array $tunes, array &$tokenMap): string {
         $token   = sprintf("\x02TUNE_%d\x02",  $t['tts_tune_key']);
         $tokenS  = sprintf("\x02TUNEs%d\x02", $t['tts_tune_key']); // possessive variant
         if ($synthType === 'ipa') {
-            // Common typo: ASCII apostrophe instead of the IPA primary
-            // stress mark ˈ (U+02C8). Same for the comma → ˌ secondary
-            // stress mark. Auto-fix these so the user gets the result
-            // they probably meant.
+            // Common typos: ASCII apostrophe/backtick instead of the IPA
+            // primary stress mark ˈ (U+02C8); hyphen instead of the IPA
+            // syllable-boundary marker . (period). Azure rejects hyphens
+            // in ph="" and returns HTTP 400 with an empty body.
             $phon = strtr($phon, ["'" => "\u{02C8}", '`' => "\u{02C8}"]);
+            $phon = str_replace('-', '.', $phon);
             $ph = htmlspecialchars($phon, ENT_QUOTES | ENT_XML1);
             $printEsc = htmlspecialchars($print, ENT_QUOTES | ENT_XML1);
             $repl  = "<phoneme alphabet=\"ipa\" ph=\"$ph\">$printEsc</phoneme>";
