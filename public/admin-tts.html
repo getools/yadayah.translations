@@ -240,6 +240,7 @@
                 <thead>
                     <tr>
                         <th style="width:36px;text-align:center;" title="Active — uncheck to hide from voice pickers">On</th>
+                        <th style="width:120px;text-align:left;cursor:pointer;" onclick="sortVoicesBy('provider')" title="TTS provider (Azure, Chatterbox, Kokoro, CosyVoice, Qwen3 …)">Provider<span class="vc-sort-arrow" data-col="provider"></span></th>
                         <th style="text-align:left;cursor:pointer;" onclick="sortVoicesBy('label')">Voice<span class="vc-sort-arrow" data-col="label"></span></th>
                         <th style="width:140px;text-align:center;" title="Speaking style — picked here is used by ▶ play">Style</th>
                         <th style="width:64px;text-align:center;cursor:pointer;" onclick="sortVoicesBy('language')">Lang<span class="vc-sort-arrow" data-col="language"></span></th>
@@ -259,6 +260,11 @@
                                 <option value="1">✓</option>
                                 <option value="0">✗</option>
                             </select>
+                        </th>
+                        <!-- Provider filter — empty option = no filter; populated in renderVoiceFilters
+                             from the distinct tts_label values returned by the API. -->
+                        <th style="padding:4px;text-align:center;">
+                            <select id="vc-f-provider" onchange="filterVoices()" style="width:100%;padding:2px;border:1px solid #ccc;border-radius:3px;font-size:0.78rem;font-weight:normal;color:#555;"><option value="">all</option></select>
                         </th>
                         <th style="padding:4px;">
                             <input id="vc-f-name" type="text" placeholder="contains…" oninput="filterVoices()" style="width:100%;box-sizing:border-box;padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.78rem;font-weight:normal;">
@@ -1103,12 +1109,15 @@ function vcFmtDtFull(s) {
 
 function populateVoiceFilterOptions() {
     // Collect distinct values once after a load. Sort alphabetically.
-    var langs = new Set(), regions = new Set(), types = new Set();
+    var langs = new Set(), regions = new Set(), types = new Set(), providers = new Set();
     VC_STATE.voices.forEach(function (v) {
         if (v.tts_voice_language) langs.add(v.tts_voice_language);
         if (v.tts_voice_region)   regions.add(v.tts_voice_region);
         if (v.tts_voice_type)     types.add(v.tts_voice_type);
+        if (v.tts_name)          providers.add(v.tts_name);
+        else if (v.tts_code)      providers.add(v.tts_code);
     });
+    fillSelect('vc-f-provider', Array.from(providers).sort());
     fillSelect('vc-f-lang',   Array.from(langs).sort());
     fillSelect('vc-f-region', Array.from(regions).sort());
     fillSelect('vc-f-type',   Array.from(types).sort());
@@ -1141,16 +1150,18 @@ function sortVoicesBy(col) {
 }
 
 function filterVoices() {
-    var fActive = $('vc-f-active').value;
-    var fName   = ($('vc-f-name').value || '').trim().toLowerCase();
-    var fLang   = $('vc-f-lang').value;
-    var fRegion = $('vc-f-region').value;
-    var fGender = $('vc-f-gender').value;
-    var fType   = $('vc-f-type').value;
-    var fMulti  = $('vc-f-multi').value;
+    var fActive   = $('vc-f-active').value;
+    var fProvider = ($('vc-f-provider') && $('vc-f-provider').value) || '';
+    var fName     = ($('vc-f-name').value || '').trim().toLowerCase();
+    var fLang     = $('vc-f-lang').value;
+    var fRegion   = $('vc-f-region').value;
+    var fGender   = $('vc-f-gender').value;
+    var fType     = $('vc-f-type').value;
+    var fMulti    = $('vc-f-multi').value;
 
     var rows = VC_STATE.voices.filter(function (v) {
         if (fActive !== '' && (v.tts_voice_active_flag ? 1 : 0) !== Number(fActive)) return false;
+        if (fProvider && (v.tts_name || v.tts_code || '') !== fProvider) return false;
         if (fName && (v.tts_voice_label || '').toLowerCase().indexOf(fName) === -1
                  && (v.tts_voice_code  || '').toLowerCase().indexOf(fName) === -1) return false;
         if (fLang   && v.tts_voice_language !== fLang)   return false;
@@ -1166,6 +1177,7 @@ function filterVoices() {
 
     var col = VC_STATE.sort.col, dir = VC_STATE.sort.dir === 'asc' ? 1 : -1;
     var keyFns = {
+        provider:   function (v) { return (v.tts_name || v.tts_code || '').toLowerCase(); },
         label:      function (v) { return (v.tts_voice_label || '').toLowerCase(); },
         language:   function (v) { return (v.tts_voice_language || '') + '|' + (v.tts_voice_region || '') + '|' + (v.tts_voice_label || ''); },
         region:     function (v) { return (v.tts_voice_region || '') + '|' + (v.tts_voice_language || ''); },
@@ -1217,10 +1229,14 @@ function buildVoiceRow(v) {
         styleCell = '<td style="text-align:center;padding:4px 2px;color:#bbb;">—</td>';
     }
 
+    var providerLabel = v.tts_name || v.tts_code || '';
     tr.innerHTML =
         '<td style="text-align:center;padding:4px 2px;">' +
             '<input type="checkbox" class="vc-active"' + (active ? ' checked' : '') + '>' +
         '</td>' +
+        // Provider (from yy_tts joined in admin-tts-voices.php). Sits in front
+        // of the Voice column so cross-provider catalogs are scannable.
+        '<td style="padding:4px 6px;color:#444;font-size:0.82rem;">' + escapeHtml(providerLabel) + '</td>' +
         // Just the label — no voice-code mouseover/subtitle.
         '<td style="padding:4px 6px;">' + escapeHtml(v.tts_voice_label || v.tts_voice_code || '') + '</td>' +
         styleCell +

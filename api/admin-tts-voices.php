@@ -44,7 +44,12 @@ if ($method === 'GET' && $action === 'list') {
         $q = '%' . $_GET['q'] . '%';
         $params[] = $q; $params[] = $q; $params[] = $q;
     }
-    $sql = "SELECT * FROM yy_tts_voice WHERE " . implode(' AND ', $where)
+    // JOIN yy_tts so each row carries its provider code/label — the Voices
+    // catalog table renders that in the Provider column (in front of Voice).
+    $sql = "SELECT v.*, t.tts_code, t.tts_name
+              FROM yy_tts_voice v
+         LEFT JOIN yy_tts t USING (tts_key)
+             WHERE " . implode(' AND ', $where)
          . " ORDER BY tts_voice_locale, tts_voice_gender, tts_voice_label, tts_voice_code";
     $stmt = $db->prepare($sql);
     $stmt->execute($params);
