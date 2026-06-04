@@ -738,16 +738,62 @@ function onCustomizeFilePicked(input) {
     audio.style.display = '';
 }
 
-function submitCustomizeVoice() {
-    var s = document.getElementById('cv-submit-status');
-    if (!s) return;
-    // Backend upload endpoint isn't wired yet (needs POST /tts/voices on the
-    // box + a gpuRegisterVoice() helper in gpu-client.php). The form is the
-    // UI scaffold; once those land, this submit POSTs the multipart payload
-    // to /api/gpu-register-voice.php (or directly through gpu-client.php on
-    // an admin-only endpoint) and refreshes the catalog on success.
-    s.textContent = 'Backend not wired yet — UI scaffold only. Coming next: gpu-client.php upload endpoint.';
-    s.style.color = '#7a4a00';
+async function submitCustomizeVoice() {
+    var s   = document.getElementById('cv-submit-status');
+    var btn = document.getElementById('cv-submit');
+    if (!s || !btn) return;
+
+    var prov  = (document.getElementById('cv-provider').value || '').trim();
+    var code  = (document.getElementById('cv-code').value     || '').trim();
+    var name  = (document.getElementById('cv-name').value     || '').trim();
+    var desc  = (document.getElementById('cv-desc').value     || '').trim();
+    var file  = document.getElementById('cv-audio').files[0];
+    if (!prov)      { s.textContent = 'Pick a provider first.';                s.style.color = '#c0392b'; return; }
+    if (!code)      { s.textContent = 'Voice code is required.';               s.style.color = '#c0392b'; return; }
+    if (!file)      { s.textContent = 'Choose a reference audio clip.';        s.style.color = '#c0392b'; return; }
+    if (!/^[A-Za-z0-9_-]+$/.test(code)) {
+        s.textContent = 'Code must be alphanumeric (dashes / underscores ok).'; s.style.color = '#c0392b'; return;
+    }
+
+    var fd = new FormData();
+    fd.append('provider',     prov);
+    fd.append('code',         code);
+    fd.append('label',        name);
+    fd.append('description',  desc);
+    fd.append('audio',        file, file.name);
+    // Provider-specific extras the form renders dynamically.
+    var qStyle = document.getElementById('cv-qwen-style');
+    if (qStyle && qStyle.value.trim()) fd.append('style', qStyle.value.trim());
+    var prompt = document.getElementById('cv-prompt-text');
+    if (prompt && prompt.value.trim()) fd.append('prompt_text', prompt.value.trim());
+
+    btn.disabled = true;
+    var origLabel = btn.textContent;
+    btn.textContent = 'Training…';
+    s.textContent = 'Uploading clip to the box…'; s.style.color = '#666';
+    try {
+        var r = await fetch(API + '/admin-tts-customize.php', {
+            method: 'POST', credentials: 'include', body: fd,
+        });
+        var ct = r.headers.get('content-type') || '';
+        var data = ct.indexOf('json') >= 0 ? await r.json() : { error: await r.text() };
+        if (!r.ok || !data.ok) {
+            throw new Error(data.error || ('HTTP ' + r.status));
+        }
+        s.textContent = '✓ Voice "' + code + '" registered for ' + prov + '. Available immediately in Defaults / Voices.';
+        s.style.color = '#2e7d32';
+        // Reset the form for the next entry.
+        document.getElementById('cv-code').value = '';
+        document.getElementById('cv-name').value = '';
+        document.getElementById('cv-desc').value = '';
+        document.getElementById('cv-audio').value = '';
+        var prev = document.getElementById('cv-preview'); if (prev) { prev.src = ''; prev.style.display = 'none'; }
+    } catch (e) {
+        s.textContent = 'Registration failed: ' + e.message; s.style.color = '#c0392b';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = origLabel;
+    }
 }
 document.querySelectorAll('.tts-tabs button').forEach(function(btn) {
     btn.addEventListener('click', function() {

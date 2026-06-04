@@ -170,6 +170,42 @@ function gpuSynthesize(array $params, ?string $saveTo = null, int $timeout = 600
     return gpuRequest('POST', '/tts/synthesize', $opts);
 }
 
+/**
+ * Register a custom voice with the box's TTS engine. Saves the reference
+ * audio clip on the box (/srv/tts/voices/<code>.<ext>) and upserts the entry
+ * in /srv/tts/voices.json so the engine can synth with the new voice code
+ * immediately (in-memory registry is hot-reloaded engine-side).
+ *
+ *   $params:   ['provider'=>'cosyvoice', 'code'=>'craig', 'label'=>'…',
+ *               'language'=>'en', 'gender'=>'male',
+ *               'description'=>'…',                   // optional
+ *               'prompt_text'=>'…transcript of clip…',// optional; CosyVoice
+ *               'style'=>'warm, measured']            // optional; Qwen3-Omni
+ *   $audioPath: local path on the website server to the reference clip.
+ *
+ * Returns the engine's response: ['ok'=>true, 'voice'=>{...}, 'voices_total'=>N]
+ * (or the normalized error array from gpuRequest()).
+ */
+function gpuRegisterVoice(array $params, string $audioPath, int $timeout = 60): array {
+    if (!is_file($audioPath)) {
+        return ['ok' => false, 'status' => 0, 'error' => 'audio file not found: ' . $audioPath];
+    }
+    foreach (['provider', 'code'] as $req) {
+        if (empty($params[$req])) {
+            return ['ok' => false, 'status' => 0, 'error' => "missing required field '$req'"];
+        }
+    }
+    $mime = function_exists('mime_content_type')
+        ? (mime_content_type($audioPath) ?: 'application/octet-stream')
+        : 'application/octet-stream';
+    $form = [];
+    foreach (['provider','code','label','description','language','gender','prompt_text','style'] as $k) {
+        if (isset($params[$k])) $form[$k] = (string)$params[$k];
+    }
+    $form['file'] = new CURLFile($audioPath, $mime, basename($audioPath));
+    return gpuRequest('POST', '/tts/voices', ['multipart' => $form, 'timeout' => $timeout]);
+}
+
 // ── CLI self-test ───────────────────────────────────────────────────────────
 // `php gpu-client.php health` | `... stt <audio>` | `... tts "<text>" <out.mp3>`
 if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
