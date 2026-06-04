@@ -419,57 +419,6 @@ function probeDurationMs(string $bin, string $bytes, string $tmpDir): int {
 $cumulativeMs    = 0;
 $cumulativeBytes = 0;
 
-// Azure TTS retry wrapper. The 429 (rate-limited) and 5xx (server-side)
-// responses are retriable — we sleep with exponential backoff and try
-// again, up to 6 attempts (cumulative max wait ≈ 63s per paragraph).
-// Other 4xx errors (bad SSML, auth, etc.) are permanent so we bail
-// immediately and let the caller log a per-paragraph failure.
-function azureTtsSynthesizeRetry(string $ssml, array $cfg, ?string &$err = null, int $maxAttempts = 6): string {
-    $attempt = 0;
-    $delay   = 1;        // seconds
-    while ($attempt < $maxAttempts) {
-        $bytes = azureTtsSynthesize($ssml, $cfg, $err);
-        if ($bytes !== '') return $bytes;
-        $shouldRetry = false;
-        if ($err === null || $err === '') {
-            $shouldRetry = true;          // empty body, no HTTP code — treat as transient
-        } else if (preg_match('/HTTP (429|5\d\d)/', $err)) {
-            $shouldRetry = true;          // rate-limit / server error
-        } else if (preg_match('/HTTP 0\b/', $err)) {
-            $shouldRetry = true;          // curl-level error (timeout / dns)
-        }
-        if (!$shouldRetry) return '';
-        $attempt++;
-        if ($attempt >= $maxAttempts) break;
-        // Echo to STDERR so the operator can watch progress in worker logs.
-        fwrite(STDERR, "azure retry $attempt after {$delay}s — $err\n");
-        sleep($delay);
-        $delay = min($delay * 2, 30);
-    }
-    return '';
-}
-
-// Local-engine retry wrapper, mirroring azureTtsSynthesizeRetry. Self-hosted
-// engines (Chatterbox/Qwen3/Kokoro) on the Puget box; transient / HTTP 0 / 429
-// / 5xx responses are retried with backoff. localTtsSynthesize() lives in
-// admin-tts-helpers.php.
-function localTtsSynthesizeRetry(array $cfg, array $seg, string $outputFormat, ?string &$err = null, int $maxAttempts = 4): string {
-    $attempt = 0;
-    $delay   = 1;
-    while ($attempt < $maxAttempts) {
-        $bytes = localTtsSynthesize($cfg, $seg, $outputFormat, $err);
-        if ($bytes !== '') return $bytes;
-        $retry = ($err === null || $err === '' || preg_match('/HTTP (0|429|5\d\d)\b/', (string)$err));
-        if (!$retry) return '';
-        $attempt++;
-        if ($attempt >= $maxAttempts) break;
-        fwrite(STDERR, "local-tts retry $attempt after {$delay}s — $err\n");
-        sleep($delay);
-        $delay = min($delay * 2, 15);
-    }
-    return '';
-}
-
 // Page-break-within-paragraph detection. Reads text/page-NNN.json from
 // the flipbook bundle to locate where in the paragraph a page break
 // occurs (when the paragraph spans into the next page). The build

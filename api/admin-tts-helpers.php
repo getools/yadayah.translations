@@ -1232,3 +1232,47 @@ function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?strin
     }
     return (string)($r['body'] ?? '');
 }
+
+// Azure TTS retry wrapper. 429 / 5xx / curl errors are retriable with
+// exponential backoff; other 4xx (bad SSML, auth) bail immediately.
+function azureTtsSynthesizeRetry(string $ssml, array $cfg, ?string &$err = null, int $maxAttempts = 6): string {
+    $attempt = 0;
+    $delay   = 1;
+    while ($attempt < $maxAttempts) {
+        $bytes = azureTtsSynthesize($ssml, $cfg, $err);
+        if ($bytes !== '') return $bytes;
+        $shouldRetry = false;
+        if ($err === null || $err === '') {
+            $shouldRetry = true;
+        } else if (preg_match('/HTTP (429|5\d\d)/', $err)) {
+            $shouldRetry = true;
+        } else if (preg_match('/HTTP 0\b/', $err)) {
+            $shouldRetry = true;
+        }
+        if (!$shouldRetry) return '';
+        $attempt++;
+        if ($attempt >= $maxAttempts) break;
+        fwrite(STDERR, "azure retry $attempt after {$delay}s — $err\n");
+        sleep($delay);
+        $delay = min($delay * 2, 30);
+    }
+    return '';
+}
+
+// Local-engine retry wrapper, mirroring azureTtsSynthesizeRetry.
+function localTtsSynthesizeRetry(array $cfg, array $seg, string $outputFormat, ?string &$err = null, int $maxAttempts = 4): string {
+    $attempt = 0;
+    $delay   = 1;
+    while ($attempt < $maxAttempts) {
+        $bytes = localTtsSynthesize($cfg, $seg, $outputFormat, $err);
+        if ($bytes !== '') return $bytes;
+        $retry = ($err === null || $err === '' || preg_match('/HTTP (0|429|5\d\d)\b/', (string)$err));
+        if (!$retry) return '';
+        $attempt++;
+        if ($attempt >= $maxAttempts) break;
+        fwrite(STDERR, "local-tts retry $attempt after {$delay}s — $err\n");
+        sleep($delay);
+        $delay = min($delay * 2, 15);
+    }
+    return '';
+}
