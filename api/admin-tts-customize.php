@@ -38,7 +38,6 @@ $db = getDb();
 setCurrentUser($db, (int)$user['user_key']);
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') errorResponse('POST required', 405);
-if (empty($_FILES['audio']['tmp_name'])) errorResponse('audio file required');
 
 $provider     = trim($_POST['provider']    ?? '');
 $code         = trim($_POST['code']        ?? '');
@@ -46,30 +45,39 @@ $label        = trim($_POST['label']       ?? '');
 $description  = trim($_POST['description'] ?? '');
 $promptText   = trim($_POST['prompt_text'] ?? '');
 $style        = trim($_POST['style']       ?? '');
+$voiceId      = trim($_POST['voice_id']    ?? '');   // built-in-speaker path
+$langCode     = trim($_POST['lang_code']   ?? '');   // Kokoro-specific
 $language     = trim($_POST['language']    ?? 'en');
 $gender       = trim($_POST['gender']      ?? 'unknown');
+
+// Engines whose voices are SELECTED from built-ins (no clip): Qwen3-Omni
+// (only 3 hard-coded speakers) and Kokoro (50+ preset voice IDs). Cloning
+// engines (Chatterbox, CosyVoice 2) keep the audio-upload path.
+$BUILTIN_PROVIDERS = ['qwen3', 'kokoro'];
+$isBuiltin = in_array($provider, $BUILTIN_PROVIDERS, true);
+
+if (!$isBuiltin && empty($_FILES['audio']['tmp_name'])) errorResponse('audio file required');
+if ($isBuiltin && $voiceId === '')                     errorResponse('voice_id (base speaker) required for built-in providers');
 
 if ($provider === '' || $code === '') errorResponse('provider and code are required');
 if (!preg_match('/^[A-Za-z0-9_-]+$/', $code)) errorResponse('code must be alphanumeric (dashes/underscores ok)');
 
-// Make sure the named provider actually exists in yy_tts before we send the
-// clip to the engine — saves us writing files we won't be able to upsert.
 $provStmt = $db->prepare("SELECT tts_key, tts_code, tts_name FROM yy_tts WHERE tts_code = ?");
 $provStmt->execute([$provider]);
 $prov = $provStmt->fetch();
 if (!$prov) errorResponse("provider '$provider' not in yy_tts — register it first");
 
-// Forward the multipart upload to the box.
-$audioPath = $_FILES['audio']['tmp_name'];
-$origName  = $_FILES['audio']['name'] ?? 'voice.wav';
-$ext       = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
-if (!in_array($ext, ['wav', 'mp3', 'm4a', 'flac', 'ogg'], true)) {
-    errorResponse("unsupported audio extension '.$ext'");
+$relayPath = null;
+if (!$isBuiltin) {
+    $audioPath = $_FILES['audio']['tmp_name'];
+    $origName  = $_FILES['audio']['name'] ?? 'voice.wav';
+    $ext       = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+    if (!in_array($ext, ['wav', 'mp3', 'm4a', 'flac', 'ogg'], true)) {
+        errorResponse("unsupported audio extension '.$ext'");
+    }
+    $relayPath = sys_get_temp_dir() . '/voice-' . $code . '.' . $ext;
+    if (!@copy($audioPath, $relayPath)) errorResponse('failed to stage upload locally');
 }
-// PHP's tmp upload has no extension; copy to a path that ends in the right
-// suffix so the engine's content-type sniff + extension check both pass.
-$relayPath = sys_get_temp_dir() . '/voice-' . $code . '.' . $ext;
-if (!@copy($audioPath, $relayPath)) errorResponse('failed to stage upload locally');
 
 try {
     $params = ['provider' => $provider, 'code' => $code,
@@ -78,10 +86,16 @@ try {
     if ($description) $params['description'] = $description;
     if ($promptText)  $params['prompt_text'] = $promptText;
     if ($style)       $params['style']       = $style;
+    if ($voiceId)     $params['voice_id']    = $voiceId;
+    if ($langCode)    $params['lang_code']   = $langCode;
 
-    $r = gpuRegisterVoice($params, $relayPath, 120);
+    if ($isBuiltin) {
+        $r = gpuRegisterBuiltinVoice($params, 30);
+    } else {
+        $r = gpuRegisterVoice($params, $relayPath, 120);
+    }
     if (!$r['ok']) {
-        errorResponse('engine refused the upload: ' . ($r['error'] ?? 'unknown'),
+        errorResponse('engine refused the registration: ' . ($r['error'] ?? 'unknown'),
                       $r['status'] >= 400 ? $r['status'] : 502);
     }
     $engineVoice = $r['data']['voice'] ?? [];
@@ -118,5 +132,5 @@ try {
         'engine'     => $engineVoice,
     ]);
 } finally {
-    @unlink($relayPath);
+    if ($relayPath) @unlink($relayPath);
 }

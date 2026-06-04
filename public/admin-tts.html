@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780537049">
+    <meta name="page-version" content="1780580853">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -639,8 +639,6 @@ function activateTtsTab(tabName) {
 var CUSTOMIZE_PROVIDERS = {
     chatterbox: {
         label: 'Chatterbox',
-        disabled: true,
-        reason: 'Upstream packaging bug (transformers 5.x pin vs. 4.x imports). Re-enable when chatterbox-tts publishes a working release.',
         codePrefix: 'cb-',
         instructions: {
             data:     'One clean 5–15 s clip, single speaker, no music/noise, 16–24 kHz mono WAV.',
@@ -652,24 +650,31 @@ var CUSTOMIZE_PROVIDERS = {
         label: 'CosyVoice 2',
         codePrefix: 'cv-',
         instructions: {
-            data:     'One clean 3–10 s clip (zero-shot) <em>or</em> ~30 min of paired audio + transcript (fine-tune).',
-            workflow: 'Zero-shot by default. A fine-tune toggle (below) trades the longer-data path for higher fidelity.',
-            time:     'Instant for zero-shot; ~30 min for fine-tune.',
+            data:     'One clean 3–10 s clip + the transcript of what is said in it.',
+            workflow: 'Zero-shot — clip + transcript registers as a voice.',
+            time:     'Instant; ~30 s to synth the first time.',
         },
         extraFields: [
-            { id: 'cv-cosy-finetune', type: 'checkbox', label: 'Fine-tune (longer data required, slower; default off)' },
+            { id: 'cv-cosy-prompt', type: 'text', label: 'Transcript of clip', placeholder: 'Exact words spoken in the reference clip' },
         ],
     },
     qwen3: {
         label: 'Qwen3-Omni',
         codePrefix: 'qw-',
+        noAudio: true,
         instructions: {
-            data:     'One <strong>10–30 s</strong> clip + optional style descriptor ("warm, measured").',
-            workflow: 'Zero-shot — the clip + style prompt register as a voice.',
+            data:     'No audio clip — Qwen3-Omni has three built-in speakers (Ethan, Aiden, Chelsie). Pick one and give it a friendly label.',
+            workflow: 'Built-in speaker selection. The label/description are stored so the voice shows up in Defaults; the chosen base speaker is what actually speaks.',
             time:     'Instant.',
         },
         extraFields: [
-            { id: 'cv-qwen-style', type: 'text', label: 'Style descriptor', placeholder: 'e.g. warm, measured, slightly dramatic' },
+            { id: 'cv-qwen-speaker', type: 'select', label: 'Base speaker',
+              options: [
+                  { value: 'Ethan',   label: 'Ethan (male, en)' },
+                  { value: 'Aiden',   label: 'Aiden (male, en)' },
+                  { value: 'Chelsie', label: 'Chelsie (female, en)' },
+              ]
+            },
         ],
     },
 };
@@ -711,13 +716,20 @@ function onCustomizeProviderChange() {
         if (meta.reason) html += '<p style="margin:10px 0 0;color:#7a4a00;"><strong>Currently unavailable:</strong> ' + escapeHtml(meta.reason) + '</p>';
         ins.innerHTML = html;
     }
-    // Render provider-specific extra fields (Qwen3 style descriptor, CosyVoice
-    // fine-tune toggle, ...).
+    // Render provider-specific extra fields (Qwen3 speaker select, CosyVoice
+    // prompt-text, ...).
     if (extra) {
         if (meta.extraFields && meta.extraFields.length) {
             extra.innerHTML = meta.extraFields.map(function (f) {
                 if (f.type === 'checkbox') {
                     return '<label style="display:block;margin:8px 0 4px;font-size:0.85rem;"><input type="checkbox" id="' + f.id + '"> ' + escapeHtml(f.label) + '</label>';
+                }
+                if (f.type === 'select') {
+                    var opts = (f.options || []).map(function (o) {
+                        return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>';
+                    }).join('');
+                    return '<label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">' + escapeHtml(f.label) + '</label>'
+                         + '<select id="' + f.id + '" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">' + opts + '</select>';
                 }
                 return '<label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">' + escapeHtml(f.label) + '</label>'
                      + '<input type="' + (f.type || 'text') + '" id="' + f.id + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">';
@@ -726,6 +738,20 @@ function onCustomizeProviderChange() {
             extra.innerHTML = '';
         }
     }
+    // Hide the audio upload + preview for built-in-speaker providers (Qwen3).
+    var audioLabel  = document.querySelector('#cv-form label[for]'); // not used; we toggle by id below
+    var audioInput  = document.getElementById('cv-audio');
+    var audioPrev   = document.getElementById('cv-preview');
+    var audioRow    = audioInput ? audioInput.previousElementSibling : null;  // its <label>
+    var hideAudio = !!meta.noAudio;
+    if (audioInput)  audioInput.style.display = hideAudio ? 'none' : '';
+    if (audioPrev)   audioPrev.style.display  = hideAudio ? 'none' : (audioPrev.src ? '' : 'none');
+    if (audioRow && audioRow.tagName === 'LABEL' && audioRow.textContent.indexOf('Reference audio') >= 0) {
+        audioRow.style.display = hideAudio ? 'none' : '';
+    }
+    // Update submit button label for clarity.
+    var btn = document.getElementById('cv-submit');
+    if (btn) btn.textContent = hideAudio ? 'Register voice' : 'Train voice';
     // Pre-fill the voice-code field with the provider's slug prefix.
     var codeIn = document.getElementById('cv-code');
     if (codeIn && !codeIn.value && meta.codePrefix) codeIn.value = meta.codePrefix;
@@ -747,10 +773,12 @@ async function submitCustomizeVoice() {
     var code  = (document.getElementById('cv-code').value     || '').trim();
     var name  = (document.getElementById('cv-name').value     || '').trim();
     var desc  = (document.getElementById('cv-desc').value     || '').trim();
+    var meta  = CUSTOMIZE_PROVIDERS[prov];
+    var noAudio = !!(meta && meta.noAudio);
     var file  = document.getElementById('cv-audio').files[0];
-    if (!prov)      { s.textContent = 'Pick a provider first.';                s.style.color = '#c0392b'; return; }
-    if (!code)      { s.textContent = 'Voice code is required.';               s.style.color = '#c0392b'; return; }
-    if (!file)      { s.textContent = 'Choose a reference audio clip.';        s.style.color = '#c0392b'; return; }
+    if (!prov)               { s.textContent = 'Pick a provider first.';            s.style.color = '#c0392b'; return; }
+    if (!code)               { s.textContent = 'Voice code is required.';           s.style.color = '#c0392b'; return; }
+    if (!noAudio && !file)   { s.textContent = 'Choose a reference audio clip.';    s.style.color = '#c0392b'; return; }
     if (!/^[A-Za-z0-9_-]+$/.test(code)) {
         s.textContent = 'Code must be alphanumeric (dashes / underscores ok).'; s.style.color = '#c0392b'; return;
     }
@@ -760,12 +788,13 @@ async function submitCustomizeVoice() {
     fd.append('code',         code);
     fd.append('label',        name);
     fd.append('description',  desc);
-    fd.append('audio',        file, file.name);
-    // Provider-specific extras the form renders dynamically.
-    var qStyle = document.getElementById('cv-qwen-style');
-    if (qStyle && qStyle.value.trim()) fd.append('style', qStyle.value.trim());
-    var prompt = document.getElementById('cv-prompt-text');
-    if (prompt && prompt.value.trim()) fd.append('prompt_text', prompt.value.trim());
+    if (file && !noAudio) fd.append('audio', file, file.name);
+    // Built-in-speaker path (Qwen3): send `voice_id` (the speaker), no audio.
+    var qSpeaker = document.getElementById('cv-qwen-speaker');
+    if (qSpeaker && qSpeaker.value) fd.append('voice_id', qSpeaker.value);
+    // CosyVoice transcript (clip + transcript = zero-shot).
+    var cvPrompt = document.getElementById('cv-cosy-prompt');
+    if (cvPrompt && cvPrompt.value.trim()) fd.append('prompt_text', cvPrompt.value.trim());
 
     btn.disabled = true;
     var origLabel = btn.textContent;

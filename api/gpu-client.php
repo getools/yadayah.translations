@@ -206,6 +206,24 @@ function gpuRegisterVoice(array $params, string $audioPath, int $timeout = 60): 
     return gpuRequest('POST', '/tts/voices', ['multipart' => $form, 'timeout' => $timeout]);
 }
 
+/**
+ * Register a voice that maps to a provider's BUILT-IN speaker (no clip).
+ * Used for engines without voice cloning — Qwen3-Omni (chelsie/ethan/aiden)
+ * and Kokoro (af_bella / af_sky / ...). Required: provider, code, voice_id.
+ */
+function gpuRegisterBuiltinVoice(array $params, int $timeout = 30): array {
+    foreach (['provider', 'code', 'voice_id'] as $req) {
+        if (empty($params[$req])) {
+            return ['ok' => false, 'status' => 0, 'error' => "missing required field '$req'"];
+        }
+    }
+    $form = [];
+    foreach (['provider','code','label','description','language','gender','voice_id','lang_code'] as $k) {
+        if (isset($params[$k])) $form[$k] = (string)$params[$k];
+    }
+    return gpuRequest('POST', '/tts/voices/builtin', ['multipart' => $form, 'timeout' => $timeout]);
+}
+
 // ── CLI self-test ───────────────────────────────────────────────────────────
 // `php gpu-client.php health` | `... stt <audio>` | `... tts "<text>" <out.mp3>`
 if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
