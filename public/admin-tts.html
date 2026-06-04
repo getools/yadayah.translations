@@ -336,6 +336,9 @@
                         <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Description <span style="color:#888;font-weight:normal;">(optional)</span></label>
                         <textarea id="cv-desc" rows="2" placeholder="When to pick this voice over others" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;font-family:inherit;resize:vertical;"></textarea>
 
+                        <label id="cv-style-label" style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Style <span style="color:#888;font-weight:normal;">(first upload must be <code>default</code>; later: e.g. <code>happy</code>, <code>stoic</code>, <code>quiet</code>, <code>upset</code>)</span></label>
+                        <input id="cv-style-name" type="text" value="default" placeholder="default" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
+
                         <div id="cv-extra-fields"></div>
 
                         <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Reference audio</label>
@@ -799,11 +802,18 @@ async function submitCustomizeVoice() {
         s.textContent = 'Code must be alphanumeric (dashes / underscores ok).'; s.style.color = '#c0392b'; return;
     }
 
+    var styleEl = document.getElementById('cv-style-name');
+    var styleName = (styleEl && styleEl.value.trim() ? styleEl.value.trim() : 'default').toLowerCase();
+    if (!/^[a-z0-9_-]+$/.test(styleName)) {
+        s.textContent = 'Style name must be alphanumeric (dashes/underscores ok).'; s.style.color = '#c0392b'; return;
+    }
+
     var fd = new FormData();
     fd.append('provider',     prov);
     fd.append('code',         code);
     fd.append('label',        name);
     fd.append('description',  desc);
+    fd.append('style_name',   styleName);
     if (file && !noAudio) fd.append('audio', file, file.name);
     // Built-in-speaker path (Qwen3): send `voice_id` (the speaker), no audio.
     var qSpeaker = document.getElementById('cv-qwen-speaker');
@@ -1559,13 +1569,125 @@ function buildVoiceRow(v) {
             + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>'
             + '</button>'
         + '</td>' +
-        '<td style="text-align:center;padding:4px 2px;">' +
+        '<td style="text-align:center;padding:4px 2px;white-space:nowrap;">' +
             '<button type="button" class="btn-sm btn-sec vc-listen" title="Play preview text with this voice">▶</button>' +
+            (v.tts_voice_type === 'Custom'
+                ? ' <button type="button" class="btn-sm btn-sec vc-edit" title="Edit voice (label / description / language / gender)" style="padding:1px 6px;">✎</button>'
+                + ' <button type="button" class="btn-sm btn-sec vc-delete" title="Delete this voice (or just this style)" style="padding:1px 6px;color:#c0392b;">🗑</button>'
+                : '') +
         '</td>';
     tr.querySelector('.vc-active').addEventListener('change', function () { saveVoiceActive(tr, v); });
     tr.querySelector('.vc-listen').addEventListener('click',  function () { playVoiceTest(tr, v); });
     tr.querySelector('.vc-note-btn').addEventListener('click', function () { openVoiceNotePopover(tr, v); });
+    var editBtn   = tr.querySelector('.vc-edit');
+    var deleteBtn = tr.querySelector('.vc-delete');
+    if (editBtn)   editBtn.addEventListener('click',   function () { openVoiceEditPopover(tr, v); });
+    if (deleteBtn) deleteBtn.addEventListener('click', function () { deleteCustomVoice(tr, v); });
     return tr;
+}
+
+// ── Edit / delete for Custom voices (Chatterbox / CosyVoice / Qwen3 / Kokoro) ──
+function openVoiceEditPopover(tr, v) {
+    var styleSel = tr.querySelector('.vc-style');
+    var styles = (Array.isArray(v.tts_voice_styles) ? v.tts_voice_styles : []).filter(function (s) { return s && s !== 'general'; });
+    var styleListHtml = styles.length
+        ? '<div style="margin-top:10px;font-size:0.82rem;color:#666;"><strong>Styles:</strong><ul style="margin:4px 0 0;padding-left:18px;">'
+            + styles.map(function (s) { return '<li>' + escapeHtml(s) + ' <button type="button" data-style="' + escapeHtml(s) + '" class="ve-del-style" style="font-size:0.72rem;border:1px solid #c0392b;background:#fff;color:#c0392b;border-radius:3px;cursor:pointer;padding:0 4px;margin-left:6px;">remove style</button></li>'; }).join('')
+            + '</ul></div>'
+        : '';
+    var html =
+        '<div style="font-size:0.86rem;">' +
+            '<label style="font-weight:600;display:block;margin:0 0 3px;">Label</label>' +
+            '<input id="ve-label" type="text" value="' + escapeHtml(v.tts_voice_label || '') + '" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;margin-bottom:6px;">' +
+            '<label style="font-weight:600;display:block;margin:0 0 3px;">Description</label>' +
+            '<textarea id="ve-desc" rows="2" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;margin-bottom:6px;resize:vertical;font-family:inherit;">' + escapeHtml(v.tts_voice_note || '') + '</textarea>' +
+            '<div style="display:flex;gap:8px;">' +
+                '<div style="flex:1;"><label style="font-weight:600;display:block;margin:0 0 3px;">Language</label>' +
+                    '<input id="ve-lang" type="text" value="' + escapeHtml(v.tts_voice_language || '') + '" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;"></div>' +
+                '<div style="flex:1;"><label style="font-weight:600;display:block;margin:0 0 3px;">Gender</label>' +
+                    '<select id="ve-gender" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">' +
+                    ['','female','male','unknown'].map(function (g) {
+                        return '<option value="' + g + '"' + ((v.tts_voice_gender || '') === g ? ' selected' : '') + '>' + (g || '—') + '</option>';
+                    }).join('') + '</select></div>' +
+            '</div>' +
+            styleListHtml +
+            '<div style="margin-top:10px;text-align:right;">' +
+                '<button type="button" class="ve-cancel btn-sm btn-sec" style="margin-right:6px;">Cancel</button>' +
+                '<button type="button" class="ve-save btn-sm" style="background:#31345A;color:#fff;border:1px solid #31345A;border-radius:3px;padding:3px 10px;cursor:pointer;">Save</button>' +
+            '</div>' +
+            '<div class="ve-status" style="margin-top:6px;font-size:0.78rem;color:#888;"></div>' +
+        '</div>';
+    var pop = document.createElement('div');
+    pop.style.cssText = 'position:absolute;z-index:9999;background:#fff;border:1px solid #aaa;border-radius:6px;padding:10px 12px;box-shadow:0 6px 14px rgba(0,0,0,0.15);width:340px;';
+    pop.innerHTML = html;
+    document.body.appendChild(pop);
+    var rect = tr.getBoundingClientRect();
+    pop.style.left = (window.scrollX + Math.min(rect.right - 340, window.innerWidth - 360)) + 'px';
+    pop.style.top  = (window.scrollY + rect.bottom + 4) + 'px';
+    var statusEl = pop.querySelector('.ve-status');
+    var close = function () { document.body.removeChild(pop); };
+    pop.querySelector('.ve-cancel').addEventListener('click', close);
+    pop.querySelector('.ve-save').addEventListener('click', async function () {
+        statusEl.textContent = 'Saving…'; statusEl.style.color = '#888';
+        try {
+            var r = await fetch(API + '/admin-tts-voice-edit.php', {
+                method: 'POST', credentials: 'include',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    action: 'edit',
+                    code:        v.tts_voice_code,
+                    label:       pop.querySelector('#ve-label').value.trim(),
+                    description: pop.querySelector('#ve-desc').value.trim(),
+                    language:    pop.querySelector('#ve-lang').value.trim(),
+                    gender:      pop.querySelector('#ve-gender').value,
+                }),
+            });
+            var d = await r.json();
+            if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            close();
+            window.location.reload();
+        } catch (e) { statusEl.textContent = 'Failed: ' + e.message; statusEl.style.color = '#c0392b'; }
+    });
+    pop.querySelectorAll('.ve-del-style').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+            var style = btn.dataset.style;
+            if (!confirm('Remove style "' + style + '" from voice "' + v.tts_voice_code + '"? The reference clip on the box will be deleted.')) return;
+            statusEl.textContent = 'Removing style…'; statusEl.style.color = '#888';
+            try {
+                var r = await fetch(API + '/admin-tts-voice-edit.php', {
+                    method: 'POST', credentials: 'include',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action:'delete', code: v.tts_voice_code, style: style}),
+                });
+                var d = await r.json();
+                if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                close();
+                window.location.reload();
+            } catch (e) { statusEl.textContent = 'Failed: ' + e.message; statusEl.style.color = '#c0392b'; }
+        });
+    });
+    // Close on outside click.
+    setTimeout(function () {
+        document.addEventListener('click', function outside(ev) {
+            if (!pop.contains(ev.target)) { try { close(); } catch (e) {} document.removeEventListener('click', outside); }
+        });
+    }, 0);
+}
+
+async function deleteCustomVoice(tr, v) {
+    if (!confirm('Delete the custom voice "' + (v.tts_voice_label || v.tts_voice_code) + '" and all its style clips? This cannot be undone.')) return;
+    try {
+        var r = await fetch(API + '/admin-tts-voice-edit.php', {
+            method: 'POST', credentials: 'include',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'delete', code: v.tts_voice_code}),
+        });
+        var d = await r.json();
+        if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        window.location.reload();
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+    }
 }
 
 // Singleton popover for voice notes. Mirrors getTuneNotePopover/openTuneNotePopover

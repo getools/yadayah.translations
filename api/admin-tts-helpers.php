@@ -1179,6 +1179,9 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     $cur = $category;
     while ($cat === null && $cur !== null) { $cur = ttsCategoryParent($cur); if ($cur !== null) $cat = $cfg['categories'][$cur] ?? null; }
     if ($cat === null && !empty($cfg['categories'])) $cat = reset($cfg['categories']);
+    $style = trim((string)($cat['tts_voice_style'] ?? ''));
+    // 'general' is the UI sentinel for "no style"; treat like empty.
+    if ($style === 'general') $style = '';
     return [
         'provider_key' => $providerKey,
         'voice'        => $voiceCode,
@@ -1187,6 +1190,7 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
         'rate'         => (int)($cat['tts_voice_rate_pct']  ?? 0),
         'pitch'        => (float)($cat['tts_voice_pitch_st'] ?? 0),
         'volume'       => (int)($cat['tts_voice_volume']     ?? 100),
+        'style'        => $style,
     ];
 }
 
@@ -1210,7 +1214,7 @@ function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?strin
     if ($engine === '') { $err = 'provider ' . $seg['provider_key'] . ' has no engine name'; return ''; }
     $fmt = (strpos($outputFormat, 'opus') !== false) ? 'opus'
          : ((strpos($outputFormat, 'pcm') !== false || strpos($outputFormat, 'wav') !== false) ? 'wav' : 'mp3');
-    $r = gpuSynthesize([
+    $payload = [
         'provider' => $engine,
         'voice'    => $seg['voice'],
         'text'     => $seg['text'],
@@ -1219,7 +1223,9 @@ function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?strin
         'pitch'    => (float)$seg['pitch'],
         'volume'   => (int)$seg['volume'],
         'format'   => $fmt,
-    ], null, 300);
+    ];
+    if (!empty($seg['style'])) $payload['style'] = (string)$seg['style'];
+    $r = gpuSynthesize($payload, null, 300);
     if (!$r['ok']) {
         $err = 'local TTS ' . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)));
         return '';

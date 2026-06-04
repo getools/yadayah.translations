@@ -207,6 +207,33 @@ function gpuRegisterVoice(array $params, string $audioPath, int $timeout = 60): 
 }
 
 /**
+ * Edit top-level metadata on an existing voice (label / description /
+ * language / gender). Empty fields are not applied. To change clips,
+ * upload a new file via gpuRegisterVoice() with the same code + style.
+ */
+function gpuEditVoice(array $params, int $timeout = 30): array {
+    if (empty($params['code'])) {
+        return ['ok' => false, 'status' => 0, 'error' => "missing required field 'code'"];
+    }
+    $form = [];
+    foreach (['code','label','description','language','gender'] as $k) {
+        if (isset($params[$k])) $form[$k] = (string)$params[$k];
+    }
+    return gpuRequest('POST', '/tts/voices/edit', ['multipart' => $form, 'timeout' => $timeout]);
+}
+
+/**
+ * Delete a voice (style omitted) or remove one of its styles. Removes the
+ * orphaned clip(s) on the box. Deleting 'default' from a multi-style voice
+ * promotes one of the remaining styles to default.
+ */
+function gpuDeleteVoice(string $code, string $style = '', int $timeout = 30): array {
+    $form = ['code' => $code];
+    if ($style !== '') $form['style'] = $style;
+    return gpuRequest('POST', '/tts/voices/delete', ['multipart' => $form, 'timeout' => $timeout]);
+}
+
+/**
  * Register a voice that maps to a provider's BUILT-IN speaker (no clip).
  * Used for engines without voice cloning — Qwen3-Omni (chelsie/ethan/aiden)
  * and Kokoro (af_bella / af_sky / ...). Required: provider, code, voice_id.

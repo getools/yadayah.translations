@@ -108,25 +108,36 @@ if ($overrideVoice) {
     if (!isset($cfg['categories']['main'])) $cfg['categories']['main'] = $overrideRow;
 }
 
-// When the text carries <b>/<i> markup, segment it so B/I-restricted
-// pronunciation tunes match correctly. With $overrideVoice set, every
-// segment uses the same picked voice (via the override-everywhere
-// splice above), so no voice switching happens; without it, segments
-// route through their category defaults as the build worker does.
-if ($hasFormat) {
-    $segs = segmentParagraph($text);
-    if (!$segs) errorResponse('no audible content after segmentation');
-    $voiceBlock = '';
-    foreach ($segs as $seg) {
-        $voiceBlock .= buildVoiceBlock($seg['text'], $cfg, $seg['category']);
-    }
-} else {
-    $voiceBlock = buildVoiceBlock($text, $cfg, $category, $overrideVoice);
-}
-$ssml = wrapSsml($voiceBlock);
-
+// Dispatch by provider. ttsResolveProviderKey looks up the voice's engine via
+// yy_provider.provider_settings.engine; SSML-flagged engines (Azure) take the
+// existing SSML path verbatim, local engines (Chatterbox/CosyVoice/Qwen3/Kokoro)
+// route through buildLocalSegment + gpu-client.gpuSynthesize.
+$primaryCat = $hasFormat ? null : $category;
+$providerKey = ttsResolveProviderKey($cfg, $primaryCat ?? 'main');
+$usesSsml = ttsProviderUsesSsml($cfg, $providerKey);
 $err = '';
-$mp3 = azureTtsSynthesize($ssml, $cfg, $err);
+
+if ($usesSsml) {
+    if ($hasFormat) {
+        $segs = segmentParagraph($text);
+        if (!$segs) errorResponse('no audible content after segmentation');
+        $voiceBlock = '';
+        foreach ($segs as $seg) {
+            $voiceBlock .= buildVoiceBlock($seg['text'], $cfg, $seg['category']);
+        }
+    } else {
+        $voiceBlock = buildVoiceBlock($text, $cfg, $category, $overrideVoice);
+    }
+    $ssml = wrapSsml($voiceBlock);
+    $mp3  = azureTtsSynthesizeRetry($ssml, $cfg, $err);
+} else {
+    // Local engine. Preview ignores segment-level B/I tune routing for simplicity
+    // — uses the single category voice for the whole utterance (matches what the
+    // picker semantics are anyway).
+    $localSeg = buildLocalSegment($text, $cfg, $primaryCat ?? 'main');
+    $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
+    $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
+}
 if ($mp3 === '') errorResponse('TTS failed: ' . $err, 502);
 
 header('Content-Type: audio/mpeg');

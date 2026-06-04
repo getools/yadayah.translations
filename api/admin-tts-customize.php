@@ -44,11 +44,16 @@ $code         = trim($_POST['code']        ?? '');
 $label        = trim($_POST['label']       ?? '');
 $description  = trim($_POST['description'] ?? '');
 $promptText   = trim($_POST['prompt_text'] ?? '');
-$style        = trim($_POST['style']       ?? '');
+$instruct     = trim($_POST['instruct']    ?? '');   // natural-lang style hint (CV2/Qwen3)
+$styleName    = trim($_POST['style_name']  ?? 'default');  // style slot (default/happy/...)
 $voiceId      = trim($_POST['voice_id']    ?? '');   // built-in-speaker path
 $langCode     = trim($_POST['lang_code']   ?? '');   // Kokoro-specific
 $language     = trim($_POST['language']    ?? 'en');
 $gender       = trim($_POST['gender']      ?? 'unknown');
+
+// Normalize style name.
+$styleName = strtolower($styleName ?: 'default');
+if (!preg_match('/^[a-z0-9_-]+$/', $styleName)) errorResponse('style_name must be alphanumeric (dashes/underscores ok)');
 
 // Engines whose voices are SELECTED from built-ins (no clip): Qwen3-Omni
 // (only 3 hard-coded speakers) and Kokoro (50+ preset voice IDs). Cloning
@@ -61,6 +66,20 @@ if ($isBuiltin && $voiceId === '')                     errorResponse('voice_id (
 
 if ($provider === '' || $code === '') errorResponse('provider and code are required');
 if (!preg_match('/^[A-Za-z0-9_-]+$/', $code)) errorResponse('code must be alphanumeric (dashes/underscores ok)');
+
+// Multi-style rule: any non-default style requires the voice to already exist.
+// (Engine-side enforces this too, but catching here gives a friendlier message
+// and lets us skip a pointless DB upsert.)
+$existingStmt = $db->prepare("
+    SELECT v.tts_voice_key, v.tts_voice_styles
+      FROM yy_tts_voice v JOIN yy_tts t ON v.tts_key = t.tts_key
+     WHERE t.tts_code = ? AND v.tts_voice_code = ?
+");
+$existingStmt->execute([$provider, $code]);
+$existingVoice = $existingStmt->fetch();
+if ($styleName !== 'default' && !$existingVoice) {
+    errorResponse("voice '$code' doesn't exist yet — upload the 'default' style first");
+}
 
 $provStmt = $db->prepare("SELECT tts_key, tts_code, tts_name FROM yy_tts WHERE tts_code = ?");
 $provStmt->execute([$provider]);
@@ -94,12 +113,13 @@ if (!$isBuiltin) {
 try {
     $params = ['provider' => $provider, 'code' => $code,
                'label' => $label ?: $code,
-               'language' => $language, 'gender' => $gender];
-    if ($description) $params['description'] = $description;
-    if ($promptText)  $params['prompt_text'] = $promptText;
-    if ($style)       $params['style']       = $style;
-    if ($voiceId)     $params['voice_id']    = $voiceId;
-    if ($langCode)    $params['lang_code']   = $langCode;
+               'language' => $language, 'gender' => $gender,
+               'style' => $styleName];
+    if ($description) $params['description']  = $description;
+    if ($promptText)  $params['prompt_text']  = $promptText;
+    if ($instruct)    $params['instruct']     = $instruct;
+    if ($voiceId)     $params['voice_id']     = $voiceId;
+    if ($langCode)    $params['lang_code']    = $langCode;
 
     if ($isBuiltin) {
         $r = gpuRegisterBuiltinVoice($params, 30);
@@ -112,41 +132,60 @@ try {
     }
     $engineVoice = $r['data']['voice'] ?? [];
 
-    // Upsert into yy_tts_voice. tts_voice_active_flag = true so the new voice
-    // shows up immediately in the Defaults voice picker. provider_key must
-    // match the engine's yy_provider row (resolved above) — otherwise the
-    // Voices catalog filter shows the voice under "Azure" (default).
-    $up = $db->prepare("
-        INSERT INTO yy_tts_voice
-            (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
-             tts_voice_gender, tts_voice_type, tts_voice_status, tts_voice_active_flag,
-             tts_voice_note, tts_voice_download_dtime, provider_key, tts_voice_language)
-        VALUES (?, ?, ?, ?, ?, ?, 'Custom', 'GA', TRUE, ?, NOW(), ?, ?)
-        ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
-            tts_voice_label    = EXCLUDED.tts_voice_label,
-            tts_voice_gender   = EXCLUDED.tts_voice_gender,
-            tts_voice_type     = EXCLUDED.tts_voice_type,
-            tts_voice_active_flag = TRUE,
-            tts_voice_note     = COALESCE(EXCLUDED.tts_voice_note, yy_tts_voice.tts_voice_note),
-            provider_key       = EXCLUDED.provider_key,
-            tts_voice_language = EXCLUDED.tts_voice_language,
-            tts_voice_download_dtime = NOW()
-        RETURNING tts_voice_key
-    ");
-    $up->execute([
-        (int)$prov['tts_key'], $code, $label ?: $code,
-        $language, strtoupper($language),
-        $gender ?: null,
-        $description ?: null,
-        $providerKey,
-        $language ?: 'en',
-    ]);
-    $newKey = (int)$up->fetchColumn();
+    // For non-default style additions: just update the JSONB array in DB.
+    if ($existingVoice && $styleName !== 'default') {
+        $cur = json_decode((string)$existingVoice['tts_voice_styles'], true) ?: [];
+        if (!in_array($styleName, $cur, true)) $cur[] = $styleName;
+        $up = $db->prepare("UPDATE yy_tts_voice SET tts_voice_styles = ?::jsonb,
+                                                    tts_voice_revision_dtime = NOW()
+                              WHERE tts_voice_key = ?
+                          RETURNING tts_voice_key");
+        $up->execute([json_encode($cur), (int)$existingVoice['tts_voice_key']]);
+        $newKey = (int)$up->fetchColumn();
+    } else {
+        // First style ("default") — upsert the voice row. tts_voice_styles
+        // tracks the available style names; starts with ['default'].
+        $initStyles = json_encode(['default']);
+        $up = $db->prepare("
+            INSERT INTO yy_tts_voice
+                (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
+                 tts_voice_gender, tts_voice_type, tts_voice_status, tts_voice_active_flag,
+                 tts_voice_note, tts_voice_download_dtime, provider_key, tts_voice_language,
+                 tts_voice_styles)
+            VALUES (?, ?, ?, ?, ?, ?, 'Custom', 'GA', TRUE, ?, NOW(), ?, ?, ?::jsonb)
+            ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
+                tts_voice_label    = EXCLUDED.tts_voice_label,
+                tts_voice_gender   = EXCLUDED.tts_voice_gender,
+                tts_voice_type     = EXCLUDED.tts_voice_type,
+                tts_voice_active_flag = TRUE,
+                tts_voice_note     = COALESCE(EXCLUDED.tts_voice_note, yy_tts_voice.tts_voice_note),
+                provider_key       = EXCLUDED.provider_key,
+                tts_voice_language = EXCLUDED.tts_voice_language,
+                tts_voice_styles   = CASE
+                    WHEN jsonb_array_length(COALESCE(yy_tts_voice.tts_voice_styles,'[]'::jsonb)) = 0
+                    THEN EXCLUDED.tts_voice_styles
+                    ELSE yy_tts_voice.tts_voice_styles
+                END,
+                tts_voice_download_dtime = NOW()
+            RETURNING tts_voice_key
+        ");
+        $up->execute([
+            (int)$prov['tts_key'], $code, $label ?: $code,
+            $language, strtoupper($language),
+            $gender ?: null,
+            $description ?: null,
+            $providerKey,
+            $language ?: 'en',
+            $initStyles,
+        ]);
+        $newKey = (int)$up->fetchColumn();
+    }
 
     jsonResponse([
         'ok'         => true,
         'voice_key'  => $newKey,
         'provider'   => $prov['tts_code'],
+        'style'      => $styleName,
         'engine'     => $engineVoice,
     ]);
 } finally {
