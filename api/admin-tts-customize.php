@@ -67,6 +67,18 @@ $provStmt->execute([$provider]);
 $prov = $provStmt->fetch();
 if (!$prov) errorResponse("provider '$provider' not in yy_tts — register it first");
 
+// Resolve the matching yy_provider row by engine name. Used to set the
+// voice's provider_key so the Voices catalog filter lists the new voice
+// under its actual engine (not under Azure, which is the default 1).
+$provKeyStmt = $db->prepare("
+    SELECT provider_key FROM yy_provider
+     WHERE provider_settings ->> 'engine' = ?
+       AND provider_active_flag = TRUE
+     ORDER BY provider_key LIMIT 1
+");
+$provKeyStmt->execute([$provider]);
+$providerKey = (int)($provKeyStmt->fetchColumn() ?: 1);   // 1 = Azure fallback
+
 $relayPath = null;
 if (!$isBuiltin) {
     $audioPath = $_FILES['audio']['tmp_name'];
@@ -101,19 +113,23 @@ try {
     $engineVoice = $r['data']['voice'] ?? [];
 
     // Upsert into yy_tts_voice. tts_voice_active_flag = true so the new voice
-    // shows up immediately in the Defaults voice picker.
+    // shows up immediately in the Defaults voice picker. provider_key must
+    // match the engine's yy_provider row (resolved above) — otherwise the
+    // Voices catalog filter shows the voice under "Azure" (default).
     $up = $db->prepare("
         INSERT INTO yy_tts_voice
             (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
              tts_voice_gender, tts_voice_type, tts_voice_status, tts_voice_active_flag,
-             tts_voice_note, tts_voice_download_dtime)
-        VALUES (?, ?, ?, ?, ?, ?, 'Custom', 'GA', TRUE, ?, NOW())
+             tts_voice_note, tts_voice_download_dtime, provider_key, tts_voice_language)
+        VALUES (?, ?, ?, ?, ?, ?, 'Custom', 'GA', TRUE, ?, NOW(), ?, ?)
         ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
             tts_voice_label    = EXCLUDED.tts_voice_label,
             tts_voice_gender   = EXCLUDED.tts_voice_gender,
             tts_voice_type     = EXCLUDED.tts_voice_type,
             tts_voice_active_flag = TRUE,
             tts_voice_note     = COALESCE(EXCLUDED.tts_voice_note, yy_tts_voice.tts_voice_note),
+            provider_key       = EXCLUDED.provider_key,
+            tts_voice_language = EXCLUDED.tts_voice_language,
             tts_voice_download_dtime = NOW()
         RETURNING tts_voice_key
     ");
@@ -122,6 +138,8 @@ try {
         $language, strtoupper($language),
         $gender ?: null,
         $description ?: null,
+        $providerKey,
+        $language ?: 'en',
     ]);
     $newKey = (int)$up->fetchColumn();
 
