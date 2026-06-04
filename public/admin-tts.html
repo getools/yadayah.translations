@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780580853">
+    <meta name="page-version" content="1780537049">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -752,9 +752,25 @@ function onCustomizeProviderChange() {
     // Update submit button label for clarity.
     var btn = document.getElementById('cv-submit');
     if (btn) btn.textContent = hideAudio ? 'Register voice' : 'Train voice';
-    // Pre-fill the voice-code field with the provider's slug prefix.
+    // Pre-fill / swap the voice-code field with the provider's slug prefix.
+    // Replaces any KNOWN prefix from another provider (cb-/cv-/qw-/ko-) so
+    // switching CosyVoice → Qwen3 mid-typing changes "cv-craigwinn" to
+    // "qw-craigwinn", not leaves the wrong prefix in place.
     var codeIn = document.getElementById('cv-code');
-    if (codeIn && !codeIn.value && meta.codePrefix) codeIn.value = meta.codePrefix;
+    if (codeIn && meta.codePrefix) {
+        var knownPrefixes = Object.values(CUSTOMIZE_PROVIDERS)
+                              .map(function (p) { return p.codePrefix; })
+                              .filter(Boolean);
+        var cur = codeIn.value || '';
+        var stripped = cur;
+        for (var i = 0; i < knownPrefixes.length; i++) {
+            if (cur.indexOf(knownPrefixes[i]) === 0) {
+                stripped = cur.slice(knownPrefixes[i].length);
+                break;
+            }
+        }
+        codeIn.value = meta.codePrefix + stripped;
+    }
 }
 
 function onCustomizeFilePicked(input) {
@@ -809,14 +825,13 @@ async function submitCustomizeVoice() {
         if (!r.ok || !data.ok) {
             throw new Error(data.error || ('HTTP ' + r.status));
         }
-        s.textContent = '✓ Voice "' + code + '" registered for ' + prov + '. Available immediately in Defaults / Voices.';
+        s.textContent = '✓ Voice "' + code + '" registered for ' + prov + '. Reloading…';
         s.style.color = '#2e7d32';
-        // Reset the form for the next entry.
-        document.getElementById('cv-code').value = '';
-        document.getElementById('cv-name').value = '';
-        document.getElementById('cv-desc').value = '';
-        document.getElementById('cv-audio').value = '';
-        var prev = document.getElementById('cv-preview'); if (prev) { prev.src = ''; prev.style.display = 'none'; }
+        // Full page reload so all voice-bearing UI (Voices table, Defaults
+        // category picker, Pronunciations test-voice select, refresh-provider
+        // dropdown) picks up the new row. The active tab is restored from
+        // sessionState so the user lands back on Customize.
+        setTimeout(function () { window.location.reload(); }, 800);
     } catch (e) {
         s.textContent = 'Registration failed: ' + e.message; s.style.color = '#c0392b';
     } finally {
