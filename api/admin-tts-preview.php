@@ -112,33 +112,51 @@ if ($overrideVoice) {
 // yy_provider.provider_settings.engine; SSML-flagged engines (Azure) take the
 // existing SSML path verbatim, local engines (Chatterbox/CosyVoice/Qwen3/Kokoro)
 // route through buildLocalSegment + gpu-client.gpuSynthesize.
-$primaryCat = $hasFormat ? null : $category;
-$providerKey = ttsResolveProviderKey($cfg, $primaryCat ?? 'main');
-$usesSsml = ttsProviderUsesSsml($cfg, $providerKey);
+$primaryCat  = $hasFormat ? null : $category;
+$resolvedCat = $primaryCat ?? 'main';
+$providerKey = ttsResolveProviderKey($cfg, $resolvedCat);
+$usesSsml    = ttsProviderUsesSsml($cfg, $providerKey);
 $err = '';
+$mp3 = '';
 
-if ($usesSsml) {
-    if ($hasFormat) {
-        $segs = segmentParagraph($text);
-        if (!$segs) errorResponse('no audible content after segmentation');
-        $voiceBlock = '';
-        foreach ($segs as $seg) {
-            $voiceBlock .= buildVoiceBlock($seg['text'], $cfg, $seg['category']);
+try {
+    if ($usesSsml) {
+        if ($hasFormat) {
+            $segs = segmentParagraph($text);
+            if (!$segs) errorResponse('no audible content after segmentation');
+            $voiceBlock = '';
+            foreach ($segs as $seg) {
+                $voiceBlock .= buildVoiceBlock($seg['text'], $cfg, $seg['category']);
+            }
+        } else {
+            $voiceBlock = buildVoiceBlock($text, $cfg, $category, $overrideVoice);
+        }
+        $ssml = wrapSsml($voiceBlock);
+        if (function_exists('azureTtsSynthesizeRetry')) {
+            $mp3 = azureTtsSynthesizeRetry($ssml, $cfg, $err);
+        } else {
+            $mp3 = azureTtsSynthesize($ssml, $cfg, $err);
         }
     } else {
-        $voiceBlock = buildVoiceBlock($text, $cfg, $category, $overrideVoice);
+        // Local engine. Preview uses the single category voice for the whole
+        // utterance (matches the picker semantics; segment-level B/I tune
+        // routing is a build-worker concern).
+        $localSeg     = buildLocalSegment($text, $cfg, $resolvedCat);
+        $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
+        if (function_exists('localTtsSynthesizeRetry')) {
+            $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
+        } else {
+            $mp3 = localTtsSynthesize($cfg, $localSeg, $outputFormat, $err);
+        }
     }
-    $ssml = wrapSsml($voiceBlock);
-    $mp3  = azureTtsSynthesizeRetry($ssml, $cfg, $err);
-} else {
-    // Local engine. Preview ignores segment-level B/I tune routing for simplicity
-    // — uses the single category voice for the whole utterance (matches what the
-    // picker semantics are anyway).
-    $localSeg = buildLocalSegment($text, $cfg, $primaryCat ?? 'main');
-    $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
-    $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
+} catch (Throwable $e) {
+    error_log('admin-tts-preview fatal: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+    errorResponse('TTS preview crashed: ' . $e->getMessage(), 500);
 }
-if ($mp3 === '') errorResponse('TTS failed: ' . $err, 502);
+if ($mp3 === '') {
+    error_log('admin-tts-preview empty audio: provider_key=' . $providerKey . ' usesSsml=' . ($usesSsml ? '1' : '0') . ' voice=' . ($overrideVoice ?? '(category default)') . ' err=' . $err);
+    errorResponse('TTS failed: ' . ($err ?: 'engine returned no audio'), 502);
+}
 
 header('Content-Type: audio/mpeg');
 header('Content-Length: ' . strlen($mp3));
