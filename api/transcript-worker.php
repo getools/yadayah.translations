@@ -399,6 +399,7 @@ $providerKeyEnv = [
     'assemblyai'  => 'ASSEMBLYAI_API_KEY',
     'elevenlabs'  => 'ELEVENLABS_API_KEY',
     'azure'       => 'AZURE_SPEECH_KEY',
+    'gpu'         => 'GPU_API_TOKEN',
 ][$providerFamily] ?? 'OPENAI_API_KEY';
 if (!$rows && !$wantYoutubeCaptions) {
     $providerKey = readEnv($providerKeyEnv);
@@ -601,6 +602,12 @@ if (!$rows && !$wantYoutubeCaptions) {
                     case 'azure':
                         $azureRegion = readEnv('AZURE_SPEECH_REGION') ?: 'brazilsouth';
                         $rows = azureSpeechTranscribe($audioPath, $providerKey, $azureRegion, $whisperErr);
+                        break;
+                    case 'gpu':
+                        // Self-hosted faster-whisper on the Puget box via tailnet
+                        // gateway. The helper handles its own OpenAI fallback if
+                        // the box is unreachable (and OPENAI_API_KEY is set).
+                        $rows = gpuWhisperTranscribe($audioPath, $glossaryPrompt, 0, $whisperErr, $jobModel);
                         break;
                     default:
                         $whisperErr = "unknown provider family: $providerFamily";

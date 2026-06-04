@@ -398,6 +398,7 @@ function providerFamilyForModel(string $code): string {
     if (str_starts_with($code, 'assemblyai-'))  return 'assemblyai';
     if (str_starts_with($code, 'elevenlabs-'))  return 'elevenlabs';
     if (str_starts_with($code, 'azure-'))       return 'azure';
+    if (str_starts_with($code, 'gpu-'))         return 'gpu';      // self-hosted faster-whisper on Puget box
     if ($code === 'youtube')                    return 'youtube';
     return 'openai';  // whisper-1-*, gpt-4o-*, anything else
 }
@@ -414,8 +415,73 @@ function providerNativeModel(string $code): string {
         case 'deepgram-nova-3':             return 'nova-3';
         case 'assemblyai-universal-2':      return 'universal';
         case 'elevenlabs-scribe':           return 'scribe_v1';
+        case 'gpu-whisper-large-v3':        return 'large-v3';
+        case 'gpu-whisper-large-v3-word':   return 'large-v3';
         default:                            return $code;
     }
+}
+
+/**
+ * Self-hosted faster-whisper on the Puget box (gpu-* models). Calls
+ * gpuTranscribe() via the tailnet gateway and converts the engine's
+ * {segments[{start,end,text,words[]}]} response into the worker's canonical
+ * row shape. On transport failure, transparently falls back to OpenAI's
+ * whisper-1 with the matching granularity (when OPENAI_API_KEY is set).
+ *
+ *   $model: 'gpu-whisper-large-v3'      → segment-level rows
+ *           'gpu-whisper-large-v3-word' → word-level rows (sub-second)
+ *   $err is set on failure; the return value is [] on hard error.
+ */
+function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offsetSecs = 0, ?string &$err = null, string $model = 'gpu-whisper-large-v3'): array {
+    require_once __DIR__ . '/gpu-client.php';
+    $wantWord = ($model === 'gpu-whisper-large-v3-word');
+    $r = gpuTranscribe($audioPath, [
+        'language'        => '',                   // auto-detect
+        'word_timestamps' => $wantWord ? true : false,
+        'vad_filter'      => true,
+        'initial_prompt'  => $prompt,
+        'timeout'         => 1800,                 // long audio fine on Blackwell
+    ]);
+    if (!$r['ok']) {
+        // Transport / engine failure — fall back to OpenAI when configured so
+        // the job still completes. Map the model 1:1 by granularity.
+        $apiKey = readEnv('OPENAI_API_KEY');
+        if ($apiKey !== '') {
+            $fallbackModel = $wantWord ? 'whisper-1-word' : 'whisper-1-segment';
+            error_log("gpu whisper failed (" . ($r['error'] ?? 'unknown') . ") — falling back to OpenAI $fallbackModel");
+            $fbErr = '';
+            $rows = whisperApiTranscribe($audioPath, $apiKey, $prompt, $offsetSecs, $fbErr, $fallbackModel);
+            if ($rows) return $rows;
+            $err = 'gpu failed (' . ($r['error'] ?? 'unknown') . '); OpenAI fallback also failed' . ($fbErr ? ": $fbErr" : '');
+            return [];
+        }
+        $err = 'gpu transcribe failed: ' . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)));
+        return [];
+    }
+    $data = $r['data'] ?? [];
+    $rows = [];
+    if ($wantWord) {
+        // Collect words from each segment's words[] (faster-whisper emits them
+        // when word_timestamps=true is set).
+        foreach ($data['segments'] ?? [] as $seg) {
+            foreach ($seg['words'] ?? [] as $w) {
+                $text = trim((string)($w['word'] ?? ''));
+                if ($text === '') continue;
+                $rows[] = ['segment' => secsToIntervalFrac(((float)$w['start']) + (float)$offsetSecs), 'text' => $text];
+            }
+        }
+    } else {
+        foreach ($data['segments'] ?? [] as $seg) {
+            $text = trim((string)($seg['text'] ?? ''));
+            if ($text === '') continue;
+            $rows[] = ['segment' => secsToInterval((int)$seg['start'] + $offsetSecs), 'text' => $text];
+        }
+    }
+    if (!$rows && !empty($data['text'])) {
+        $rows[] = ['segment' => secsToInterval($offsetSecs), 'text' => trim((string)$data['text'])];
+    }
+    if (!$rows) $err = 'gpu returned no speech (silent / non-speech audio?)';
+    return $rows;
 }
 
 /**

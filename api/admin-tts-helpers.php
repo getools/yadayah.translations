@@ -1191,20 +1191,26 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
 }
 
 /**
- * Synthesize one segment on a local engine via its HTTP endpoint (the Docker
- * engine server on the Puget box). Contract mirrors azureTtsSynthesize():
- * returns audio bytes, or '' with $err set.
+ * Synthesize one segment on a self-hosted engine (Puget box) via gpu-client.php's
+ * authenticated tailnet gateway. Contract mirrors azureTtsSynthesize(): returns
+ * audio bytes, or '' with $err set.
+ *
+ * The engine name (kokoro / chatterbox / cosyvoice / qwen3) is taken from the
+ * provider row's settings.engine, falling back to provider_model_id. The
+ * destination URL + bearer token live in gpu-client.php / .env — provider_endpoint
+ * is no longer consulted for local engines, so a tenant DB never accidentally
+ * points the build worker at an unauthenticated host.
  */
 function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?string &$err = null): string {
+    require_once __DIR__ . '/gpu-client.php';
     $prov = $cfg['providers'][$seg['provider_key']] ?? null;
     if (!$prov) { $err = 'unknown provider_key ' . ($seg['provider_key'] ?? '?'); return ''; }
-    $endpoint = rtrim((string)($prov['provider_endpoint'] ?? ''), '/');
-    if ($endpoint === '') { $err = 'provider ' . $seg['provider_key'] . ' has no endpoint'; return ''; }
     $settings = json_decode((string)($prov['provider_settings'] ?? '{}'), true) ?: [];
     $engine   = $settings['engine'] ?? ($prov['provider_model_id'] ?? '');
+    if ($engine === '') { $err = 'provider ' . $seg['provider_key'] . ' has no engine name'; return ''; }
     $fmt = (strpos($outputFormat, 'opus') !== false) ? 'opus'
          : ((strpos($outputFormat, 'pcm') !== false || strpos($outputFormat, 'wav') !== false) ? 'wav' : 'mp3');
-    $payload = json_encode([
+    $r = gpuSynthesize([
         'provider' => $engine,
         'voice'    => $seg['voice'],
         'text'     => $seg['text'],
@@ -1213,22 +1219,10 @@ function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?strin
         'pitch'    => (float)$seg['pitch'],
         'volume'   => (int)$seg['volume'],
         'format'   => $fmt,
-    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    $ch = curl_init($endpoint . '/synthesize');
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST           => true,
-        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-        CURLOPT_POSTFIELDS     => $payload,
-        CURLOPT_TIMEOUT        => 300,
-    ]);
-    $resp = curl_exec($ch);
-    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $cerr = curl_error($ch);
-    curl_close($ch);
-    if ($resp === false || $code >= 400) {
-        $err = "local TTS HTTP $code: " . ($cerr ?: substr((string)$resp, 0, 200));
+    ], null, 300);
+    if (!$r['ok']) {
+        $err = 'local TTS ' . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)));
         return '';
     }
-    return (string)$resp;
+    return (string)($r['body'] ?? '');
 }

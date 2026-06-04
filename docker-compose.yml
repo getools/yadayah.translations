@@ -45,6 +45,8 @@ services:
       - itcoge-web
 
   web:
+    extra_hosts:
+      - "yadayah.tail67032d.ts.net:100.88.122.21"
     build: .
     restart: always
     # NO container-level mem/cpu caps on the web tier — this is the
