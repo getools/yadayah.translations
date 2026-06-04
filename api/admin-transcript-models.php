@@ -51,6 +51,8 @@ setCurrentUser($db, (int)$user['user_key']);
 // Five cloud transcription provider families, each enabled by a separate
 // API key in /opt/yada-www/.env. youtube uses yt-dlp + admin cookies.
 $AVAILABLE_MODELS = [
+    ['code' => 'gpu-whisper-large-v3',        'label' => 'Self-hosted faster-whisper large-v3 — segment timestamps (free, Puget GPU)'],
+    ['code' => 'gpu-whisper-large-v3-word',   'label' => 'Self-hosted faster-whisper large-v3 — word-level timestamps (free, Puget GPU)'],
     ['code' => 'whisper-1-segment',           'label' => 'OpenAI whisper-1 — segment timestamps ($0.006/min)'],
     ['code' => 'whisper-1-word',              'label' => 'OpenAI whisper-1 — word-level timestamps ($0.006/min)'],
     ['code' => 'groq-whisper-large-v3-turbo', 'label' => 'Groq whisper-large-v3-turbo (~$0.0004/min, fastest)'],
