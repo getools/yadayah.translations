@@ -37,10 +37,25 @@ if ($method === 'POST') {
 }
 
 if ($method === 'GET' && $action === 'catalog') {
+    // Provider list for the Pronunciations Provider column. Only engines that
+    // actually pronounce something — i.e. yy_provider rows whose label is
+    // 'Azure Neural TTS' or whose settings.engine is a known local engine.
+    // TTS engines only — local engines declare settings.engine, plus Azure
+    // Neural TTS (provider_key=1). Excludes STT providers (Azure Fast
+    // Transcription, Whisper variants, etc.) so the Pronunciations Provider
+    // dropdown stays meaningful.
+    $provStmt = $db->query("
+        SELECT provider_key, provider_label, provider_settings->>'engine' AS engine
+          FROM yy_provider
+         WHERE provider_active_flag = TRUE
+           AND (provider_settings->>'engine' IS NOT NULL OR provider_key = 1)
+         ORDER BY provider_key
+    ")->fetchAll(PDO::FETCH_ASSOC);
     jsonResponse([
         'voices'     => azureVoiceCatalog(),
         'formats'    => azureOutputFormats(),
         'categories' => ttsCategories(),
+        'providers'  => $provStmt,
     ]);
 }
 
@@ -202,6 +217,11 @@ if ($action === 'save_tune') {
     // match overlapping text. NULL/0 means default order (by length).
     $voiceCode = trim((string)($data['voice_code'] ?? ''));
     if ($voiceCode === '') $voiceCode = null;
+    // Optional provider scoping. 0 (default) = applies to all providers.
+    // When set, the tune only matches when synthesizing through that engine.
+    // FK to yy_provider; rows with this column set are filtered in
+    // ttsTunesForProvider in admin-tts-helpers.php.
+    $providerKey = isset($data['provider_key']) ? (int)$data['provider_key'] : 0;
     $sort      = isset($data['sort']) && $data['sort'] !== '' ? (int)$data['sort'] : 0;
     if (!$ttsKey || $print === '') errorResponse('tts_key, print required');
     // Legacy tts_tune_phonetic mirror — kept in sync with whichever type
@@ -239,11 +259,11 @@ if ($action === 'save_tune') {
                    tts_tune_phonetic_sub = ?, tts_tune_phonetic_ipa = ?, tts_tune_phonetic_sapi = ?,
                    tts_tune_phonetic_type = ?, tts_tune_note = ?, tts_tune_active_flag = ?,
                    tts_tune_match_bold = ?, tts_tune_match_italic = ?, tts_tune_match_case_sensitive = ?,
-                   tts_tune_sort = ?,
+                   tts_tune_sort = ?, provider_key = ?,
                    tts_tune_revision_dtime = NOW()
              WHERE tts_tune_key = ? AND tts_key = ?
         ");
-        $upd->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $sort, $tuneKey, $ttsKey]);
+        $upd->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $sort, $providerKey, $tuneKey, $ttsKey]);
 
         $ins = $db->prepare("
             INSERT INTO yy_tts_tune
@@ -251,11 +271,11 @@ if ($action === 'save_tune') {
                  tts_tune_phonetic_sub, tts_tune_phonetic_ipa, tts_tune_phonetic_sapi,
                  tts_tune_phonetic_type, tts_tune_note, tts_tune_active_flag,
                  tts_tune_match_bold, tts_tune_match_italic, tts_tune_match_case_sensitive,
-                 tts_tune_voice_code, tts_tune_sort)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?)
+                 tts_tune_voice_code, tts_tune_sort, provider_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, ?)
             RETURNING tts_tune_key
         ");
-        $ins->execute([$ttsKey, $print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort]);
+        $ins->execute([$ttsKey, $print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey]);
         $tuneKey = (int)$ins->fetchColumn();
         $cloned  = true;
     } elseif ($tuneKey > 0) {
@@ -265,13 +285,13 @@ if ($action === 'save_tune') {
                    tts_tune_phonetic_sub = ?, tts_tune_phonetic_ipa = ?, tts_tune_phonetic_sapi = ?,
                    tts_tune_phonetic_type = ?, tts_tune_note = ?, tts_tune_active_flag = ?,
                    tts_tune_match_bold = ?, tts_tune_match_italic = ?, tts_tune_match_case_sensitive = ?,
-                   tts_tune_voice_code = ?, tts_tune_sort = ?,
+                   tts_tune_voice_code = ?, tts_tune_sort = ?, provider_key = ?,
                    tts_tune_revision_dtime = NOW()
              WHERE tts_tune_key = ? AND tts_key = ?
         ");
         // Cast PHP booleans to int (0/1) because PDO's PostgreSQL driver
         // serialises bool false as "" which Postgres rejects.
-        $stmt->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $tuneKey, $ttsKey]);
+        $stmt->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey, $tuneKey, $ttsKey]);
     } else {
         // Brand-new row. Use ON CONFLICT on the (tts_key, Print, voice_code)
         // tuple — that matches the new unique index that allows multiple
@@ -282,8 +302,8 @@ if ($action === 'save_tune') {
                  tts_tune_phonetic_sub, tts_tune_phonetic_ipa, tts_tune_phonetic_sapi,
                  tts_tune_phonetic_type, tts_tune_note, tts_tune_active_flag,
                  tts_tune_match_bold, tts_tune_match_italic, tts_tune_match_case_sensitive,
-                 tts_tune_voice_code, tts_tune_sort)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tts_tune_voice_code, tts_tune_sort, provider_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (tts_key, tts_tune_print, (COALESCE(tts_tune_voice_code, ''))) DO UPDATE SET
                 tts_tune_phonetic              = EXCLUDED.tts_tune_phonetic,
                 tts_tune_phonetic_sub          = EXCLUDED.tts_tune_phonetic_sub,
@@ -296,10 +316,11 @@ if ($action === 'save_tune') {
                 tts_tune_match_italic          = EXCLUDED.tts_tune_match_italic,
                 tts_tune_match_case_sensitive  = EXCLUDED.tts_tune_match_case_sensitive,
                 tts_tune_sort                  = EXCLUDED.tts_tune_sort,
+                provider_key                   = EXCLUDED.provider_key,
                 tts_tune_revision_dtime = NOW()
             RETURNING tts_tune_key
         ");
-        $stmt->execute([$ttsKey, $print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort]);
+        $stmt->execute([$ttsKey, $print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey]);
         $tuneKey = (int)$stmt->fetchColumn();
     }
 

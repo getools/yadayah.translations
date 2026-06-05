@@ -463,6 +463,7 @@
                         <th class="col-ipa"  style="width:18%;text-align:left;padding-left:25px;" title="IPA pronunciation. Azure uses this via <phoneme alphabet='ipa'> SSML.">IPA <button type="button" class="prons-mode-btn" onclick="setPronsMode('phonetic')" title="Switch to Phonetic view (show only the re-spelling)">Phonetic ▸</button></th>
                         <th class="col-sapi" style="width:18%" title="Reference SAPI phoneme codes. Azure neural voices don't accept SAPI; kept for cross-checking with older tools.">SAPI <span style="color:#999;font-weight:400;">(ref)</span></th>
                         <th style="width:36px"></th>
+                        <th onclick="sortTunesBy('provider')" style="width:110px;cursor:pointer;" title="Per-tune provider scope. When set, this tune only fires when synthesizing through that engine. Use it for engine-specific respellings (e.g. a Chatterbox-only phonetic). Leave blank to apply to all engines.">Provider<span class="sort-arrow" data-col="provider"></span></th>
                         <th onclick="sortTunesBy('voice')" style="width:130px;cursor:pointer;" title="Per-tune voice override. When set, this word switches to that voice mid-sentence. A tune with a voice wins over one without when the same text matches both.">Voice<span class="sort-arrow" data-col="voice"></span></th>
                         <th onclick="sortTunesBy('sort')" style="width:48px;text-align:right;cursor:pointer;" title="Manual priority — higher value wins when multiple tunes match the same text. Blank/0 = default order.">Sort<span class="sort-arrow" data-col="sort"></span></th>
                         <th style="width:30px;text-align:center;" title="Click the icon to add or edit a note">Note</th>
@@ -2006,9 +2007,23 @@ function renderTunes() {
         });
     }
     var dir = TUNES_SORT.dir === 'desc' ? -1 : 1;
+    // Map provider_key → label once so the Provider sort can compare by name.
+    var providerLabelByKey = {};
+    (CATALOG && CATALOG.providers || []).forEach(function (p) {
+        providerLabelByKey[p.provider_key] = (p.provider_label || '').toLowerCase();
+    });
     var sorted = src.slice().sort(function(a, b) {
         if (TUNES_SORT.col === 'book_count') {
             return ((parseInt(a.tts_tune_book_count,10)||0) - (parseInt(b.tts_tune_book_count,10)||0)) * dir;
+        }
+        if (TUNES_SORT.col === 'voice') {
+            return (a.tts_tune_voice_code || '').localeCompare(b.tts_tune_voice_code || '', undefined, { sensitivity: 'base' }) * dir;
+        }
+        if (TUNES_SORT.col === 'provider') {
+            return ((providerLabelByKey[a.provider_key] || '').localeCompare(providerLabelByKey[b.provider_key] || '', undefined, { sensitivity: 'base' })) * dir;
+        }
+        if (TUNES_SORT.col === 'sort') {
+            return ((parseInt(a.tts_tune_sort,10)||0) - (parseInt(b.tts_tune_sort,10)||0)) * dir;
         }
         return (a.tts_tune_print || '').localeCompare(b.tts_tune_print || '', undefined, { sensitivity: 'base' }) * dir;
     });
@@ -2445,6 +2460,12 @@ function buildTuneRow(t) {
         '<td style="padding:8px 2px;text-align:center;">' +
             '<button class="btn-sm btn-sec" data-act="listen" title="Play with the selected variant (SUB or IPA)" style="margin:0;padding:5px 8px;">▶</button>' +
         '</td>' +
+        // Provider column — per-tune engine scope. Blank = apply to all engines.
+        '<td style="padding:4px 2px;">' +
+            '<select class="f-provider" title="Restrict this tune to one engine. Blank = applies to all engines." style="width:100%;padding:3px 4px;border:1px solid #ccc;border-radius:3px;font-size:0.78rem;">' +
+                '<option value="0"></option>' +
+            '</select>' +
+        '</td>' +
         // Voice column — per-tune voice override. Empty value means
         // "use whatever voice the surrounding category supplies".
         '<td style="padding:4px 2px;">' +
@@ -2468,6 +2489,17 @@ function buildTuneRow(t) {
         '<td style="text-align:right;padding:8px 6px;">' +
             '<button class="btn-sm btn-del" data-act="del" title="Delete" style="margin:0;">×</button>' +
         '</td>';
+    // Populate the per-tune Provider dropdown from the global catalog.
+    var provSelEl = tr.querySelector('.f-provider');
+    var providers = (CATALOG && CATALOG.providers) ? CATALOG.providers : [];
+    providers.forEach(function (p) {
+        var o = document.createElement('option');
+        o.value = String(p.provider_key);
+        o.textContent = (p.provider_label || ('#' + p.provider_key)).replace(/\s*\([^)]*\)\s*/g, '').trim();
+        provSelEl.appendChild(o);
+    });
+    var savedProviderKey = (t.provider_key !== undefined && t.provider_key !== null) ? String(t.provider_key) : '0';
+    provSelEl.value = savedProviderKey;
     // Populate the per-tune voice dropdown from the global catalog,
     // shortening "Brian (Multilingual, authoritative male, US)" down to
     // "Brian" so the cell stays narrow. Inactive voices are excluded.
@@ -2508,6 +2540,10 @@ function buildTuneRow(t) {
         r.addEventListener('click',  saveOnSelect);
     });
     tr.querySelector('.f-active').addEventListener('change', function() { saveTuneRow(tr); });
+    // Save when the per-tune voice or provider dropdown changes.
+    tr.querySelectorAll('.f-voice, .f-provider').forEach(function (el) {
+        el.addEventListener('change', function () { saveTuneRow(tr); });
+    });
     // B / I toggle buttons — flip their .on class and save the row.
     tr.querySelectorAll('.f-bi-btn').forEach(function(btn) {
         btn.addEventListener('click', function() {
@@ -2589,12 +2625,14 @@ async function saveTuneRow(tr) {
     var mItalic = tr.querySelector('.f-bi-btn.f-italic').classList.contains('on');
     var mCase   = tr.querySelector('.f-bi-btn.f-case').classList.contains('on');
     var voiceEl = tr.querySelector('.f-voice');
+    var provEl  = tr.querySelector('.f-provider');
     var sortEl  = tr.querySelector('.f-sort');
-    var voiceCode = voiceEl ? voiceEl.value : '';
-    var sortVal   = sortEl  ? sortEl.value  : '';
+    var voiceCode   = voiceEl ? voiceEl.value : '';
+    var providerKey = provEl  ? (parseInt(provEl.value, 10) || 0) : 0;
+    var sortVal     = sortEl  ? sortEl.value  : '';
     if (!print) return;
     var s = $('tunes-status');
-    console.log('[tts] saveTuneRow', { key: key, print: print, type: type, sub: sub, ipa: ipa, sapi: sapi, voice: voiceCode, sort: sortVal });
+    console.log('[tts] saveTuneRow', { key: key, print: print, type: type, sub: sub, ipa: ipa, sapi: sapi, voice: voiceCode, provider: providerKey, sort: sortVal });
     // We allow type to be saved even if the chosen column is empty — the
     // synthesis path silently skips empty rules. So a user can flip Type
     // around to compare variants without each empty slot blocking saves.
@@ -2606,7 +2644,8 @@ async function saveTuneRow(tr) {
                 print: print, phonetic_sub: sub, phonetic_ipa: ipa, phonetic_sapi: sapi,
                 phonetic_type: type, note: note, active: active,
                 match_bold: mBold, match_italic: mItalic, match_case_sensitive: mCase,
-                voice_code: voiceCode || '', sort: sortVal === '' ? '' : (parseInt(sortVal, 10) || 0)
+                voice_code: voiceCode || '', provider_key: providerKey,
+                sort: sortVal === '' ? '' : (parseInt(sortVal, 10) || 0)
             }),
         });
         tr.dataset.key = res.tts_tune_key;

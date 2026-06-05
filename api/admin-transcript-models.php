@@ -219,11 +219,20 @@ if ($method === 'POST' && $action === 'run') {
     $valid = array_column($AVAILABLE_MODELS, 'code');
     if (!in_array($model, $valid, true)) errorResponse('invalid model: ' . $model);
 
-    // Cancel any in-flight job for this item before queuing a new one. The
-    // UI runs models sequentially, so there should normally be none, but be
-    // defensive if the user double-clicks or two tabs are open.
-    $db->prepare("UPDATE yy_feed_item_transcript_job SET job_status = 'cancelled', job_completed_dtime = NOW() WHERE feed_item_key = ? AND job_status IN ('pending', 'running')")
-       ->execute([$itemKey]);
+    // Cancel any in-flight job for this item *of the same model* before
+    // queuing a new one. The UI runs different models in parallel (e.g.
+    // segment-level + word-level GPU Whisper from one click), so the
+    // cancel must be scoped to the model — otherwise queuing a word job
+    // for an item would kill the segment job that was queued moments
+    // before (was visible in DB as ~6 segment jobs stuck in 'cancelled'
+    // for every burst, while the matching word jobs ran normally).
+    $db->prepare("UPDATE yy_feed_item_transcript_job
+                     SET job_status = 'cancelled', job_completed_dtime = NOW(),
+                         job_message = 'superseded by newer run of same model'
+                   WHERE feed_item_key = ?
+                     AND job_model = ?
+                     AND job_status IN ('pending', 'running')")
+       ->execute([$itemKey, $model]);
 
     $insStmt = $db->prepare("
         INSERT INTO yy_feed_item_transcript_job
@@ -234,20 +243,37 @@ if ($method === 'POST' && $action === 'run') {
     $insStmt->execute([$itemKey, 'Queued for model: ' . $model, $user['user_key'], $model]);
     $jobKey = (int)$insStmt->fetchColumn();
 
-    // Spawn the worker — uses the same script as before, but the worker
-    // branches on job_model to pick OpenAI endpoint vs yt-dlp captions.
-    $workerScript = __DIR__ . '/transcript-worker.php';
-    if (file_exists($workerScript)) {
-        $logFile = sys_get_temp_dir() . '/transcript_' . $jobKey . '.log';
-        $pid = spawnCappedWorker($workerScript, [(string)$jobKey], $logFile, [
-            'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
-        ]);
-        if ($pid > 0) {
-            $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
-               ->execute([$pid, $jobKey]);
+    // ── Concurrency cap ──────────────────────────────────────────────
+    // Bulk-generate (90+ items × 2 models in one click) used to spawn
+    // 150-180 workers in the same minute. Each worker pins ≥1 Postgres
+    // connection for its lifetime; with max_connections=100 the pool
+    // craters and every subsequent worker / request fails. Cap concurrent
+    // workers globally and leave the rest as 'pending' — they'll be
+    // picked up by workers as slots free up (see transcript-worker.php
+    // post-exit dequeue).
+    $MAX_CONCURRENT_WORKERS = 4;
+    $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
+    if ($running < $MAX_CONCURRENT_WORKERS) {
+        $workerScript = __DIR__ . '/transcript-worker.php';
+        if (file_exists($workerScript)) {
+            $logFile = sys_get_temp_dir() . '/transcript_' . $jobKey . '.log';
+            $pid = spawnCappedWorker($workerScript, [(string)$jobKey], $logFile, [
+                'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
+            ]);
+            if ($pid > 0) {
+                $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
+                   ->execute([$pid, $jobKey]);
+            }
         }
+        jsonResponse(['job_key' => $jobKey, 'model' => $model, 'queued' => false, 'running' => $running + 1]);
+    } else {
+        // Leave row as 'pending' — workers picking up next job on their
+        // own exit will dequeue this in FIFO order.
+        $db->prepare("UPDATE yy_feed_item_transcript_job
+                        SET job_message = ? WHERE feed_item_transcript_job_key = ?")
+           ->execute([sprintf('Queued — %d workers busy, will start when a slot frees', $running), $jobKey]);
+        jsonResponse(['job_key' => $jobKey, 'model' => $model, 'queued' => true, 'running' => $running]);
     }
-    jsonResponse(['job_key' => $jobKey, 'model' => $model]);
 }
 
 errorResponse('Unknown action');

@@ -19,7 +19,39 @@ $jobKey = (int)$argv[1];
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/transcript-helpers.php'; // applyCorrectionDictionary() for snapshot
 require_once __DIR__ . '/transcribe-providers.php'; // Groq / Deepgram / AssemblyAI / ElevenLabs
+require_once __DIR__ . '/spawn-helpers.php';        // spawnCappedWorker() for post-exit dequeue
 $db = getDb();
+
+// On any exit (success, failure, fatal error) try to pull the next pending
+// transcript job and spawn a worker for it. This keeps a bounded number of
+// workers grinding through a long pending queue without ever exceeding the
+// concurrency cap that admin-transcript-models.php enforces. Bounded so a
+// 90-item bulk-generate doesn't crater Postgres's connection pool again.
+register_shutdown_function(function () {
+    try {
+        $MAX_CONCURRENT_WORKERS = 4;
+        $db = getDb();  // fresh connection — the worker's own may be in a bad state at shutdown
+        $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
+        if ($running >= $MAX_CONCURRENT_WORKERS) return;
+        $nextKey = $db->query("SELECT feed_item_transcript_job_key
+                                  FROM yy_feed_item_transcript_job
+                                 WHERE job_status = 'pending'
+                                 ORDER BY feed_item_transcript_job_key
+                                 LIMIT 1")->fetchColumn();
+        if (!$nextKey) return;
+        $workerScript = __DIR__ . '/transcript-worker.php';
+        $logFile = sys_get_temp_dir() . '/transcript_' . $nextKey . '.log';
+        $pid = spawnCappedWorker($workerScript, [(string)$nextKey], $logFile, [
+            'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
+        ]);
+        if ($pid > 0) {
+            $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
+               ->execute([$pid, $nextKey]);
+        }
+    } catch (Throwable $e) {
+        error_log("transcript-worker shutdown dequeue failed: " . $e->getMessage());
+    }
+});
 
 // Honor SIGTERM from admin-transcript.php's cancel handler. We don't try to
 // flip the DB row here — admin-transcript.php already set 'cancelled' before
