@@ -1148,7 +1148,9 @@ function applyTunesPlain(string $text, array $tunes): string {
         $print = (string)($t['tts_tune_print'] ?? '');
         if ($print === '') continue;
         $alias = trim((string)($t['tts_tune_phonetic_sub'] ?? ''));
-        if ($alias === '') $alias = trim((string)($t['tts_tune_phonetic'] ?? ''));
+        // Local engines have no SSML phoneme tag — IPA fallback would inject
+        // codepoints (ɑ ʁ ʕ) the engine's text→phoneme stage can't map.
+        // Skip tunes with no 'sub' so the English defaults handle them.
         if ($alias === '') continue;
         $alias = str_replace(['[', ']', '{', '}'], '', $alias);
         $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
