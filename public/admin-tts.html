@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780596190">
+    <meta name="page-version" content="1780537049">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -50,16 +50,35 @@
         #pane-pronunciations tr.tune-mode-sub .f-warn-sapi { display:none; }
         #pane-pronunciations tr.tune-mode-ipa .f-sub        { display:none; }
 
-        /* Temporary: hide the SUB column entirely and hide the SUB/IPA
-           mode-toggle radios. With SUB unavailable every row is treated
-           as IPA-mode, so we also un-hide IPA + SAPI inputs in rows
-           whose saved phonetic_type is 'sub'. Warnings keep their own
-           visibility rule (.f-warn vs .f-warn.show). */
-        #pane-pronunciations .col-sub                       { display:none; }
-        #pane-pronunciations .f-type-radio                  { display:none; }
-        #pane-pronunciations tr.tune-mode-sub .f-ipa,
-        #pane-pronunciations tr.tune-mode-sub .f-sapi,
-        #pane-pronunciations tr.tune-mode-sub .f-ipa-helper { display:revert !important; }
+        /* Mode toggle on the table header: IPA mode (default) shows IPA + SAPI
+           columns; Phonetic mode hides them and surfaces the SUB respelling
+           column instead. The per-row .f-type-radio inputs are unused — the
+           pane-level mode controls everything. */
+        #pane-pronunciations .f-type-radio                       { display:none; }
+        /* Default = IPA mode (no mode class also falls into this branch). */
+        #pane-pronunciations:not(.mode-phonetic) .col-sub        { display:none; }
+        #pane-pronunciations:not(.mode-phonetic) .f-sub          { display:none; }
+        #pane-pronunciations:not(.mode-phonetic) tr.tune-mode-sub .f-ipa,
+        #pane-pronunciations:not(.mode-phonetic) tr.tune-mode-sub .f-sapi,
+        #pane-pronunciations:not(.mode-phonetic) tr.tune-mode-sub .f-ipa-helper { display:revert !important; }
+        /* Phonetic mode: hide IPA + SAPI columns entirely, show SUB. */
+        #pane-pronunciations.mode-phonetic .col-ipa,
+        #pane-pronunciations.mode-phonetic .col-sapi,
+        #pane-pronunciations.mode-phonetic .f-ipa,
+        #pane-pronunciations.mode-phonetic .f-sapi,
+        #pane-pronunciations.mode-phonetic .f-ipa-helper,
+        #pane-pronunciations.mode-phonetic .f-warn-ipa,
+        #pane-pronunciations.mode-phonetic .f-warn-sapi          { display:none !important; }
+        #pane-pronunciations.mode-phonetic .col-sub,
+        #pane-pronunciations.mode-phonetic .f-sub                { display:revert !important; }
+        /* Header toggle look. */
+        #pane-pronunciations .prons-mode-btn {
+            display:inline-block; padding:1px 6px; margin-left:6px;
+            font-size:0.74rem; font-weight:600; color:#31345A;
+            border:1px solid #31345A; background:#fff; border-radius:3px;
+            cursor:pointer; line-height:1.3;
+        }
+        #pane-pronunciations .prons-mode-btn:hover { background:#31345A; color:#fff; }
         /* Validation warning icon — sits to the right of the input. */
         .f-bi-btn { background:#fafafa; border:1px solid #ccc; border-radius:3px; padding:2px 6px; cursor:pointer; font-size:0.78rem; line-height:1.2; flex:0 0 auto; color:#888; min-width:20px; }
         .f-bi-btn.on { background:#31345A; color:#fff; border-color:#31345A; }
@@ -440,9 +459,9 @@
                         <th style="width:32px;text-align:center;" title="Active — uncheck to disable this rule"></th>
                         <th onclick="sortTunesBy('print')"      style="width:18%;cursor:pointer;" title="Click to sort by Text">Text<span class="sort-arrow" data-col="print"></span></th>
                         <th onclick="sortTunesBy('book_count')" style="width:50px;text-align:right;cursor:pointer;" title="Number of occurrences in the books — click to sort">#<span class="sort-arrow" data-col="book_count"></span></th>
-                        <th class="col-sub"  style="width:22%;text-align:left;padding-left:25px;" title="Re-spelling — visible while SUB radio is selected">SUB</th>
-                        <th class="col-ipa"  style="width:18%;text-align:left;padding-left:25px;" title="IPA — visible while IPA radio is selected">IPA</th>
-                        <th class="col-sapi" style="width:18%" title="Reference SAPI — visible while IPA radio is selected. Azure neural voices don't accept SAPI, so this is for reference only.">SAPI <span style="color:#999;font-weight:400;">(ref)</span></th>
+                        <th class="col-sub"  style="width:36%;text-align:left;padding-left:25px;" title="Phonetic re-spelling (the SUB field). Local engines use this; Azure can use it too when no IPA is set.">Phonetic <button type="button" class="prons-mode-btn" onclick="setPronsMode('ipa')" title="Switch to IPA view (show IPA + SAPI columns)">IPA ▸</button></th>
+                        <th class="col-ipa"  style="width:18%;text-align:left;padding-left:25px;" title="IPA pronunciation. Azure uses this via <phoneme alphabet='ipa'> SSML.">IPA <button type="button" class="prons-mode-btn" onclick="setPronsMode('phonetic')" title="Switch to Phonetic view (show only the re-spelling)">Phonetic ▸</button></th>
+                        <th class="col-sapi" style="width:18%" title="Reference SAPI phoneme codes. Azure neural voices don't accept SAPI; kept for cross-checking with older tools.">SAPI <span style="color:#999;font-weight:400;">(ref)</span></th>
                         <th style="width:36px"></th>
                         <th onclick="sortTunesBy('voice')" style="width:130px;cursor:pointer;" title="Per-tune voice override. When set, this word switches to that voice mid-sentence. A tune with a voice wins over one without when the same text matches both.">Voice<span class="sort-arrow" data-col="voice"></span></th>
                         <th onclick="sortTunesBy('sort')" style="width:48px;text-align:right;cursor:pointer;" title="Manual priority — higher value wins when multiple tunes match the same text. Blank/0 = default order.">Sort<span class="sort-arrow" data-col="sort"></span></th>
@@ -863,7 +882,19 @@ window.addEventListener('load', function() {
     if (!window.sessionState) return;
     var t = sessionState.load('activeTab', '');
     if (t) activateTtsTab(t);
+    setPronsMode(sessionState.load('pronsMode', 'ipa'));
 });
+
+// ── Pronunciations table mode toggle (IPA ↔ Phonetic) ───────────────────
+// Controls visibility only — all three values (sub, ipa, sapi) stay stored.
+function setPronsMode(mode) {
+    if (mode !== 'ipa' && mode !== 'phonetic') mode = 'ipa';
+    var pane = document.getElementById('pane-pronunciations');
+    if (!pane) return;
+    pane.classList.toggle('mode-phonetic', mode === 'phonetic');
+    pane.classList.toggle('mode-ipa',       mode === 'ipa');
+    if (window.sessionState) sessionState.save('pronsMode', mode);
+}
 
 function api(path, opts) {
     opts = opts || {};

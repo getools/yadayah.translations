@@ -1175,6 +1175,11 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     $text = applyTunesPlain($text, ttsTunesForProvider($cfg, $providerKey));
     $text = preg_replace('/\x01PAUSE_\d+_(\d+)\x01/', ' ', $text);   // drop pause placeholders
     $text = preg_replace('/[\x{02BF}\x{02BE}]/u', '', $text);        // drop half-rings ʿ ʾ
+    // Strip <b>/<i>/<em>/<strong> markup. admin-tts-preview.php preserves these
+    // so Azure SSML can route segments; local engines speak them as literal
+    // letters ("B", "I") otherwise. Stripped here so every local-engine code
+    // path is covered (preview + build worker).
+    $text = preg_replace('/<\/?(?:b|i|em|strong)\b[^>]*>/i', '', $text);
     $text = trim((string)preg_replace('/\s+/u', ' ', $text));
     // Category prosody (parent-walked like buildVoiceBlock).
     $cat = $cfg['categories'][$category] ?? null;
