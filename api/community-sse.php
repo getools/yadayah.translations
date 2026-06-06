@@ -51,7 +51,9 @@ $user = getenv('PG_USER') ?: 'postgres';
 $pass = getenv('PG_PASS') ?: 'yada_password';
 $dsn = "pgsql:host=$host;port=$port;dbname=$name";
 $dbOpts = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC];
-$db = new PDO($dsn, $user, $pass, $dbOpts);
+// Lazy connection: opened at the top of each poll-loop tick, closed before
+// the sleep. See the loop body below for the rationale.
+$db = null;
 
 function sse_reconnect_db($dsn, $user, $pass, $opts) {
     for ($i = 0; $i < 3; $i++) {
@@ -78,6 +80,20 @@ while (true) {
         echo "event: reconnect\ndata: {}\n\n";
         flush();
         break;
+    }
+
+    // Re-open the DB connection per tick so we don't pin a Postgres slot
+    // across the 2-second sleep. With many open admin tabs each holding
+    // 1 connection for the full 5-minute runtime, the pool would
+    // exhaust quickly. Connection cost (~5ms) is dwarfed by the 2 s
+    // sleep, so per-tick churn is fine.
+    if ($db === null) {
+        $db = sse_reconnect_db($dsn, $user, $pass, $dbOpts);
+        if (!$db) {
+            echo "event: reconnect\ndata: {}\n\n";
+            flush();
+            break;
+        }
     }
 
     try {
@@ -156,5 +172,8 @@ while (true) {
         flush();
     }
 
+    // Drop the DB handle so Postgres can recycle the connection during the
+    // sleep. The next loop iteration re-opens via sse_reconnect_db().
+    $db = null;
     sleep(2);
 }

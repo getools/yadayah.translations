@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780537049">
+    <meta name="page-version" content="1780690225">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
-    <link rel="stylesheet" href="css/app.css?v=10">
+    <link rel="stylesheet" href="css/app.css?v=13">
     <link rel="stylesheet" href="css/login.css">
     <style>
         .tts-section { background:#fff; border:1px solid #e0e0e0; border-radius:8px; padding:16px 20px; margin-bottom:16px; }
@@ -198,6 +198,34 @@
 
     <!-- ── Voices tab — preview + catalog ────────────────────────── -->
     <div id="pane-voices" class="tts-pane">
+        <!-- Providers section. Per-engine settings that shape how the
+             synth pipeline talks to each provider. Initially exposes
+             Phonetic-vs-IPA preference (drives which side of the per-tune
+             SUB/IPA lexicon the engine receives at synth time); easy to
+             extend with more columns as needed. -->
+        <div class="tts-section">
+            <h3>Providers</h3>
+            <p class="desc">Per-engine settings for the TTS providers below.
+                <strong>Pronunciation</strong>: pick which side of the per-word
+                lexicon this provider's voices consume — <em>Phonetic</em>
+                (respelling like <code>to-MAH-to</code>) or <em>IPA</em>
+                (<code>təˈmɑːtoʊ</code>). Engines that don't accept the
+                non-chosen format will fall back automatically.</p>
+            <table class="tts-table" id="providers-table" style="width:100%;font-size:0.85rem;">
+                <thead>
+                    <tr>
+                        <th style="text-align:left;">Provider</th>
+                        <th style="width:120px;text-align:center;" title="Number of voices this provider contributes to the catalog below">Voices</th>
+                        <th style="width:220px;text-align:center;">Pronunciation</th>
+                    </tr>
+                </thead>
+                <tbody id="providers-tbody">
+                    <tr><td colspan="3" style="text-align:center;color:#888;padding:12px;">Loading…</td></tr>
+                </tbody>
+            </table>
+            <div id="providers-status" class="status-msg" style="margin-top:6px;"></div>
+        </div>
+
         <div class="tts-section">
             <h3>Preview any voice</h3>
             <p class="desc">Type a phrase (bold/italic routes through the translation / word_definition voices). Use the ▶ button on a Voice catalog row below to hear any voice say it. Pronunciations + pauses apply automatically.</p>
@@ -404,15 +432,20 @@
                     <li><strong>SAPI</strong> — reference-only spelling using legacy SAPI phoneme codes (<code>AH1 HH OW0</code>). Azure neural voices reject SAPI, so this column is preserved for cross-checking against older tools; not used by synthesis.</li>
                     <li><strong>▶</strong> — auditions this rule using the category voice selected in the picker above the table, with that category's saved style, rate, pitch, and volume.</li>
                     <li><strong>Voice</strong> — optional per-tune voice override. Setting one on a previously-voiceless row creates a clone (the original stays as the voice-NULL catch-all); only one voice-specific clone stays active per Text, others become inactive automatically.</li>
-                    <li><strong>Sort</strong> — manual priority for breaking ties between overlapping rules. Higher value wins; blank/<code>0</code> means use defaults (Text length, then row order).</li>
                     <li><strong>Note</strong> — pencil icon opens a popover for free-form notes (intent, edge cases, etc.). Amber when a note is set.</li>
                     <li><strong>×</strong> — delete the row.</li>
                 </ul>
                 <p class="desc" style="margin-top:6px;">Tunes apply <em>before</em> pause rules during synthesis, so the matched text consumes its half-ring / apostrophe characters before the pause filter ever sees them.</p>
             </div>
-            <!-- Row 1: voice model (left) + Add button (right) -->
-            <div id="tunes-toolbar-1" style="display:flex;align-items:center;gap:10px;margin-bottom:6px;font-size:0.85rem;">
-                <select id="tunes-test-voice" title="Voice used when you click ▶ next to a row" style="min-width:260px;max-width:380px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;flex:0 0 auto;"></select>
+            <!-- Row 1: Provider + Voice + Add. Voice selected here drives
+                 the ▶ audition button on every row. Voice list is
+                 filtered to the chosen provider; selection persists
+                 across reloads via sessionState. -->
+            <div id="tunes-toolbar-1" style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:0.85rem;flex-wrap:wrap;">
+                <label style="color:#666;font-size:0.82rem;">Provider</label>
+                <select id="tunes-test-provider" onchange="onTunesTestProviderChange()" title="TTS provider whose voices populate the dropdown to the right." style="min-width:140px;max-width:240px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;flex:0 0 auto;"></select>
+                <label style="color:#666;font-size:0.82rem;">Voice</label>
+                <select id="tunes-test-voice" onchange="onTunesTestVoiceChange()" title="Voice used when you click ▶ next to a row" style="min-width:220px;max-width:380px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;flex:0 0 auto;"></select>
                 <div style="flex:1 1 auto;"></div>
                 <button class="add-row-btn" onclick="addTuneRow()" style="margin-top:0;padding:5px 14px;flex:0 0 auto;">+ Add</button>
             </div>
@@ -465,7 +498,7 @@
                         <th style="width:36px"></th>
                         <th onclick="sortTunesBy('provider')" style="width:110px;cursor:pointer;" title="Per-tune provider scope. When set, this tune only fires when synthesizing through that engine. Use it for engine-specific respellings (e.g. a Chatterbox-only phonetic). Leave blank to apply to all engines.">Provider<span class="sort-arrow" data-col="provider"></span></th>
                         <th onclick="sortTunesBy('voice')" style="width:130px;cursor:pointer;" title="Per-tune voice override. When set, this word switches to that voice mid-sentence. A tune with a voice wins over one without when the same text matches both.">Voice<span class="sort-arrow" data-col="voice"></span></th>
-                        <th onclick="sortTunesBy('sort')" style="width:48px;text-align:right;cursor:pointer;" title="Manual priority — higher value wins when multiple tunes match the same text. Blank/0 = default order.">Sort<span class="sort-arrow" data-col="sort"></span></th>
+                        <th colspan="2" style="width:148px;text-align:center;" title="Seed range for stochastic local engines (Chatterbox). Book builds pick a fresh random int in [min..max] for every occurrence — leave min==max for deterministic identical audio. The Pronunciation ▶ preview pins to seed_max so the audition stays reproducible across clicks.">Seeds</th>
                         <th style="width:30px;text-align:center;" title="Click the icon to add or edit a note">Note</th>
                         <th style="width:32px;text-align:right;"></th>
                     </tr>
@@ -644,7 +677,7 @@ function activateTtsTab(tabName) {
     btn.classList.add('active');
     var pane = $('pane-' + tabName);
     if (pane) pane.classList.add('active');
-    if (tabName === 'voices') { loadVoiceCatalog(); pvEnsureSeriesLoaded(); }
+    if (tabName === 'voices') { loadProviders(); loadVoiceCatalog(); pvEnsureSeriesLoaded(); }
     if (tabName === 'customize') initCustomizeTab();
     if (tabName === 'pronunciations') loadTunes();
     if (tabName === 'pauses') loadPauses();
@@ -1410,6 +1443,65 @@ async function refreshVoiceCatalog() {
     }
 }
 
+// ── Providers section (top of Voices tab) ──────────────────────────
+// Fetches all TTS providers (the API filters to providers with at least
+// one voice in the catalog) and renders an editable row per provider.
+// Currently only Pronunciation (Phonetic vs IPA) is editable; the API
+// whitelist accepts more fields without UI changes when we add them.
+async function loadProviders() {
+    var tbody = document.getElementById('providers-tbody');
+    if (!tbody) return;
+    try {
+        var r = await api('/admin-tts-config.php?action=list_providers');
+        var providers = r.providers || [];
+        if (!providers.length) {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#888;padding:12px;">No TTS providers with voices yet — populate the catalog below first.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = providers.map(function (p) {
+            var pk = p.provider_key;
+            var phon = (p.provider_phonetic_type || 'sub') === 'ipa' ? 'ipa' : 'sub';
+            var grp  = 'prov-phon-' + pk;
+            return '<tr data-provider-key="' + pk + '">' +
+                '<td style="padding:6px 6px;">' + escapeHtml(p.provider_label || '') +
+                    '<span style="color:#888;font-size:0.78rem;margin-left:6px;">' + escapeHtml(p.provider_main || '') + '</span>' +
+                '</td>' +
+                '<td style="text-align:center;color:#666;font-variant-numeric:tabular-nums;">' + (p.voice_count || 0) + '</td>' +
+                '<td style="text-align:center;">' +
+                    '<label style="margin-right:14px;cursor:pointer;">' +
+                        '<input type="radio" name="' + grp + '" value="sub"' + (phon === 'sub' ? ' checked' : '') + ' onchange="saveProviderPhoneticType(' + pk + ', \'sub\', this)" style="vertical-align:middle;"> Phonetic' +
+                    '</label>' +
+                    '<label style="cursor:pointer;">' +
+                        '<input type="radio" name="' + grp + '" value="ipa"' + (phon === 'ipa' ? ' checked' : '') + ' onchange="saveProviderPhoneticType(' + pk + ', \'ipa\', this)" style="vertical-align:middle;"> IPA' +
+                    '</label>' +
+                '</td>' +
+            '</tr>';
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#a00;padding:12px;">Failed to load providers: ' + escapeHtml(String(e && e.message || e)) + '</td></tr>';
+    }
+}
+
+async function saveProviderPhoneticType(providerKey, value, radioEl) {
+    var s = document.getElementById('providers-status');
+    if (s) { s.textContent = 'Saving…'; s.className = 'status-msg'; }
+    try {
+        await api('/admin-tts-config.php', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+                action: 'save_provider',
+                provider_key: providerKey,
+                provider_phonetic_type: value,
+            }),
+        });
+        if (s) { s.textContent = 'Saved — pronunciation set to ' + (value === 'ipa' ? 'IPA' : 'Phonetic'); s.className = 'status-msg success'; }
+    } catch (e) {
+        if (s) { s.textContent = 'Failed to save: ' + (e && e.message || e); s.className = 'status-msg error'; }
+        // Roll the radio back on failure so the UI matches server state.
+        if (radioEl) radioEl.checked = false;
+    }
+}
+
 async function loadVoiceCatalog() {
     var tbody = $('voices-tbody');
     if (!tbody) return;
@@ -1874,7 +1966,7 @@ async function loadTunes() {
     initPronsHelpToggle();
     var r = await api('/admin-tts-config.php?action=tunes&tts_key=' + TTS_KEY);
     STATE.tunes = r.rows || [];
-    populateTunesTestVoiceSelect();
+    await loadPronsTestSelects();
     // Restore previously-chosen page size + page index + filter from
     // session-state before the first render, so reloads land you back
     // where you were.
@@ -1898,44 +1990,83 @@ async function loadTunes() {
     renderTunes();
 }
 
-// Fill the "test voice" dropdown that sits in the last column header.
-// Options are the Defaults-tab CATEGORIES (main, translation, islam, etc.),
-// not raw voice codes — picking a category here makes ▶ audition the rule
-// using the voice + rate + pitch + volume + style configured on the
-// Defaults tab for that category. Re-run on every Pronunciations-tab
-// open so edits made on Defaults show up immediately.
-function populateTunesTestVoiceSelect() {
-    var sel = $('tunes-test-voice');
-    if (!sel) return;
-    var prev = sel.value;
-    sel.innerHTML = '';
+// Pronunciations toolbar — provider+voice dropdowns. The voice picked
+// here drives the ▶ audition button on each row directly (we no longer
+// route through Defaults-tab categories so the user can preview against
+// any voice in the catalog). Voices are filtered to the chosen
+// provider; both selections persist across page reloads.
+var PRONS_VOICES_CACHE = null;  // { providers:[…], voices:[…] }
 
-    // Map category code → friendly label from ttsCategories() (e.g.
-    // "Main narration (body text)" rather than the bare "main" code).
-    var labelByCat = {};
-    (CATALOG.categories || []).forEach(function (c) { labelByCat[c.code] = c.label; });
-
-    // Preserve the order ttsCategories() returns from the server so the
-    // dropdown reads in the same order admins see on the Defaults tab.
-    var catOrder = (CATALOG.categories || []).map(function (c) { return c.code; });
-    Object.keys(STATE.categories || {}).forEach(function (c) {
-        if (catOrder.indexOf(c) === -1) catOrder.push(c);
-    });
-
-    catOrder.forEach(function (catCode) {
-        var row = (STATE.categories || {})[catCode];
-        if (!row || !row.tts_voice_code) return;
-        var o = document.createElement('option');
-        o.value = catCode;
-        o.textContent = labelByCat[catCode] || catCode;
-        sel.appendChild(o);
-    });
-
-    if (prev && Array.prototype.some.call(sel.options, function (o) { return o.value === prev; })) {
-        sel.value = prev;
-    } else if (sel.options.length) {
-        sel.selectedIndex = 0;
+async function loadPronsTestSelects() {
+    var provSel  = $('tunes-test-provider');
+    var voiceSel = $('tunes-test-voice');
+    if (!provSel || !voiceSel) return;
+    if (!PRONS_VOICES_CACHE) {
+        try {
+            var provRes  = await api('/admin-tts-config.php?action=list_providers');
+            var voiceRes = await api('/admin-tts-voices.php?action=list');
+            PRONS_VOICES_CACHE = {
+                providers: (provRes.providers || []),
+                voices:    (voiceRes.voices    || []).filter(function (v) { return v.tts_voice_active_flag; }),
+            };
+        } catch (e) {
+            // Leave dropdowns empty; the user can reopen the tab to retry.
+            return;
+        }
     }
+    // Build provider dropdown.
+    var savedProv  = (window.sessionState && sessionState.load) ? sessionState.load('pronsProvider', '') : '';
+    provSel.innerHTML = '';
+    PRONS_VOICES_CACHE.providers.forEach(function (p) {
+        var o = document.createElement('option');
+        o.value = String(p.provider_key);
+        o.textContent = p.provider_label || ('#' + p.provider_key);
+        provSel.appendChild(o);
+    });
+    if (savedProv && Array.prototype.some.call(provSel.options, function (o) { return o.value === savedProv; })) {
+        provSel.value = savedProv;
+    } else if (provSel.options.length) {
+        provSel.selectedIndex = 0;
+    }
+    populateTunesTestVoiceSelect();
+}
+
+function populateTunesTestVoiceSelect() {
+    var provSel  = $('tunes-test-provider');
+    var voiceSel = $('tunes-test-voice');
+    if (!provSel || !voiceSel || !PRONS_VOICES_CACHE) return;
+    var savedVoice = (window.sessionState && sessionState.load) ? sessionState.load('pronsVoice', '') : '';
+    var providerKey = parseInt(provSel.value, 10) || 0;
+    var voices = PRONS_VOICES_CACHE.voices.filter(function (v) { return v.provider_key === providerKey; });
+    var prev = voiceSel.value || savedVoice;
+    voiceSel.innerHTML = '';
+    voices.forEach(function (v) {
+        var o = document.createElement('option');
+        o.value = v.tts_voice_code;
+        // Short, scannable label: "HilaNeural (he-IL)" or just the label
+        // when no locale info is available.
+        var label = v.tts_voice_label || v.tts_voice_code;
+        var loc   = v.tts_voice_locale || v.tts_voice_language || '';
+        o.textContent = label + (loc ? ' (' + loc + ')' : '');
+        voiceSel.appendChild(o);
+    });
+    if (prev && Array.prototype.some.call(voiceSel.options, function (o) { return o.value === prev; })) {
+        voiceSel.value = prev;
+    } else if (voiceSel.options.length) {
+        voiceSel.selectedIndex = 0;
+    }
+}
+
+function onTunesTestProviderChange() {
+    var v = $('tunes-test-provider').value;
+    if (window.sessionState && sessionState.save) sessionState.save('pronsProvider', v);
+    populateTunesTestVoiceSelect();
+    // Save the freshly-defaulted voice too so reloads land on it.
+    if (window.sessionState && sessionState.save) sessionState.save('pronsVoice', $('tunes-test-voice').value);
+}
+
+function onTunesTestVoiceChange() {
+    if (window.sessionState && sessionState.save) sessionState.save('pronsVoice', $('tunes-test-voice').value);
 }
 
 var TUNES_SORT      = { col: 'print', dir: 'asc' };
@@ -2022,9 +2153,8 @@ function renderTunes() {
         if (TUNES_SORT.col === 'provider') {
             return ((providerLabelByKey[a.provider_key] || '').localeCompare(providerLabelByKey[b.provider_key] || '', undefined, { sensitivity: 'base' })) * dir;
         }
-        if (TUNES_SORT.col === 'sort') {
-            return ((parseInt(a.tts_tune_sort,10)||0) - (parseInt(b.tts_tune_sort,10)||0)) * dir;
-        }
+        // (Sort column removed — its header click handler is gone, so this
+        // branch is unreachable; left out to avoid a dead-code warning.)
         return (a.tts_tune_print || '').localeCompare(b.tts_tune_print || '', undefined, { sensitivity: 'base' }) * dir;
     });
     // Pagination over the filtered + sorted list.
@@ -2431,9 +2561,11 @@ function buildTuneRow(t) {
     // so users can flip between SUB and IPA without an extra step).
     tr.classList.add('tune-mode-' + savedType);
     var voiceCode = (t.tts_tune_voice_code || '');
-    // Render 0 / NULL as blank — sort=0 is the default "no priority"
-    // and showing it would clutter the column with zeros.
-    var sortVal   = (parseInt(t.tts_tune_sort, 10) > 0) ? t.tts_tune_sort : '';
+    // Sort column has been removed from the visible UI, but the value
+    // is still stashed on the TR's dataset so saveTuneRow can echo it
+    // back unchanged on save (otherwise the API would clobber existing
+    // priorities to 0). See tr.dataset.sort read site below.
+    tr.dataset.sort = (parseInt(t.tts_tune_sort, 10) > 0) ? t.tts_tune_sort : '';
     tr.innerHTML =
         '<td style="padding:4px 2px;text-align:center;"><input type="checkbox" class="f-active"' + (t.tts_tune_active_flag !== false ? ' checked' : '') + '></td>' +
         '<td><div style="display:flex;align-items:center;gap:4px;">'
@@ -2473,13 +2605,16 @@ function buildTuneRow(t) {
                 '<option value=""></option>' +
             '</select>' +
         '</td>' +
-        // Sort column — manual priority. Higher wins on tie. Rendered as
-        // plain text input (no number spinner) since the field is sparse
-        // by default and the up/down chrome implies a wider value range
-        // than it ever uses.
-        '<td style="padding:4px 2px;">' +
-            '<input type="text" inputmode="numeric" class="f-sort" value="' + escapeHtml(String(sortVal)) + '" placeholder="" style="width:100%;padding:3px 4px;border:1px solid #ccc;border-radius:3px;font-size:0.78rem;text-align:right;">' +
+        // Seeds — pair of number steppers (min, max). Synth picks a fresh
+        // random int in [min..max] for every occurrence; deterministic
+        // when min == max. Header "Seeds" spans these two cells.
+        '<td style="padding:4px 1px 4px 2px;text-align:center;">' +
+            '<input type="number" class="f-seed-min" step="1" min="0" max="2147483647" value="' + (parseInt(t.tts_tune_seed_min, 10) || 0) + '" title="Seed lower bound (inclusive). Equal min and max = deterministic identical audio." style="width:100%;padding:3px 4px;border:1px solid #ccc;border-radius:3px;font-size:0.78rem;text-align:right;">' +
         '</td>' +
+        '<td style="padding:4px 2px 4px 1px;text-align:center;">' +
+            '<input type="number" class="f-seed-max" step="1" min="0" max="2147483647" value="' + (Number.isInteger(parseInt(t.tts_tune_seed_max, 10)) ? parseInt(t.tts_tune_seed_max, 10) : 999) + '" title="Seed upper bound (inclusive). Random int picked in [min..max] each occurrence; ▶ preview always uses this value." style="width:100%;padding:3px 4px;border:1px solid #ccc;border-radius:3px;font-size:0.78rem;text-align:right;">' +
+        '</td>' +
+        // Sort column removed — value preserved on tr.dataset.sort.
         '<td style="text-align:center;padding:4px 2px;width:30px;">'
             + '<input type="hidden" class="f-note" value="' + escapeHtml(t.tts_tune_note || '') + '">'
             + '<button type="button" class="t-note-btn' + ((t.tts_tune_note || '').trim() ? ' has-note' : '') + '" data-act="note" title="' + escapeHtml((t.tts_tune_note || '').trim() || 'Add a note') + '">'
@@ -2543,6 +2678,16 @@ function buildTuneRow(t) {
     // Save when the per-tune voice or provider dropdown changes.
     tr.querySelectorAll('.f-voice, .f-provider').forEach(function (el) {
         el.addEventListener('change', function () { saveTuneRow(tr); });
+    });
+    // Seeds (min / max): save on change AND on debounced input so both
+    // arrow-step clicks and typing flush. Clamp max>=min on the way out
+    // to keep stored state consistent regardless of the UI's typing
+    // intermediate state.
+    tr.querySelectorAll('.f-seed-min, .f-seed-max').forEach(function (el) {
+        el.addEventListener('change', function () { saveTuneRow(tr); });
+        el.addEventListener('input',  function () {
+            scheduleAutoSave(el, function () { return saveTuneRow(tr); }, 600);
+        });
     });
     // B / I toggle buttons — flip their .on class and save the row.
     tr.querySelectorAll('.f-bi-btn').forEach(function(btn) {
@@ -2624,12 +2769,19 @@ async function saveTuneRow(tr) {
     var mBold   = tr.querySelector('.f-bi-btn.f-bold').classList.contains('on');
     var mItalic = tr.querySelector('.f-bi-btn.f-italic').classList.contains('on');
     var mCase   = tr.querySelector('.f-bi-btn.f-case').classList.contains('on');
-    var voiceEl = tr.querySelector('.f-voice');
-    var provEl  = tr.querySelector('.f-provider');
-    var sortEl  = tr.querySelector('.f-sort');
-    var voiceCode   = voiceEl ? voiceEl.value : '';
-    var providerKey = provEl  ? (parseInt(provEl.value, 10) || 0) : 0;
-    var sortVal     = sortEl  ? sortEl.value  : '';
+    var voiceEl    = tr.querySelector('.f-voice');
+    var provEl     = tr.querySelector('.f-provider');
+    var seedMinEl  = tr.querySelector('.f-seed-min');
+    var seedMaxEl  = tr.querySelector('.f-seed-max');
+    var voiceCode  = voiceEl ? voiceEl.value : '';
+    var providerKey = provEl ? (parseInt(provEl.value, 10) || 0) : 0;
+    var seedMinVal = seedMinEl ? (parseInt(seedMinEl.value, 10) || 0) : 0;
+    var seedMaxVal = seedMaxEl ? (parseInt(seedMaxEl.value, 10) || 0) : 999;
+    if (seedMaxVal < seedMinVal) seedMaxVal = seedMinVal;  // mirror the server-side clamp
+    // Sort column is no longer visible; the value is stashed on the TR's
+    // dataset at row-render time so we can round-trip existing priorities
+    // unchanged on save (sort = 0 default would otherwise clobber them).
+    var sortVal     = tr.dataset.sort || '';
     if (!print) return;
     var s = $('tunes-status');
     console.log('[tts] saveTuneRow', { key: key, print: print, type: type, sub: sub, ipa: ipa, sapi: sapi, voice: voiceCode, provider: providerKey, sort: sortVal });
@@ -2645,6 +2797,7 @@ async function saveTuneRow(tr) {
                 phonetic_type: type, note: note, active: active,
                 match_bold: mBold, match_italic: mItalic, match_case_sensitive: mCase,
                 voice_code: voiceCode || '', provider_key: providerKey,
+                seed_min: seedMinVal, seed_max: seedMaxVal,
                 sort: sortVal === '' ? '' : (parseInt(sortVal, 10) || 0)
             }),
         });
@@ -2730,18 +2883,23 @@ async function handleTuneAction(tr, act) {
             } else if (s2 && s2.textContent.indexOf('⚠') === 0) {
                 s2.textContent = '';
             }
-            // The dropdown lists Defaults-tab categories — option.value is
-            // the category code (e.g. "main", "translation"). Pull the
-            // voice + rate + pitch + volume + style from that category's
-            // STATE.categories row so the audition matches how the book
-            // would actually be narrated in that role.
-            var voiceSel  = $('tunes-test-voice');
-            var pickedCat = voiceSel ? voiceSel.value : '';
-            var catRow    = pickedCat && STATE.categories ? STATE.categories[pickedCat] : null;
+            // The Voice dropdown now lists actual voices (filtered by the
+            // Provider dropdown), so ▶ auditions the rule with that
+            // specific voice. Prosody defaults to neutral (rate 0, pitch
+            // 0, volume 100) — per-preview sliders can be added later if
+            // a per-row override turns out to be useful.
             // tune_override makes the server use a single synthetic rule
             // for THIS print word — ignoring active flag, B/I match
             // restrictions, and all other tunes. So ▶ always plays what's
             // typed in SUB or IPA, regardless of how the row is configured.
+            // Carry the row's seed_max into tune_override. Book builds pick
+            // a random int in [seed_min..seed_max] per occurrence, but the
+            // ▶ audition pins to seed_max so what the user hears stays
+            // reproducible across repeated clicks.
+            var seedMaxInpEl = tr.querySelector('.f-seed-max');
+            var rowSeed = seedMaxInpEl ? (parseInt(seedMaxInpEl.value, 10) || 0) : 0;
+            var voiceSel  = $('tunes-test-voice');
+            var voiceCode = voiceSel ? voiceSel.value : '';
             var body = {
                 tts_key: TTS_KEY,
                 text: print,
@@ -2750,16 +2908,14 @@ async function handleTuneAction(tr, act) {
                     sub:   subVal,
                     ipa:   ipaVal,
                     type:  selType,
+                    seed:  rowSeed,
                 }
             };
-            if (catRow) {
-                body.category     = pickedCat;
-                body.voice_code   = catRow.tts_voice_code;
-                body.style        = catRow.tts_voice_style || null;
-                body.style_degree = catRow.tts_voice_style_degree || 1.0;
-                body.rate_pct     = (catRow.tts_voice_rate_pct | 0);
-                body.pitch_st     = parseFloat(catRow.tts_voice_pitch_st) || 0;
-                body.volume       = catRow.tts_voice_volume | 0 || 100;
+            if (voiceCode) {
+                body.voice_code = voiceCode;
+                body.rate_pct   = 0;
+                body.pitch_st   = 0;
+                body.volume     = 100;
             }
             var blob = await api('/admin-tts-preview.php', {
                 method:'POST', headers:{'Content-Type':'application/json'},

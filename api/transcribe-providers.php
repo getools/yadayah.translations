@@ -432,7 +432,7 @@ function providerNativeModel(string $code): string {
  *           'gpu-whisper-large-v3-word' → word-level rows (sub-second)
  *   $err is set on failure; the return value is [] on hard error.
  */
-function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offsetSecs = 0, ?string &$err = null, string $model = 'gpu-whisper-large-v3'): array {
+function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offsetSecs = 0, ?string &$err = null, string $model = 'gpu-whisper-large-v3', ?PDO $db = null, int $jobKey = 0): array {
     require_once __DIR__ . '/gpu-client.php';
     $wantWord = ($model === 'gpu-whisper-large-v3-word');
     $r = gpuTranscribe($audioPath, [
@@ -450,7 +450,19 @@ function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offse
             $fallbackModel = $wantWord ? 'whisper-1-word' : 'whisper-1-segment';
             error_log("gpu whisper failed (" . ($r['error'] ?? 'unknown') . ") — falling back to OpenAI $fallbackModel");
             $fbErr = '';
-            $rows = whisperApiTranscribe($audioPath, $apiKey, $prompt, $offsetSecs, $fbErr, $fallbackModel);
+            // OpenAI's audio endpoint rejects files > 25 MB with HTTP 413.
+            // When the audio exceeds 24 MB use the chunked variant — same
+            // ffmpeg-segment-then-stitch path the primary OpenAI provider
+            // uses. Item 1752108 hit this: GPU timed out at 30 min, then
+            // the unchunked fallback failed with "413: Maximum content
+            // size limit (26214400) exceeded" on a 26 MB file.
+            $audioSize = is_file($audioPath) ? filesize($audioPath) : 0;
+            $needsChunked = $audioSize > 24 * 1024 * 1024;
+            if ($needsChunked && $db !== null && $jobKey > 0 && function_exists('whisperApiTranscribeChunked')) {
+                $rows = whisperApiTranscribeChunked($db, $jobKey, $audioPath, $apiKey, $prompt, $fbErr, $fallbackModel);
+            } else {
+                $rows = whisperApiTranscribe($audioPath, $apiKey, $prompt, $offsetSecs, $fbErr, $fallbackModel);
+            }
             if ($rows) return $rows;
             $err = 'gpu failed (' . ($r['error'] ?? 'unknown') . '); OpenAI fallback also failed' . ($fbErr ? ": $fbErr" : '');
             return [];

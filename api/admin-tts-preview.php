@@ -84,6 +84,15 @@ if (!empty($data['tune_override']) && is_array($data['tune_override'])) {
         'tts_tune_active_flag'   => true,
         'tts_tune_match_bold'    => false,
         'tts_tune_match_italic'  => false,
+        // Seed for stochastic local engines. Pronunciations ▶ sends the
+        // row's seed_max so the audition is reproducible (book builds
+        // pick a fresh random int in [seed_min..seed_max] each time —
+        // see applyTunesPlain in admin-tts-helpers.php — but the
+        // pronunciation preview pins to the high end so what you hear
+        // is consistent across clicks). We collapse the synthetic
+        // override row's range so min == max == seed.
+        'tts_tune_seed_min'      => isset($to['seed']) && $to['seed'] !== '' ? (int)$to['seed'] : 0,
+        'tts_tune_seed_max'      => isset($to['seed']) && $to['seed'] !== '' ? (int)$to['seed'] : 0,
     ]];
 }
 
@@ -143,6 +152,10 @@ try {
         // routing is a build-worker concern).
         $localSeg     = buildLocalSegment($text, $cfg, $resolvedCat);
         $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
+        // Seed comes from the matched tune now (see buildLocalSegment) —
+        // the tune_override synthetic rule carries the row's tts_tune_seed,
+        // so the preview produces the exact same audio the book build will
+        // when this tune fires. No hardcoded override here.
         if (function_exists('localTtsSynthesizeRetry')) {
             $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
         } else {

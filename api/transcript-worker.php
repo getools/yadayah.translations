@@ -27,11 +27,18 @@ $db = getDb();
 // workers grinding through a long pending queue without ever exceeding the
 // concurrency cap that admin-transcript-models.php enforces. Bounded so a
 // 90-item bulk-generate doesn't crater Postgres's connection pool again.
-register_shutdown_function(function () {
+register_shutdown_function(function () use ($jobKey) {
     try {
-        $MAX_CONCURRENT_WORKERS = 4;
+        $MAX_CONCURRENT_WORKERS = 1;
         $db = getDb();  // fresh connection — the worker's own may be in a bad state at shutdown
-        $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
+        // Exclude self from the in-flight count. If the worker exits via a
+        // fatal error before flipping its own status to completed/failed,
+        // its row still reads 'running' and would deadlock the cap=1 queue.
+        $stmt = $db->prepare("SELECT COUNT(*) FROM yy_feed_item_transcript_job
+                               WHERE job_status = 'running'
+                                 AND feed_item_transcript_job_key != ?");
+        $stmt->execute([(int)$jobKey]);
+        $running = (int)$stmt->fetchColumn();
         if ($running >= $MAX_CONCURRENT_WORKERS) return;
         $nextKey = $db->query("SELECT feed_item_transcript_job_key
                                   FROM yy_feed_item_transcript_job
@@ -639,7 +646,11 @@ if (!$rows && !$wantYoutubeCaptions) {
                         // Self-hosted faster-whisper on the Puget box via tailnet
                         // gateway. The helper handles its own OpenAI fallback if
                         // the box is unreachable (and OPENAI_API_KEY is set).
-                        $rows = gpuWhisperTranscribe($audioPath, $glossaryPrompt, 0, $whisperErr, $jobModel);
+                        // Pass $db and $jobKey so the helper's OpenAI fallback
+                        // can chunk via whisperApiTranscribeChunked when the
+                        // audio exceeds the 25 MB OpenAI upload limit. Without
+                        // these the unchunked fallback hits HTTP 413.
+                        $rows = gpuWhisperTranscribe($audioPath, $glossaryPrompt, 0, $whisperErr, $jobModel, $db, $jobKey);
                         break;
                     default:
                         $whisperErr = "unknown provider family: $providerFamily";

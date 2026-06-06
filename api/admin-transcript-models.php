@@ -190,6 +190,94 @@ if ($method === 'GET' && $action === 'job') {
     jsonResponse($row);
 }
 
+if ($method === 'GET' && $action === 'health') {
+    // Queue overview — counts + the currently-active worker info. The
+    // Generate-Transcripts popover polls this so it can show what's
+    // actually happening (live PID/item/progress) and detect the stuck
+    // state (running=0, pending>0) so the auto-poke can wake the queue.
+    $counts = [];
+    foreach ($db->query("SELECT job_status, COUNT(*) AS n FROM yy_feed_item_transcript_job GROUP BY job_status")->fetchAll() as $r) {
+        $counts[$r['job_status']] = (int)$r['n'];
+    }
+    $live = $db->query("
+        SELECT j.feed_item_transcript_job_key AS job_key, j.feed_item_key, j.job_model,
+               j.job_progress, j.job_message, j.job_worker_pid AS pid, j.job_dtime,
+               EXTRACT(EPOCH FROM (now() - j.job_dtime))::int AS elapsed_secs,
+               COALESCE(fi.feed_item_title_override, fi.feed_item_title_import) AS item_title
+          FROM yy_feed_item_transcript_job j
+          LEFT JOIN yy_feed_item fi USING (feed_item_key)
+         WHERE j.job_status = 'running'
+         ORDER BY j.job_dtime
+         LIMIT 5
+    ")->fetchAll();
+    jsonResponse([
+        'counts'  => $counts,
+        'pending' => $counts['pending']  ?? 0,
+        'running' => $counts['running']  ?? 0,
+        'failed'  => $counts['failed']   ?? 0,
+        'stuck'   => ($counts['pending'] ?? 0) > 0 && ($counts['running'] ?? 0) === 0,
+        'live'    => $live,
+    ]);
+}
+
+if ($method === 'POST' && $action === 'poke') {
+    // Wake a stalled queue: if no worker is currently running, spawn one on
+    // the oldest pending job. Idempotent — calling it while a worker is
+    // already alive is a no-op. Used by the popover's auto-recovery and
+    // by an operator clicking "Wake queue" when they see it's stuck.
+    $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
+    if ($running > 0) {
+        jsonResponse(['ok' => true, 'spawned' => false, 'reason' => 'worker already running', 'running' => $running]);
+    }
+    $nextKey = (int)$db->query("SELECT feed_item_transcript_job_key
+                                 FROM yy_feed_item_transcript_job
+                                WHERE job_status = 'pending'
+                                ORDER BY feed_item_transcript_job_key
+                                LIMIT 1")->fetchColumn();
+    if (!$nextKey) {
+        jsonResponse(['ok' => true, 'spawned' => false, 'reason' => 'no pending jobs']);
+    }
+    $workerScript = __DIR__ . '/transcript-worker.php';
+    if (!file_exists($workerScript)) {
+        errorResponse('transcript-worker.php missing from ' . __DIR__);
+    }
+    $logFile = sys_get_temp_dir() . '/transcript_' . $nextKey . '.log';
+    $pid = spawnCappedWorker($workerScript, [(string)$nextKey], $logFile, [
+        'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
+    ]);
+    if ($pid > 0) {
+        $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
+           ->execute([$pid, $nextKey]);
+    }
+    jsonResponse(['ok' => true, 'spawned' => $pid > 0, 'job_key' => $nextKey, 'pid' => $pid]);
+}
+
+if ($method === 'POST' && $action === 'retry') {
+    // Re-queue a failed job by flipping its status back to 'pending' and
+    // clearing the error. Accepts either {job_key:N} or {job_keys:[...]}.
+    // Does NOT spawn a worker — the caller can hit `poke` immediately
+    // after to start processing, or wait for the next worker exit.
+    $keys = [];
+    if (isset($data['job_keys']) && is_array($data['job_keys'])) {
+        foreach ($data['job_keys'] as $k) { $k = (int)$k; if ($k > 0) $keys[] = $k; }
+    } elseif (isset($data['job_key'])) {
+        $k = (int)$data['job_key']; if ($k > 0) $keys[] = $k;
+    }
+    if (!$keys) errorResponse('job_key or job_keys[] required');
+    $placeholders = implode(',', array_fill(0, count($keys), '?'));
+    $stmt = $db->prepare("
+        UPDATE yy_feed_item_transcript_job
+           SET job_status = 'pending', job_progress = 0,
+               job_error = NULL, job_completed_dtime = NULL,
+               job_worker_pid = NULL,
+               job_message = 'Re-queued by retry'
+         WHERE feed_item_transcript_job_key IN ($placeholders)
+           AND job_status IN ('failed', 'cancelled')
+    ");
+    $stmt->execute($keys);
+    jsonResponse(['ok' => true, 'requeued' => $stmt->rowCount(), 'requested' => count($keys)]);
+}
+
 if ($method === 'POST' && $action === 'cancel') {
     // Worker checks job_status each chunk and bails on 'cancelled'.
     $jobKey  = (int)($data['job_key']  ?? 0);
@@ -244,14 +332,13 @@ if ($method === 'POST' && $action === 'run') {
     $jobKey = (int)$insStmt->fetchColumn();
 
     // ── Concurrency cap ──────────────────────────────────────────────
-    // Bulk-generate (90+ items × 2 models in one click) used to spawn
-    // 150-180 workers in the same minute. Each worker pins ≥1 Postgres
-    // connection for its lifetime; with max_connections=100 the pool
-    // craters and every subsequent worker / request fails. Cap concurrent
-    // workers globally and leave the rest as 'pending' — they'll be
-    // picked up by workers as slots free up (see transcript-worker.php
-    // post-exit dequeue).
-    $MAX_CONCURRENT_WORKERS = 4;
+    // Strict single-worker policy: never run two transcript workers at the
+    // same time. Each worker can pin several Postgres connections + a heavy
+    // CPU footprint; serializing them keeps the pool predictable and the
+    // queue ordering deterministic. New jobs over the cap stay 'pending';
+    // when the current worker exits its register_shutdown_function dequeues
+    // the next one (see transcript-worker.php).
+    $MAX_CONCURRENT_WORKERS = 1;
     $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
     if ($running < $MAX_CONCURRENT_WORKERS) {
         $workerScript = __DIR__ . '/transcript-worker.php';

@@ -323,6 +323,33 @@ function rebuildVolumeMp3Zip(PDO $db, int $volumeKey): bool {
     return $ok;
 }
 
+/**
+ * Convert user-typed inline pause markers in the Phonetic / source text to
+ * the same placeholder token shape that applyPauses uses. The shared format
+ * lets placeholdersToBreaks (Azure) and the local-engine drop in
+ * buildLocalSegment treat both kinds of pauses identically downstream.
+ *
+ * Supported syntax (any of):
+ *   [500]    [500ms]    [1s]    [1.5s]    [2s]
+ * Whole-number ms, 'ms' suffix optional, or seconds with 's' suffix.
+ * 0 / negative / >5000 ms get clamped to the safe range (0..5000).
+ * The token's "rule id" portion uses 0 so it doesn't collide with any
+ * real yy_tts_pause row id (sequence starts at 1).
+ */
+function applyInlinePauses(string $text): string {
+    return preg_replace_callback(
+        '/\[(\d+(?:\.\d+)?)(ms|s)?\]/i',
+        function ($m) {
+            $n = (float)$m[1];
+            $unit = strtolower($m[2] ?? '');
+            $ms = ($unit === 's') ? (int)round($n * 1000) : (int)round($n);
+            $ms = max(0, min(5000, $ms));
+            return sprintf("\x01PAUSE_%d_%d\x01", 0, $ms);
+        },
+        $text
+    );
+}
+
 function placeholdersToBreaks(string $escaped): string {
     // ms > 0 → <break time="Nms"/>  (add the requested pause)
     // ms = 0 → emit NOTHING. We tried <break strength="none"/> here, but
@@ -573,6 +600,12 @@ function tunePrintToRegex(string $print, bool $caseSensitive = false): string {
  * so the historical rules keep working unchanged.
  */
 function buildSubReplSsml(string $print, string $alias): string {
+    // Hyphens in a SUB are syllable separators for human readability
+    // (e.g. "yah-Hoe-wah") — Azure interprets them as compound-word
+    // boundaries with a brief pause. Strip them out so the syllables
+    // run together, leaving a space behind for clean phonemization.
+    $alias = str_replace('-', ' ', $alias);
+    $alias = trim((string)preg_replace('/\s+/u', ' ', $alias));
     $printEsc = htmlspecialchars($print, ENT_QUOTES | ENT_XML1);
     if (!preg_match('/[A-Z]{2,}|[\[\]{}]/', $alias)) {
         $aliasEsc = htmlspecialchars($alias, ENT_QUOTES | ENT_XML1);
@@ -686,6 +719,10 @@ function buildVoiceBlock(string $text, array $cfg, string $category, ?string $ov
     // unchanged.
     $segProviderKey = ttsResolveProviderKey($cfg, $category);
     $text = applyTunes($text, ttsTunesForProvider($cfg, $segProviderKey), $tokenMap);
+    // Inline pause markers (e.g. "[500]" / "[1s]") get converted to the same
+    // placeholder format as global yy_tts_pause rules so placeholdersToBreaks
+    // turns both into <break time="..."/> SSML tags.
+    $text = applyInlinePauses($text);
     $placeholder = '';
     $text = applyPauses($text, $cfg['pauses'], $placeholder);
     $escaped = htmlspecialchars($text, ENT_QUOTES | ENT_XML1, 'UTF-8');
@@ -790,7 +827,7 @@ function azureVoiceCatalog(?PDO $db = null, bool $includeInactive = false): arra
     if ($db === null) { try { $db = getDb(); } catch (Throwable $e) { $db = null; } }
     if ($db) {
         try {
-            $sql = "SELECT tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_styles, tts_voice_secondary_locales, tts_voice_active_flag
+            $sql = "SELECT tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_styles, tts_voice_secondary_locales, tts_voice_active_flag, provider_key
                       FROM yy_tts_voice";
             if (!$includeInactive) $sql .= " WHERE tts_voice_active_flag = TRUE";
             // Sort by language first, then region — keeps en-* together
@@ -819,6 +856,10 @@ function azureVoiceCatalog(?PDO $db = null, bool $includeInactive = false): arra
                         'styles'       => $styles,
                         'multilingual' => $isMulti,
                         'active'       => !empty($r['tts_voice_active_flag']),
+                        // Provider this voice belongs to (FK → yy_provider).
+                        // The Pronunciations tab's Voice dropdown filters on
+                        // this so only voices in the picked engine show up.
+                        'provider_key' => (int)($r['provider_key'] ?? 0),
                     ];
                 }
                 return $out;
@@ -1143,7 +1184,9 @@ function ttsTuneRuleId(array $t): string {
  * [slow] / {fast} markers. IPA/SAPI rows fall back to their sub spelling.
  * (True IPA passthrough for phoneme engines like Kokoro is a future refinement.)
  */
-function applyTunesPlain(string $text, array $tunes): string {
+function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null): string {
+    $count = 0;
+    $matchedSeed = null;   // first matched tune's seed wins (FIFO across the prioritised list)
     foreach ($tunes as $t) {
         $print = (string)($t['tts_tune_print'] ?? '');
         if ($print === '') continue;
@@ -1153,10 +1196,31 @@ function applyTunesPlain(string $text, array $tunes): string {
         // Skip tunes with no 'sub' so the English defaults handle them.
         if ($alias === '') continue;
         $alias = str_replace(['[', ']', '{', '}'], '', $alias);
+        // Hyphens in a SUB are syllable separators for human readability
+        // (e.g. "yah-Hoe-wah") — they shouldn't make the engine pause as
+        // they would in a compound word. Swap for a space so the engine
+        // still sees a token boundary (clean phonemization) but the
+        // hyphen-pause behaviour is gone.
+        $alias = str_replace('-', ' ', $alias);
         $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
+        $hits = 0;
         $text = preg_replace_callback($regex, function ($m) use ($alias) {
             return !empty($m[2]) ? $alias . 's' : $alias;   // possessive 's
-        }, $text);
+        }, $text, -1, $hits);
+        if ($hits > 0) {
+            $count += $hits;
+            // First matched tune's seed wins. Each tune carries a
+            // [seed_min, seed_max] range; we pick a fresh random int in
+            // that range on every synth, so the same word can ring in
+            // multiple variants across a long book. Deterministic case
+            // (min == max) collapses to a single fixed seed.
+            if ($matchedSeed === null) {
+                $sMin = isset($t['tts_tune_seed_min']) ? (int)$t['tts_tune_seed_min'] : 0;
+                $sMax = isset($t['tts_tune_seed_max']) ? (int)$t['tts_tune_seed_max'] : $sMin;
+                if ($sMax < $sMin) $sMax = $sMin;
+                $matchedSeed = ($sMin === $sMax) ? $sMin : random_int($sMin, $sMax);
+            }
+        }
     }
     return $text;
 }
@@ -1172,8 +1236,30 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
-    $text = applyTunesPlain($text, ttsTunesForProvider($cfg, $providerKey));
-    $text = preg_replace('/\x01PAUSE_\d+_(\d+)\x01/', ' ', $text);   // drop pause placeholders
+    $tuneHits = 0;
+    $matchedTuneSeed = null;
+    $text = applyTunesPlain($text, ttsTunesForProvider($cfg, $providerKey), $tuneHits, $matchedTuneSeed);
+    // Inline pause markers ([500] / [1s] / etc.) get the same placeholder
+    // treatment as Azure's path, then we convert them to natural punctuation
+    // that local engines (Chatterbox/CosyVoice/Kokoro/Qwen3) actually pause
+    // on — they don't speak SSML break tags.
+    $text = applyInlinePauses($text);
+    // Convert pause placeholders (both inline and yy_tts_pause-defined) into
+    // natural punctuation proportional to the requested ms. Roughly:
+    //   < 100ms → just a space (no perceived pause)
+    //   100-300ms → comma
+    //   300-700ms → period
+    //   700-1500ms → ellipsis
+    //   > 1500ms → multiple ellipses
+    $text = preg_replace_callback('/\x01PAUSE_\d+_(\d+)\x01/', function ($m) {
+        $ms = (int)$m[1];
+        if ($ms < 100)  return ' ';
+        if ($ms < 300)  return ', ';
+        if ($ms < 700)  return '. ';
+        if ($ms < 1500) return '… ';
+        $n = (int)ceil($ms / 700);
+        return str_repeat('… ', $n);
+    }, $text);
     $text = preg_replace('/[\x{02BF}\x{02BE}]/u', '', $text);        // drop half-rings ʿ ʾ
     // Strip <b>/<i>/<em>/<strong> markup. admin-tts-preview.php preserves these
     // so Azure SSML can route segments; local engines speak them as literal
@@ -1189,6 +1275,15 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     $style = trim((string)($cat['tts_voice_style'] ?? ''));
     // 'general' is the UI sentinel for "no style"; treat like empty.
     if ($style === 'general') $style = '';
+    // Determinism for tune-substituted segments. Hebrew / proper-noun
+    // respellings are extremely sensitive to Chatterbox's stochastic
+    // sampling — the same input produces wildly different output across
+    // runs. Each tune row carries its own seed (yy_tts_tune.tts_tune_seed,
+    // default 0) so an admin can dial in the seed that sounds best for
+    // that particular word. The matched tune's seed is captured by
+    // applyTunesPlain and passed through to the engine here. Normal
+    // English text (no tune match) gets seed=null → stochastic.
+    $seedHint = $tuneHits > 0 ? (int)$matchedTuneSeed : null;
     return [
         'provider_key' => $providerKey,
         'voice'        => $voiceCode,
@@ -1198,6 +1293,7 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
         'pitch'        => (float)($cat['tts_voice_pitch_st'] ?? 0),
         'volume'       => (int)($cat['tts_voice_volume']     ?? 100),
         'style'        => $style,
+        'seed'         => $seedHint,
     ];
 }
 
@@ -1232,6 +1328,13 @@ function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?strin
         'format'   => $fmt,
     ];
     if (!empty($seg['style'])) $payload['style'] = (string)$seg['style'];
+    // Optional deterministic-seed flag — caller sets this when reproducibility
+    // matters (e.g. Pronunciations preview, where the same SUB text should
+    // produce the same audio so admins can A/B their edits). Chatterbox is
+    // the engine that actually honours it today; others ignore.
+    if (array_key_exists('seed', $seg) && $seg['seed'] !== null) {
+        $payload['seed'] = (int)$seg['seed'];
+    }
     $r = gpuSynthesize($payload, null, 300);
     if (!$r['ok']) {
         $err = 'local TTS ' . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)));

@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780638092">
+    <meta name="page-version" content="1780690225">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
-    <link rel="stylesheet" href="css/app.css?v=12">
+    <link rel="stylesheet" href="css/app.css?v=13">
     <link rel="stylesheet" href="css/login.css">
     <style>
         /* Override the 1100px cap from app.css — feeds tables benefit from full screen width. */
@@ -3216,7 +3216,8 @@ function _genTxLoadRunningJobs() {
             var results = document.getElementById('gen-tx-results');
             if (!results) return;
             results.style.display = 'block';
-            results.innerHTML = '<div id="gen-tx-summary" style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #ddd;color:#555;"></div>'
+            results.innerHTML = '<div id="gen-tx-summary" style="margin-bottom:6px;color:#555;"></div>'
+                              + '<div id="gen-tx-health" style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #ddd;font-size:0.78rem;"></div>'
                               + '<div style="font-size:0.75rem;color:#888;margin-bottom:6px;">Currently running across the site (' + jobs.length + ')</div>'
                               + '<div id="gen-tx-lines"></div>';
             var lines = document.getElementById('gen-tx-lines');
@@ -3321,11 +3322,110 @@ function _genTxUpdateSummary() {
     });
     var done = complete + failed + skipped;
     var pending = queued + running;
-    footer.innerHTML = '<strong>' + (pending ? 'In progress' : 'Done') + '</strong> · '
-                    + 'Complete: ' + complete + ' · '
-                    + (pending ? 'Running: ' + running + ' · Queued: ' + queued + ' · ' : '')
-                    + 'Failed: ' + failed + ' · Skipped: ' + skipped
-                    + ' (' + done + '/' + _genTxJobs.length + ')';
+    var html = '<strong>' + (pending ? 'In progress' : 'Done') + '</strong> · '
+             + 'Complete: ' + complete + ' · '
+             + (pending ? 'Running: ' + running + ' · Queued: ' + queued + ' · ' : '')
+             + 'Failed: ' + failed + ' · Skipped: ' + skipped
+             + ' (' + done + '/' + _genTxJobs.length + ')';
+    // When any tracked jobs are in a re-runnable terminal state, expose a
+    // single button that re-queues them all at once (server flips them back
+    // to 'pending' and the poker spawns a worker).
+    if (failed > 0) {
+        html += ' <button type="button" onclick="_genTxRetryFailed()" '
+              + 'style="margin-left:8px;padding:3px 10px;background:#fff;border:1px solid #c00;color:#c00;border-radius:4px;cursor:pointer;font-size:0.78rem;">'
+              + '↻ Retry ' + failed + ' failed</button>';
+    }
+    footer.innerHTML = html;
+}
+
+// Tracks consecutive "stuck" polls so we don't poke on a transient blip.
+var _genTxStuckTicks = 0;
+
+// Refresh the live-worker line and watchdog the queue. Called from the
+// poll tick. The `?action=health` endpoint returns the active worker and
+// a `stuck` flag (pending > 0 AND running === 0); two consecutive stuck
+// polls auto-trigger `?action=poke` to spawn a worker on the oldest
+// pending job. Safe even when the modal is closed — the inner getElement
+// returns null and the renderer no-ops.
+function _genTxRefreshHealth() {
+    fetch(API + '/admin-transcript-models.php?action=health', { credentials: 'include' })
+        .then(function(r) { return safeJson(r); })
+        .then(function(d) {
+            if (!d) return;
+            var el = document.getElementById('gen-tx-health');
+            if (el) {
+                var html = '';
+                if (d.live && d.live.length) {
+                    d.live.forEach(function(w) {
+                        var el_secs = Math.max(0, parseInt(w.elapsed_secs || 0, 10));
+                        var mm = Math.floor(el_secs / 60), ss = el_secs % 60;
+                        var pct = (w.job_progress == null ? '?' : w.job_progress);
+                        html += '<div style="color:#1d6b3a;">▶ PID ' + (w.pid || '?')
+                              + ' · item ' + w.feed_item_key + ' (' + esc(w.job_model) + ') · '
+                              + pct + '% · ' + mm + 'm ' + ss + 's · '
+                              + esc(w.job_message || '') + '</div>';
+                    });
+                } else if ((d.pending || 0) > 0) {
+                    html += '<div style="color:#c00;">⚠ Queue stalled — 0 workers running, ' + d.pending + ' pending.'
+                          + ' <button type="button" onclick="_genTxManualPoke()" '
+                          + 'style="margin-left:8px;padding:2px 8px;background:#fff;border:1px solid #c00;color:#c00;border-radius:4px;cursor:pointer;font-size:0.75rem;">'
+                          + 'Wake queue</button></div>';
+                } else {
+                    html += '<div style="color:#888;">Queue idle.</div>';
+                }
+                el.innerHTML = html;
+            }
+            if (d.stuck) {
+                _genTxStuckTicks++;
+                if (_genTxStuckTicks >= 2) {
+                    _genTxStuckTicks = 0;
+                    fetch(API + '/admin-transcript-models.php?action=poke',
+                          { method:'POST', credentials:'include' });
+                }
+            } else {
+                _genTxStuckTicks = 0;
+            }
+        })
+        .catch(function(){ /* silent — transient fetch errors are fine */ });
+}
+
+function _genTxManualPoke() {
+    fetch(API + '/admin-transcript-models.php?action=poke',
+          { method:'POST', credentials:'include' })
+        .then(function(r) { return safeJson(r); })
+        .then(function() { _genTxRefreshHealth(); });
+}
+
+function _genTxRetryFailed() {
+    var keys = _genTxJobs
+        .filter(function(j) { return j.state === 'failed' || j.state === 'dispatchFailed' || j.state === 'cancelled'; })
+        .map(function(j) { return j.jobKey; })
+        .filter(function(k) { return !!k; });
+    if (!keys.length) return;
+    fetch(API + '/admin-transcript-models.php?action=retry', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_keys: keys })
+    })
+    .then(function(r) { return safeJson(r); })
+    .then(function(d) {
+        if (!d || !d.ok) { alert('Retry failed: ' + ((d && d.error) || 'unknown')); return; }
+        // Flip tracked jobs back to 'queued' so the existing poller picks
+        // them up; restart the poller if it had stopped.
+        _genTxJobs.forEach(function(j) {
+            if (j.state === 'failed' || j.state === 'dispatchFailed' || j.state === 'cancelled') {
+                j.state = 'queued';
+                if (j.lineEl) j.lineEl.innerHTML = _genTxLineHtml('queued', j, { message: 'Re-queued' });
+            }
+        });
+        _genTxUpdateSummary();
+        if (!_genTxPollTimer) _genTxPollTimer = setInterval(_genTxPollTick, 2000);
+        // Wake the queue immediately so the operator sees progress.
+        fetch(API + '/admin-transcript-models.php?action=poke',
+              { method:'POST', credentials:'include' });
+        _genTxRefreshHealth();
+    })
+    .catch(function(e) { alert('Retry failed: ' + e.message); });
 }
 
 function _genTxStopPolling() {
@@ -3333,6 +3433,11 @@ function _genTxStopPolling() {
 }
 
 function _genTxPollTick() {
+    // Refresh the live-worker + stuck-queue header every tick — independent
+    // of whether THIS modal's tracked jobs are still in flight. Keeps the
+    // header accurate even after polling stops or when the user re-opens
+    // the modal while other admins' jobs are running.
+    _genTxRefreshHealth();
     // Pick the still-in-flight jobs (queued or running) and re-fetch
     // their status. Terminal states freeze the line text.
     var inFlight = _genTxJobs.filter(function(j) { return j.state === 'queued' || j.state === 'running'; });
@@ -3379,7 +3484,9 @@ function runGenerateTranscripts() {
     var results = document.getElementById('gen-tx-results');
     var goBtn   = document.getElementById('gen-tx-go-btn');
     results.style.display = 'block';
-    results.innerHTML = '<div id="gen-tx-summary" style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #ddd;color:#555;"></div><div id="gen-tx-lines"></div>';
+    results.innerHTML = '<div id="gen-tx-summary" style="margin-bottom:6px;color:#555;"></div>'
+                      + '<div id="gen-tx-health" style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #ddd;font-size:0.78rem;"></div>'
+                      + '<div id="gen-tx-lines"></div>';
     goBtn.disabled = true;
     goBtn.style.opacity = '0.55';
     goBtn.style.cursor = 'wait';

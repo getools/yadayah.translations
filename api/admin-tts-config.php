@@ -145,6 +145,22 @@ if ($method === 'GET' && $action === 'category_voices') {
     jsonResponse(['rows' => $stmt->fetchAll()]);
 }
 
+// Providers list — TTS-scoped (only providers that have voices in the
+// catalog). Must live above the POST-only gate below. See the matching
+// save_provider POST handler near the bottom.
+if ($method === 'GET' && $action === 'list_providers') {
+    $rows = $db->query("
+        SELECT p.provider_key, p.provider_label, p.provider_main,
+               p.provider_phonetic_type, p.provider_active_flag,
+               (SELECT COUNT(*) FROM yy_tts_voice v
+                 WHERE v.provider_key = p.provider_key) AS voice_count
+          FROM yy_provider p
+         WHERE p.provider_key IN (SELECT DISTINCT provider_key FROM yy_tts_voice)
+         ORDER BY p.provider_sort, p.provider_label
+    ")->fetchAll();
+    jsonResponse(['providers' => $rows]);
+}
+
 if ($method !== 'POST') errorResponse('Unknown action');
 
 if ($action === 'save_system') {
@@ -223,7 +239,21 @@ if ($action === 'save_tune') {
     // ttsTunesForProvider in admin-tts-helpers.php.
     $providerKey = isset($data['provider_key']) ? (int)$data['provider_key'] : 0;
     $sort      = isset($data['sort']) && $data['sort'] !== '' ? (int)$data['sort'] : 0;
+    // Seed range. Synth picks a random int in [min..max] for each
+    // occurrence; deterministic when min == max. Pronunciation preview
+    // uses seed_max so auditions are reproducible. Defaults: min=0, max=999.
+    $seedMin = isset($data['seed_min']) && $data['seed_min'] !== '' ? (int)$data['seed_min'] : 0;
+    $seedMax = isset($data['seed_max']) && $data['seed_max'] !== '' ? (int)$data['seed_max'] : 999;
+    if ($seedMin < 0) $seedMin = 0;
+    if ($seedMax < $seedMin) $seedMax = $seedMin;  // never let max fall below min
     if (!$ttsKey || $print === '') errorResponse('tts_key, print required');
+
+    // book_count belongs to the Text (Print), not to the individual row —
+    // any other row sharing the same (tts_key, print) already has the right
+    // count from the parsed-book scanner, so inherit it for new inserts.
+    $peerCountStmt = $db->prepare("SELECT MAX(tts_tune_book_count) FROM yy_tts_tune WHERE tts_key = ? AND tts_tune_print = ?");
+    $peerCountStmt->execute([$ttsKey, $print]);
+    $peerBookCount = (int)($peerCountStmt->fetchColumn() ?: 0);
     // Legacy tts_tune_phonetic mirror — kept in sync with whichever type
     // is currently chosen so older code paths keep working. If the chosen
     // column is empty, fall back to whichever of the three is populated.
@@ -260,10 +290,11 @@ if ($action === 'save_tune') {
                    tts_tune_phonetic_type = ?, tts_tune_note = ?, tts_tune_active_flag = ?,
                    tts_tune_match_bold = ?, tts_tune_match_italic = ?, tts_tune_match_case_sensitive = ?,
                    tts_tune_sort = ?, provider_key = ?,
+                   tts_tune_seed_min = ?, tts_tune_seed_max = ?,
                    tts_tune_revision_dtime = NOW()
              WHERE tts_tune_key = ? AND tts_key = ?
         ");
-        $upd->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $sort, $providerKey, $tuneKey, $ttsKey]);
+        $upd->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $sort, $providerKey, $seedMin, $seedMax, $tuneKey, $ttsKey]);
 
         $ins = $db->prepare("
             INSERT INTO yy_tts_tune
@@ -271,11 +302,29 @@ if ($action === 'save_tune') {
                  tts_tune_phonetic_sub, tts_tune_phonetic_ipa, tts_tune_phonetic_sapi,
                  tts_tune_phonetic_type, tts_tune_note, tts_tune_active_flag,
                  tts_tune_match_bold, tts_tune_match_italic, tts_tune_match_case_sensitive,
-                 tts_tune_voice_code, tts_tune_sort, provider_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, ?)
+                 tts_tune_voice_code, tts_tune_sort, provider_key,
+                 tts_tune_seed_min, tts_tune_seed_max,
+                 tts_tune_book_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (tts_key, tts_tune_print, (COALESCE(tts_tune_voice_code, ''))) DO UPDATE SET
+                tts_tune_phonetic             = EXCLUDED.tts_tune_phonetic,
+                tts_tune_phonetic_sub         = EXCLUDED.tts_tune_phonetic_sub,
+                tts_tune_phonetic_ipa         = EXCLUDED.tts_tune_phonetic_ipa,
+                tts_tune_phonetic_sapi        = EXCLUDED.tts_tune_phonetic_sapi,
+                tts_tune_phonetic_type        = EXCLUDED.tts_tune_phonetic_type,
+                tts_tune_note                 = EXCLUDED.tts_tune_note,
+                tts_tune_active_flag          = TRUE,
+                tts_tune_match_bold           = EXCLUDED.tts_tune_match_bold,
+                tts_tune_match_italic         = EXCLUDED.tts_tune_match_italic,
+                tts_tune_match_case_sensitive = EXCLUDED.tts_tune_match_case_sensitive,
+                tts_tune_sort                 = EXCLUDED.tts_tune_sort,
+                provider_key                  = EXCLUDED.provider_key,
+                tts_tune_seed_min             = EXCLUDED.tts_tune_seed_min,
+                tts_tune_seed_max             = EXCLUDED.tts_tune_seed_max,
+                tts_tune_revision_dtime       = NOW()
             RETURNING tts_tune_key
         ");
-        $ins->execute([$ttsKey, $print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey]);
+        $ins->execute([$ttsKey, $print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey, $seedMin, $seedMax, $peerBookCount]);
         $tuneKey = (int)$ins->fetchColumn();
         $cloned  = true;
     } elseif ($tuneKey > 0) {
@@ -286,12 +335,13 @@ if ($action === 'save_tune') {
                    tts_tune_phonetic_type = ?, tts_tune_note = ?, tts_tune_active_flag = ?,
                    tts_tune_match_bold = ?, tts_tune_match_italic = ?, tts_tune_match_case_sensitive = ?,
                    tts_tune_voice_code = ?, tts_tune_sort = ?, provider_key = ?,
+                   tts_tune_seed_min = ?, tts_tune_seed_max = ?,
                    tts_tune_revision_dtime = NOW()
              WHERE tts_tune_key = ? AND tts_key = ?
         ");
         // Cast PHP booleans to int (0/1) because PDO's PostgreSQL driver
         // serialises bool false as "" which Postgres rejects.
-        $stmt->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey, $tuneKey, $ttsKey]);
+        $stmt->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey, $seedMin, $seedMax, $tuneKey, $ttsKey]);
     } else {
         // Brand-new row. Use ON CONFLICT on the (tts_key, Print, voice_code)
         // tuple — that matches the new unique index that allows multiple
@@ -302,8 +352,10 @@ if ($action === 'save_tune') {
                  tts_tune_phonetic_sub, tts_tune_phonetic_ipa, tts_tune_phonetic_sapi,
                  tts_tune_phonetic_type, tts_tune_note, tts_tune_active_flag,
                  tts_tune_match_bold, tts_tune_match_italic, tts_tune_match_case_sensitive,
-                 tts_tune_voice_code, tts_tune_sort, provider_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tts_tune_voice_code, tts_tune_sort, provider_key,
+                 tts_tune_seed_min, tts_tune_seed_max,
+                 tts_tune_book_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (tts_key, tts_tune_print, (COALESCE(tts_tune_voice_code, ''))) DO UPDATE SET
                 tts_tune_phonetic              = EXCLUDED.tts_tune_phonetic,
                 tts_tune_phonetic_sub          = EXCLUDED.tts_tune_phonetic_sub,
@@ -317,10 +369,12 @@ if ($action === 'save_tune') {
                 tts_tune_match_case_sensitive  = EXCLUDED.tts_tune_match_case_sensitive,
                 tts_tune_sort                  = EXCLUDED.tts_tune_sort,
                 provider_key                   = EXCLUDED.provider_key,
+                tts_tune_seed_min              = EXCLUDED.tts_tune_seed_min,
+                tts_tune_seed_max              = EXCLUDED.tts_tune_seed_max,
                 tts_tune_revision_dtime = NOW()
             RETURNING tts_tune_key
         ");
-        $stmt->execute([$ttsKey, $print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey]);
+        $stmt->execute([$ttsKey, $print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey, $seedMin, $seedMax, $peerBookCount]);
         $tuneKey = (int)$stmt->fetchColumn();
     }
 
@@ -402,6 +456,41 @@ if ($action === 'delete_pause') {
     if (!$pauseKey) errorResponse('tts_pause_key required');
     $db->prepare("DELETE FROM yy_tts_pause WHERE tts_pause_key = ?")->execute([$pauseKey]);
     jsonResponse(['ok' => true]);
+}
+
+// ── save_provider (POST) ─────────────────────────────────────────────
+// Editable per-provider properties. Whitelist-driven so we don't expose
+// every yy_provider column to the client; new fields are added by
+// extending $allowed. The matching list_providers GET handler lives
+// above the POST-only gate near the top of this file.
+if ($action === 'save_provider') {
+    $providerKey = (int)($data['provider_key'] ?? 0);
+    if (!$providerKey) errorResponse('provider_key required');
+    // Whitelist of editable fields. New fields can be added here
+    // without changing the calling JS, which sends only the fields it
+    // wants to update.
+    $allowed = [
+        'provider_phonetic_type' => function ($v) {
+            $v = strtolower(trim((string)$v));
+            return in_array($v, ['sub', 'ipa'], true) ? $v : null;
+        },
+    ];
+    $sets = [];
+    $params = [];
+    foreach ($allowed as $col => $sanitize) {
+        if (!array_key_exists($col, $data)) continue;
+        $clean = $sanitize($data[$col]);
+        if ($clean === null) errorResponse('invalid value for ' . $col);
+        $sets[] = "$col = ?";
+        $params[] = $clean;
+    }
+    if (!$sets) errorResponse('no editable fields supplied');
+    $sets[] = "provider_revision_dtime = NOW()";
+    $sets[] = "provider_revision_num = COALESCE(provider_revision_num, 0) + 1";
+    $params[] = $providerKey;
+    $sql = "UPDATE yy_provider SET " . implode(', ', $sets) . " WHERE provider_key = ?";
+    $db->prepare($sql)->execute($params);
+    jsonResponse(['ok' => true, 'provider_key' => $providerKey]);
 }
 
 errorResponse('Unknown action: ' . $action);
