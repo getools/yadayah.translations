@@ -11,6 +11,10 @@ if ($scrollKey === null) {
 }
 
 $pdo = getDb();
-$stmt = $pdo->prepare('SELECT yah_chapter_key, yah_scroll_key, yah_chapter_number FROM yah_chapter WHERE yah_scroll_key = ? AND yah_chapter_count > 0 ORDER BY yah_chapter_sort, yah_chapter_number');
+// Filter is "has at least one translation" (not yah_chapter_count > 0).
+// yah_chapter_count = 0 on canonical chapters that nonetheless have
+// translations parsed from YY books (Galatians 3-6, Acts 9/13/15/etc., Psalms
+// 149) — hundreds of rows would be hidden by the count filter alone.
+$stmt = $pdo->prepare('SELECT yah_chapter_key, yah_scroll_key, yah_chapter_number FROM yah_chapter WHERE yah_scroll_key = ? AND EXISTS (SELECT 1 FROM yy_translation t WHERE t.yah_chapter_key = yah_chapter.yah_chapter_key) ORDER BY yah_chapter_sort, yah_chapter_number');
 $stmt->execute([$scrollKey]);
 jsonResponse($stmt->fetchAll());

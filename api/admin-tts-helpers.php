@@ -51,13 +51,21 @@ function loadTtsConfig(PDO $db, int $ttsKey): array {
     //      (the user said "specific voice model version should be implemented").
     //   3. Longer Print first (so "Yahowah's" beats "Yahowah" on the
     //      possessive form even when both are unsorted).
+    //   4. Newer key wins on full tie — tunePrintToRegex normalises every
+    //      apostrophe-class char (ʾ ʿ ʼ ' etc.) into one class, so two
+    //      rows like "Yisraʾel"→"Yisrael" (new) and "Yisraʿel"→"yihsr-Ahehl"
+    //      (old IPA fragment) BOTH match source "Yisraʾel". Without the
+    //      key tiebreaker the older row wins on physical order and Chatterbox
+    //      reads "yihsr Ahehl". Newest-wins matches user expectation when
+    //      they refine a respelling.
     $tuneStmt = $db->prepare("
         SELECT *
           FROM yy_tts_tune
          WHERE tts_key = ? AND tts_tune_active_flag = TRUE
          ORDER BY COALESCE(tts_tune_sort, 0) DESC,
                   (tts_tune_voice_code IS NOT NULL) DESC,
-                  length(tts_tune_print) DESC
+                  length(tts_tune_print) DESC,
+                  tts_tune_key DESC
     ");
     $tuneStmt->execute([$ttsKey]);
     $tunes = $tuneStmt->fetchAll();
@@ -1187,6 +1195,22 @@ function ttsTuneRuleId(array $t): string {
 function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null): string {
     $count = 0;
     $matchedSeed = null;   // first matched tune's seed wins (FIFO across the prioritised list)
+    // Token round-trip prevents tune-N cascading onto tune-M's substitution.
+    // tunePrintToRegex normalises every apostrophe-class char into one class,
+    // so "Yisraʿel"→"yihsr-Ahehl" and "Yisraʾel"→"Yisrael" BOTH match source
+    // "Yisraʾel" — and BOTH match each other's plain-letter output. Replace
+    // each hit with \x02PT<n>\x02 (letterless), then strtr() the tokens back
+    // to their aliases at the end. The SSML path applyTunes() does the same.
+    $tokenMap = [];
+    $tokenIdx = 0;
+    // Fast pre-filter. tunePrintToRegex + preg_replace_callback on 3,000+
+    // tunes took ~11 seconds per paragraph; the vast majority of tunes'
+    // Print word doesn't appear in the text at all. A cheap stripos check
+    // on the Print's apostrophe-stripped lowercase core (Print minus the
+    // apostrophe-class chars that tunePrintToRegex makes optional) skips
+    // ~95% of tunes before we touch their regex.
+    $textLower = mb_strtolower($text, 'UTF-8');
+    static $APOS_RE_FAST = '/[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]/u';
     foreach ($tunes as $t) {
         $print = (string)($t['tts_tune_print'] ?? '');
         if ($print === '') continue;
@@ -1195,17 +1219,28 @@ function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matc
         // codepoints (ɑ ʁ ʕ) the engine's text→phoneme stage can't map.
         // Skip tunes with no 'sub' so the English defaults handle them.
         if ($alias === '') continue;
+        // Fast pre-filter: strip apostrophe-class chars from Print and
+        // check if the resulting core appears in the lowercased text.
+        // If not, no chance of a match — skip the expensive regex.
+        $core = preg_replace($APOS_RE_FAST, '', $print);
+        if ($core === '' || mb_stripos($textLower, $core, 0, 'UTF-8') === false) continue;
         $alias = str_replace(['[', ']', '{', '}'], '', $alias);
         // Hyphens in a SUB are syllable separators for human readability
-        // (e.g. "yah-Hoe-wah") — they shouldn't make the engine pause as
-        // they would in a compound word. Swap for a space so the engine
-        // still sees a token boundary (clean phonemization) but the
-        // hyphen-pause behaviour is gone.
-        $alias = str_replace('-', ' ', $alias);
+        // ("yah-Hoe-wah"). Local engines like Chatterbox would treat a
+        // whitespace token boundary as a word break with a small audible
+        // pause between syllables — a 3-syllable respelling renders as
+        // three mini-pauses, which sounds wrong. Strip the hyphen entirely
+        // so the syllables fuse into a single token ("yahHoewah") that
+        // the engine pronounces continuously. Case preservation gives the
+        // engine a soft hint that "Hoe" is the stressed syllable, which
+        // Chatterbox's text-token model picks up on.
+        $alias = str_replace('-', '', $alias);
         $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
         $hits = 0;
-        $text = preg_replace_callback($regex, function ($m) use ($alias) {
-            return !empty($m[2]) ? $alias . 's' : $alias;   // possessive 's
+        $text = preg_replace_callback($regex, function ($m) use ($alias, &$tokenMap, &$tokenIdx) {
+            $tok = "\x02PT" . ($tokenIdx++) . "\x02";
+            $tokenMap[$tok] = !empty($m[2]) ? $alias . 's' : $alias;   // possessive 's
+            return $tok;
         }, $text, -1, $hits);
         if ($hits > 0) {
             $count += $hits;
@@ -1222,6 +1257,7 @@ function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matc
             }
         }
     }
+    if (!empty($tokenMap)) $text = strtr($text, $tokenMap);
     return $text;
 }
 
@@ -1248,19 +1284,26 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     // natural punctuation proportional to the requested ms. Roughly:
     //   < 100ms → just a space (no perceived pause)
     //   100-300ms → comma
-    //   300-700ms → period
-    //   700-1500ms → ellipsis
-    //   > 1500ms → multiple ellipses
+    //   300-1500ms → period
+    //   > 1500ms → multiple periods (one per ~700ms)
+    // We deliberately avoid '…' (U+2026): Chatterbox doesn't recognise it
+    // and verbalises each ellipsis as the literal letter "Oh", producing
+    // a "Oh Oh Oh Oh" stream at the start of every chapter heading. ASCII
+    // periods are universally interpreted as natural pauses by every
+    // local engine we use.
     $text = preg_replace_callback('/\x01PAUSE_\d+_(\d+)\x01/', function ($m) {
         $ms = (int)$m[1];
         if ($ms < 100)  return ' ';
         if ($ms < 300)  return ', ';
-        if ($ms < 700)  return '. ';
-        if ($ms < 1500) return '… ';
+        if ($ms < 1500) return '. ';
         $n = (int)ceil($ms / 700);
-        return str_repeat('… ', $n);
+        return str_repeat('. ', $n);
     }, $text);
     $text = preg_replace('/[\x{02BF}\x{02BE}]/u', '', $text);        // drop half-rings ʿ ʾ
+    // YY uses '~' as the Hebrew-word / English-meaning separator in chapter
+    // titles ("Pesach ~ Passover"). Chatterbox can't say it; drop it so the
+    // title reads naturally as two phrases.
+    $text = str_replace('~', ' ', $text);
     // Strip <b>/<i>/<em>/<strong> markup. admin-tts-preview.php preserves these
     // so Azure SSML can route segments; local engines speak them as literal
     // letters ("B", "I") otherwise. Stripped here so every local-engine code
@@ -1362,7 +1405,8 @@ function azureTtsSynthesizeRetry(string $ssml, array $cfg, ?string &$err = null,
         if (!$shouldRetry) return '';
         $attempt++;
         if ($attempt >= $maxAttempts) break;
-        fwrite(STDERR, "azure retry $attempt after {$delay}s — $err\n");
+        if (defined('STDERR')) fwrite(STDERR, "azure retry $attempt after {$delay}s — $err\n");
+        else error_log("azure retry $attempt after {$delay}s — $err");
         sleep($delay);
         $delay = min($delay * 2, 30);
     }
@@ -1380,9 +1424,133 @@ function localTtsSynthesizeRetry(array $cfg, array $seg, string $outputFormat, ?
         if (!$retry) return '';
         $attempt++;
         if ($attempt >= $maxAttempts) break;
-        fwrite(STDERR, "local-tts retry $attempt after {$delay}s — $err\n");
+        if (defined('STDERR')) fwrite(STDERR, "local-tts retry $attempt after {$delay}s — $err\n");
+        else error_log("local-tts retry $attempt after {$delay}s — $err");
         sleep($delay);
         $delay = min($delay * 2, 15);
     }
     return '';
+}
+
+/**
+ * Sentence-chunked local-engine synth. Splits the segment's text at
+ * sentence boundaries, synthesises each sentence on its own, and
+ * concatenates the MP3 (or opus) bytes.
+ *
+ * Why: Chatterbox / CosyVoice / Qwen3's T3-style autoregressive samplers
+ * have no KV cache, so per-iteration time grows quadratically with the
+ * generated sequence length. A YY paragraph of 6-8 sentences at 500
+ * max_new_tokens takes ~40 min as one synth call; the same text split
+ * into 6-8 short sentence-level calls finishes in ~20-30 s total because
+ * each call's sequence stays in the cheap (~0.07 s/iter) regime.
+ *
+ * MP3 frames concatenate cleanly without re-encoding, so the byte
+ * concat is lossless. Opus the same. WAV would corrupt (per-file RIFF
+ * headers) — we fall back to single-call for wav/pcm.
+ */
+function localTtsSynthesizeChunked(array $cfg, array $seg, string $outputFormat, ?string &$err = null): string {
+    $isMp3OrOpus = (strpos($outputFormat, 'mp3')  !== false)
+                || (strpos($outputFormat, 'opus') !== false);
+    if (!$isMp3OrOpus) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
+
+    // Chatterbox-style engines clip the first ~200 ms of audio as the
+    // sampler warms up — fine on a long paragraph (you lose the leading
+    // breath), but a short single-word preview like "MihtsraEem" loses
+    // the first syllable entirely and the listener only hears "sraEem".
+    // For text under ~25 chars, prepend a warmup phrase that takes the
+    // clipping hit instead. The warmup is a single word followed by a
+    // sentence-terminator so the sentence chunker splits it off into its
+    // own chunk; we then drop that chunk's audio from the concat. The
+    // remaining word's first syllable is preserved.
+    $origText = (string)($seg['text'] ?? '');
+    $needsWarmup = (mb_strlen(trim($origText)) <= 25);
+    $warmupChunks = 0;
+    if ($needsWarmup) {
+        // "uh." reliably produces a tiny "uh" + clipping room and gets
+        // split off as its own sentence by splitSentencesForLocalTts.
+        $seg['text'] = 'uh. ' . $origText;
+        $warmupChunks = 1;
+    }
+
+    $sentences = splitSentencesForLocalTts((string)($seg['text'] ?? ''));
+    if (count($sentences) <= 1) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
+
+    $bytes = '';
+    foreach ($sentences as $i => $sent) {
+        $sentSeg = $seg;
+        $sentSeg['text'] = $sent;
+        // Vary the seed per sentence so adjacent sentences don't sound
+        // mechanically identical, while staying reproducible from the
+        // base seed if the caller supplied one (tune-driven previews).
+        if (isset($seg['seed']) && $seg['seed'] !== null) {
+            $sentSeg['seed'] = ((int)$seg['seed'] + $i) % 1000;
+        }
+        $sentErr = '';
+        $b = localTtsSynthesizeRetry($cfg, $sentSeg, $outputFormat, $sentErr);
+        if ($b === '') {
+            $err = "sentence " . ($i + 1) . " of " . count($sentences) . ": $sentErr";
+            return '';
+        }
+        // Drop the warmup chunk's audio (and seek to discard the leading
+        // clipped frames the engine would have produced anyway).
+        if ($i < $warmupChunks) continue;
+        $bytes .= $b;
+    }
+    return $bytes;
+}
+
+/**
+ * Split text at sentence boundaries, guarding common English abbreviations
+ * so "Dr. Smith" / "U.S." / "e.g." don't trigger a split. Sentences
+ * longer than 400 chars get a comma-level backstop split so we don't
+ * accidentally hand Chatterbox an extreme outlier.
+ */
+function splitSentencesForLocalTts(string $text): array {
+    $text = trim($text);
+    if ($text === '') return [];
+    static $ABBREVS = [
+        'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Jr.', 'Sr.', 'St.',
+        'vs.', 'etc.', 'e.g.', 'i.e.', 'cf.',
+        'Prof.', 'No.', 'Co.', 'Inc.', 'Ltd.',
+        'a.m.', 'p.m.', 'U.S.', 'U.K.', 'B.C.', 'A.D.',
+    ];
+    $marks = [];
+    foreach ($ABBREVS as $i => $abbr) {
+        $tok = "\x02AB" . $i . "\x02";
+        $marks[$tok] = $abbr;
+        $text = str_ireplace($abbr, $tok, $text);
+    }
+    // Sentence boundary: . ! ? followed by whitespace, then a non-lowercase
+    // character (the start of the next sentence — uppercase letter, quote,
+    // numeral, etc.). We don't require uppercase outright because YY content
+    // sometimes opens with "—" or a quotation mark.
+    $parts = preg_split('/(?<=[.!?])\s+(?=[^\s\p{Ll}])/u', $text);
+    $out = [];
+    foreach ($parts as $p) {
+        foreach ($marks as $tok => $abbr) $p = str_replace($tok, $abbr, $p);
+        $p = trim($p);
+        if ($p !== '') $out[] = $p;
+    }
+    // Backstop: cap individual chunks at ~400 chars by splitting on commas.
+    // Rare in YY but possible in long quoted passages.
+    $capped = [];
+    foreach ($out as $s) {
+        if (mb_strlen($s) <= 400) { $capped[] = $s; continue; }
+        foreach (preg_split('/(?<=,)\s+/u', $s) as $sp) {
+            $sp = trim($sp);
+            if ($sp !== '') $capped[] = $sp;
+        }
+    }
+    // Drop punctuation-only chunks. The local-engine pause converter (in
+    // buildLocalSegment) emits runs of "." for long pauses; the sentence
+    // splitter then treats each "." as a sentence boundary, producing
+    // tiny "."-only entries here. Synthesising silence costs an engine
+    // round-trip and contributes no audio — drop them. The neighbouring
+    // sentence already carries the trailing period so the natural pause
+    // is preserved.
+    $final = [];
+    foreach ($capped as $s) {
+        if (preg_match('/\p{L}|\d/u', $s)) $final[] = $s;
+    }
+    return $final ?: [$text];
 }

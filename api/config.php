@@ -70,11 +70,23 @@ function requireAuth(): array {
     if (empty($_SESSION['user_key'])) {
         jsonResponse(['error' => 'Authentication required'], 401);
     }
-    return [
+    $user = [
         'user_key' => $_SESSION['user_key'],
         'user_code' => $_SESSION['user_code'] ?? '',
         'user_name' => $_SESSION['user_name'] ?? $_SESSION['user_code'] ?? '',
     ];
+    // Release the session file lock so parallel AJAX requests on the
+    // same admin session run concurrently. Without this, every request
+    // serialises behind the previous one — polling the chapters list,
+    // the lazy paragraph-count fetch, the list_paragraphs expand fetch,
+    // and the per-paragraph audio GETs all wait for each other, which
+    // is what made the page feel like it was "taking forever to load".
+    // None of the admin endpoints write back to $_SESSION after auth,
+    // so closing the lock here is safe.
+    if (function_exists('session_write_close') && session_status() === PHP_SESSION_ACTIVE) {
+        @session_write_close();
+    }
+    return $user;
 }
 
 function setCurrentUser(PDO $db, int $userKey): void {

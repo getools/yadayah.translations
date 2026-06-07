@@ -51,6 +51,7 @@ var tabs = [
     ['admin-users.html', 'Users'],
     ['admin-test.html', 'Tests'],
     ['admin-monitoring.html', 'Monitor'],
+    ['admin-perf.html', 'Reports', 'Performance + future reports (response times, host CPU steal, DB load).'],
     ['admin-search.html', 'Search'],
     ['admin-misc.html', 'Misc']
 ];

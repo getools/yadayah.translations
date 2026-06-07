@@ -220,22 +220,21 @@ if ($mode === 'phrase') {
     }
 
     // Build a UNION of:
-    //   • FTS match on paragraph_tsv (stem-aware, fast)
-    //   • ILIKE substring on normalize_search_text(paragraph_text_plain) —
-    //     catches stemming-asymmetry misses (query "Taruwah" stems to
-    //     'taruwah' but should still substring-match paragraphs containing
-    //     "Taruwa"). idx_paragraph_norm_gist (trigram) keeps it fast.
+    //   • FTS match on paragraph_tsv (stem-aware, fast GIN index)
     //   • Consonant-skeleton ILIKE for Hebrew vowel-transliteration variants
     //     (shemayim ↔ shamayim ↔ shamaym all share skeleton "shmym"); only
     //     when the skeleton is ≥4 chars so we don't blow up on "ten"→"tn".
     //   • One ILIKE per alias target.
+    // NOTE: plain ILIKE on paragraph_text_plain was removed from Tier 1 —
+    // on common terms it triggered a 5000-row bitmap heap scan that took
+    // 10+ seconds even with the trigram index. Stemming-asymmetry misses
+    // (e.g. "Taruwah" → paragraphs containing "Taruwa") fall through to
+    // Tier 2 which does a single ILIKE scan with no TSV overhead.
     $ftsMatchConditions = [
         "p.paragraph_tsv @@ $tsqSql",
-        "normalize_search_text(p.paragraph_text_plain) ILIKE ?",
     ];
     $ftsMatchParams = [
         $tsqParam,
-        '%' . str_replace(['%', '_'], ['\%', '\_'], $q) . '%',
     ];
 
     $qConsonants = consonantSkel($q);
@@ -471,9 +470,12 @@ if ($total > 0) {
                 $simWhere .= ' AND ' . implode(' AND ', $filterConditions);
             }
 
-            $countStmt = $pdo->prepare("SELECT COUNT(*) FROM yy_paragraph p JOIN yy_volume v ON v.volume_key = p.volume_key $simWhere");
-            $countStmt->execute(array_merge($simParams, $filterParams));
-            $total = (int)$countStmt->fetchColumn();
+            // Skip the COUNT for Tier 3 — the multi-word OR ILIKE on the
+            // trigram index hits hundreds of thousands of bitmap entries for
+            // common words and timed out in production (30+ seconds).
+            // Instead fetch $limit+1 rows; if we get $limit+1 back there are
+            // more pages and we signal that via $total = null. The frontend
+            // (site-search.js) already handles null total gracefully.
 
             // Rank by how many query words appear; snippet anchored to first matching word.
             $rankCases = implode(' + ', array_fill(0, count($tier3Words), '(CASE WHEN normalize_search_text(p.paragraph_text_plain) ILIKE ? THEN 1 ELSE 0 END)'));
@@ -510,9 +512,19 @@ if ($total > 0) {
                 [$firstWord],           // snippet anchor word
                 $simParams,             // WHERE conditions
                 $filterParams,
-                [$limit, $offset]
+                [$limit + 1, $offset]   // fetch one extra to detect more pages
             ));
             $results = $stmt->fetchAll();
+
+            // Derive total from the +1 sentinel row.
+            if (count($results) > $limit) {
+                array_pop($results);
+                // Exact count unknown; use minimum lower bound so the
+                // frontend still shows a Next button and correct page count.
+                $total = $offset + $limit + 1;
+            } else {
+                $total = $offset + count($results);
+            }
 
             $highlightWords = array_merge($queryWords, $aliasTargets);
             foreach ($results as &$row) {

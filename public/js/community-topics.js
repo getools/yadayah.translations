@@ -86,7 +86,13 @@ CommunityTopics._initTinyMCE = function(containerId, textareaId) {
             if (meta.filetype === 'image') {
                 input.accept = 'image/jpeg,image/png,image/gif,image/webp';
             } else if (meta.filetype === 'media') {
-                input.accept = 'video/mp4,video/webm,video/quicktime,video/ogg,.mp4,.webm,.mov,.ogg,.avi,.mkv';
+                // TinyMCE's "media" picker covers both video and audio — accept
+                // common audio formats too so posts can include voice notes or
+                // a quick mp3/wav alongside video. TinyMCE picks <video> vs
+                // <audio> based on the returned URL's extension.
+                input.accept = 'video/mp4,video/webm,video/quicktime,video/ogg,'
+                             + 'audio/mpeg,audio/wav,audio/x-wav,audio/wave,audio/mp3,'
+                             + '.mp4,.webm,.mov,.ogg,.avi,.mkv,.mp3,.wav';
             } else {
                 input.accept = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.rtf,.csv,.zip';
             }
@@ -103,8 +109,8 @@ CommunityTopics._initTinyMCE = function(containerId, textareaId) {
                         else alert(data.error || 'Upload failed');
                     }).catch(function() { alert('Upload failed'); });
                 } else if (meta.filetype === 'media') {
-                    fd.append('video', file, file.name);
-                    fetch('/api/community-video-upload.php', {
+                    fd.append('media', file, file.name);
+                    fetch('/api/community-media-upload.php', {
                         method: 'POST', credentials: 'include', body: fd
                     }).then(function(r) { return r.json(); }).then(function(data) {
                         if (data.url) callback(data.url, { source2: '', poster: '' });
@@ -655,12 +661,38 @@ CommunityTopics.loadBookmarks = function() {
 // ── New topic form ──
 CommunityTopics.showNewTopic = function() {
     if (!Community.currentUser) { CommunityAuth.openLoginModal('login'); return; }
+    // If categories haven't arrived yet (community-categories.php currently
+    // ~2s on prod, so an early click lands here with an empty cache), show a
+    // loading state and fetch on demand instead of rendering an empty
+    // <select>. The _catLoadAttempted guard prevents an infinite loop when
+    // the API legitimately returns no categories.
+    if ((!Community.categories || !Community.categories.length) && !CommunityTopics._catLoadAttempted) {
+        CommunityTopics._catLoadAttempted = true;
+        var parent = Community.currentSection === 'comments' ? 'comments' : 'topics';
+        Community.api('/api/community-categories.php?parent=' + encodeURIComponent(parent))
+            .then(function(data) {
+                Community.categories = (data && data.categories) || [];
+                CommunityTopics.showNewTopic();
+            })
+            .catch(function(){ CommunityTopics.showNewTopic(); });
+        Community.showView('view-new');
+        var elLoading = document.getElementById('view-new');
+        if (elLoading) elLoading.innerHTML = '<div class="loading" style="padding:20px;color:#666;">Loading categories…</div>';
+        return;
+    }
     Community.showView('view-new');
     var el = document.getElementById('view-new');
-    var cats = Community.categories;
+    var cats = Community.categories || [];
+    // Default the dropdown to the category the user is filtered into when they
+    // click New Topic (so they don't have to re-pick it). When the filter is
+    // "All", Community.currentCategory is falsy — leave the placeholder
+    // "Select category" selected instead of guessing.
+    var current = Community.currentCategory || '';
     var catOptions = '<option value="">Select category</option>';
     for (var i = 0; i < cats.length; i++) {
-        catOptions += '<option value="' + Community.esc(cats[i].category_slug) + '">' + Community.esc(cats[i].category_name) + '</option>';
+        var slug = cats[i].category_slug;
+        var sel  = (current && slug === current) ? ' selected' : '';
+        catOptions += '<option value="' + Community.esc(slug) + '"' + sel + '>' + Community.esc(cats[i].category_name) + '</option>';
     }
 
     var backHash = Community.currentSection === 'comments' ? '#comments' : '#topics';

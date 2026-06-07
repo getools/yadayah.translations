@@ -61,12 +61,21 @@ if ($action === 'chapters') {
     $volume = $vStmt->fetch();
     if (!$volume) errorResponse('volume not found', 404);
 
+    // paragraph_count is intentionally omitted — fetched separately via
+    // ?action=chapter_paragraph_counts. The COUNT(*) subquery per row was
+    // costing ~200ms of plan time on top of the join, blocking the initial
+    // render. The count is purely a display field; it's fine to lazy-fill.
+    // tts_audio_settings is intentionally EXCLUDED. It snapshots the full
+    // config (categories, all 3000+ tunes, all pauses) for the build, and
+    // ballooned each chapter row to ~250 KB. Multiply by 9 chapters and
+    // every 3-second poll was pulling 2.8 MB of unused JSON. The Books-tab
+    // UI never reads it; the build modal pulls a fresh snapshot from the
+    // /catalog endpoint instead.
     $cStmt = $db->prepare("
         SELECT c.chapter_key, c.chapter_number, c.chapter_label, c.chapter_page,
-               (SELECT COUNT(*) FROM yy_paragraph p WHERE p.chapter_key = c.chapter_key) AS paragraph_count,
                a.tts_audio_status, a.tts_audio_progress, a.tts_audio_message,
                a.tts_audio_path, a.tts_audio_duration_secs, a.tts_audio_size_bytes,
-               a.tts_audio_completed_dtime, a.tts_audio_started_dtime, a.tts_audio_settings,
+               a.tts_audio_completed_dtime, a.tts_audio_started_dtime,
                a.tts_audio_error, a.tts_audio_key, a.tts_audio_failed_paragraphs
           FROM yy_chapter c
           LEFT JOIN yy_tts_audio a
@@ -77,6 +86,31 @@ if ($action === 'chapters') {
     ");
     $cStmt->execute([$ttsKey, $volumeKey]);
     jsonResponse(['volume' => $volume, 'chapters' => $cStmt->fetchAll()]);
+}
+
+// One-shot per-volume paragraph-count rollup. Returns {chapter_key: count}
+// for every chapter in the volume in a single GROUP BY scan. The Books-tab
+// calls this after rendering so counts populate without blocking initial
+// display.
+if ($action === 'chapter_paragraph_counts') {
+    $volumeKey = (int)($_GET['volume_key'] ?? 0);
+    if (!$volumeKey) errorResponse('volume_key required');
+    // Per-chapter correlated subquery uses idx_paragraph_chapter (a B-tree
+    // index-only scan), which is what the original chapters endpoint did
+    // in ~1.7 ms. The earlier shape — `WHERE volume_key = ? GROUP BY
+    // chapter_key` — picked idx_paragraph_vol_page instead, did a bitmap
+    // heap fetch over 800+ blocks, and ran for 9.6 seconds on vol 7;
+    // browsers timed out the fetch and the chapter list never rendered.
+    $stmt = $db->prepare("
+        SELECT c.chapter_key,
+               (SELECT COUNT(*)::int FROM yy_paragraph p WHERE p.chapter_key = c.chapter_key) AS n
+          FROM yy_chapter c
+         WHERE c.volume_key = ?
+    ");
+    $stmt->execute([$volumeKey]);
+    $out = [];
+    foreach ($stmt->fetchAll() as $r) $out[(int)$r['chapter_key']] = (int)$r['n'];
+    jsonResponse(['volume_key' => $volumeKey, 'counts' => $out]);
 }
 
 errorResponse('Unknown action');

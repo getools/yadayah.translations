@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780668003">
+    <meta name="page-version" content="1780783848">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -415,45 +415,95 @@
             var wordList = Object.keys(wordsMap);
             console.log('[TranslationDisplay] Extracted ' + wordList.length + ' unique italic words:', wordList.slice(0, 20));
 
-            // Step 2: Look up words, then render
-            var wordLookup = null;
-            if (wordList.length > 0) {
-                try {
-                    var lookupResp = await fetch('/api/word-lookup.php', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'text/plain' },
-                        body: wordList.join('|')
-                    });
-                    var lookupText = await lookupResp.text();
-                    console.log('[TranslationDisplay] word-lookup raw response (' + lookupText.length + ' chars):', lookupText.substring(0, 200));
-                    wordLookup = JSON.parse(lookupText);
-                    console.log('[TranslationDisplay] word-lookup returned ' + Object.keys(wordLookup).length + ' matches:', Object.keys(wordLookup));
-                } catch (err) {
-                    console.error('[TranslationDisplay] word-lookup failed:', err);
-                }
-            }
+            // Step 2: render translations IMMEDIATELY (no word lookup yet).
+            // word-lookup.php takes 6+s; we used to block on it, leaving the
+            // page empty the whole time. Now we paint the records first and
+            // decorate the italic words once the lookup returns.
+            renderRecords(records, resultsDiv, null);
 
-            renderRecords(records, resultsDiv, wordLookup);
-
-            // After render: attach click handlers directly to each word-link element
-            var wordLinks = resultsDiv.querySelectorAll('.word-link');
-            console.log('[TranslationDisplay] Found ' + wordLinks.length + ' .word-link elements in DOM after render');
             var statusEl = document.getElementById('word-link-status');
-            if (wordLinks.length > 0) {
-                statusEl.textContent = wordLinks.length + ' clickable word links found (click underlined italic words for details)';
-            } else {
+            if (wordList.length === 0) { statusEl.textContent = ''; return; }
+            statusEl.textContent = 'Loading word definitions…';
+
+            // Step 3: fetch word lookup, then decorate.
+            try {
+                var lookupResp = await fetch('/api/word-lookup.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: wordList.join('|')
+                });
+                var lookupText = await lookupResp.text();
+                var wordLookup = JSON.parse(lookupText);
+                console.log('[TranslationDisplay] word-lookup returned ' + Object.keys(wordLookup).length + ' matches');
+                decorateWordLinks(resultsDiv, wordLookup, statusEl);
+            } catch (err) {
+                console.error('[TranslationDisplay] word-lookup failed:', err);
                 statusEl.textContent = '';
             }
-            wordLinks.forEach(function(el) {
-                el.addEventListener('click', function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    var wid = this.getAttribute('data-wid');
-                    var info = wid ? wordInfoStore[wid] : null;
-                    console.log('[TranslationDisplay] word-link clicked, wid=' + wid + ', info=' + (info ? 'found' : 'null'));
-                    if (info) showWordPopup(info, this);
+        }
+
+        // Walks each already-rendered <i> inside .record, tokenizes its text,
+        // and for tokens that match a wordLookup key replaces them with a new
+        // <i class="word-link" data-wid="…"> element. Click handlers go on
+        // these new spans. Idempotent in principle but only called once per
+        // displayResults run.
+        function decorateWordLinks(resultsDiv, wordLookup, statusEl) {
+            if (!wordLookup || typeof wordLookup !== 'object' || Array.isArray(wordLookup)) return;
+            var italics = resultsDiv.querySelectorAll('.record i');
+            var linkCount = 0;
+            italics.forEach(function(oldI) {
+                var text = oldI.textContent || '';
+                if (!text.trim()) return;
+                var tokens = text.split(/(\s+)/);
+                var anyMatch = false;
+                var newNodes = [];
+                tokens.forEach(function(token) {
+                    if (/^\s+$/.test(token) || !token) {
+                        if (token) newNodes.push(document.createTextNode(token));
+                        return;
+                    }
+                    var normalized = normalizeWord(token).toLowerCase();
+                    var w = normalized.replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '');
+                    if (w && wordLookup[w]) {
+                        var wid = 'w' + (++wordInfoCounter);
+                        wordInfoStore[wid] = wordLookup[w];
+                        var span = document.createElement('i');
+                        // preserve original <i>'s attributes
+                        for (var a = 0; a < oldI.attributes.length; a++) {
+                            span.setAttribute(oldI.attributes[a].name, oldI.attributes[a].value);
+                        }
+                        span.classList.add('word-link');
+                        span.setAttribute('data-wid', wid);
+                        span.textContent = token;
+                        span.addEventListener('click', function(e) {
+                            e.preventDefault(); e.stopPropagation();
+                            var info = wordInfoStore[wid];
+                            if (info) showWordPopup(info, this);
+                        });
+                        newNodes.push(span);
+                        linkCount++;
+                        anyMatch = true;
+                    } else {
+                        newNodes.push(document.createTextNode(token));
+                    }
                 });
+                if (!anyMatch) return;
+                // Replace the old <i> with: opening <i> (no matches around
+                // any matched tokens) — actually simpler: replace its content
+                // in-place with the new node list. Keeps the surrounding <i>
+                // wrapper for non-matched tokens, but the matched ones get
+                // their own <i class="word-link"> children. That nests an <i>
+                // inside an <i>; reads identically to user but keeps semantics.
+                var frag = document.createDocumentFragment();
+                newNodes.forEach(function(n) { frag.appendChild(n); });
+                oldI.parentNode.replaceChild(frag, oldI);
             });
+            if (statusEl) {
+                statusEl.textContent = linkCount > 0
+                    ? linkCount + ' clickable word links found (click underlined italic words for details)'
+                    : '';
+            }
+            console.log('[TranslationDisplay] decorateWordLinks: ' + linkCount + ' word links injected');
         }
 
         function renderRecords(records, resultsDiv, wordLookup) {

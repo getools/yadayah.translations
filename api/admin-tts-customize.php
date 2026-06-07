@@ -39,6 +39,7 @@ setCurrentUser($db, (int)$user['user_key']);
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') errorResponse('POST required', 405);
 
+$mode         = trim($_POST['mode']        ?? '');   // '' (default = train) or 'meta' (DB-only update)
 $provider     = trim($_POST['provider']    ?? '');
 $code         = trim($_POST['code']        ?? '');
 $label        = trim($_POST['label']       ?? '');
@@ -50,6 +51,40 @@ $voiceId      = trim($_POST['voice_id']    ?? '');   // built-in-speaker path
 $langCode     = trim($_POST['lang_code']   ?? '');   // Kokoro-specific
 $language     = trim($_POST['language']    ?? 'en');
 $gender       = trim($_POST['gender']      ?? 'unknown');
+
+// ── Metadata-only update path ───────────────────────────────────────
+// Customize tab auto-saves label / gender / description while the user
+// edits an EXISTING custom voice. No audio upload, no GPU call — just
+// UPDATE the yy_tts_voice columns the user touched. The Train button
+// still handles new-voice creation (which needs audio + engine register).
+//
+// Only the fields actually present in $_POST get written, so the client
+// can post a single field per keystroke without clobbering others.
+if ($mode === 'meta') {
+    if ($provider === '' || $code === '') errorResponse('provider and code are required');
+    $vStmt = $db->prepare("
+        SELECT v.tts_voice_key
+          FROM yy_tts_voice v JOIN yy_tts t ON v.tts_key = t.tts_key
+         WHERE t.tts_code = ? AND v.tts_voice_code = ?
+    ");
+    $vStmt->execute([$provider, $code]);
+    $voiceKey = (int)($vStmt->fetchColumn() ?: 0);
+    if (!$voiceKey) errorResponse("voice '$code' not found for provider '$provider'", 404);
+
+    $sets = [];
+    $args = [];
+    if (array_key_exists('label', $_POST))       { $sets[] = 'tts_voice_label = ?';    $args[] = $label !== '' ? $label : $code; }
+    if (array_key_exists('gender', $_POST))      { $sets[] = 'tts_voice_gender = ?';   $args[] = $gender !== '' ? $gender : null; }
+    if (array_key_exists('description', $_POST)) { $sets[] = 'tts_voice_note = ?';     $args[] = $description !== '' ? $description : null; }
+    if (array_key_exists('language', $_POST))    { $sets[] = 'tts_voice_language = ?'; $args[] = $language !== '' ? $language : 'en'; }
+    if (!$sets) errorResponse('no editable field in request');
+
+    $sets[] = 'tts_voice_revision_dtime = NOW()';
+    $args[] = $voiceKey;
+    $sql = 'UPDATE yy_tts_voice SET ' . implode(', ', $sets) . ' WHERE tts_voice_key = ?';
+    $db->prepare($sql)->execute($args);
+    jsonResponse(['ok' => true, 'voice_key' => $voiceKey, 'updated' => count($sets) - 1]);
+}
 
 // Normalize style name.
 $styleName = strtolower($styleName ?: 'default');

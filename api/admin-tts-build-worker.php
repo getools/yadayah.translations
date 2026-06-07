@@ -26,11 +26,17 @@ if (!$audioKey) {
 $db = getDb();
 
 // ── Queue promotion ────────────────────────────────────────────────────
-// Concurrency limit: at most 2 chapter builds may run at a time. When
-// this worker exits (success, failure, or unexpected crash), promote the
-// next pending row that has no worker_pid yet. Registered as a shutdown
-// hook so even fatal errors / out-of-memory exits trigger the promote.
-$MAX_CONCURRENT_BUILDS = 2;
+// Concurrency limit: 1 chapter build at a time. Chatterbox / CosyVoice /
+// Qwen3 all share a single GPU with one loaded model — two concurrent
+// model.generate() calls serialise on the CUDA stream, so the wall-clock
+// gain vs running them sequentially is roughly zero, while Caddy is more
+// likely to time out the second-in-line request waiting for the first.
+// Azure-only builds COULD run concurrently safely, but routing decisions
+// happen per-paragraph inside the worker so we cap globally for simplicity.
+// When this worker exits (success, failure, or unexpected crash), promote
+// the next pending row. Registered as a shutdown hook so even fatal
+// errors / OOM exits trigger the promote.
+$MAX_CONCURRENT_BUILDS = 1;
 register_shutdown_function(function() use (&$db, $MAX_CONCURRENT_BUILDS) {
     try {
         if (!$db) $db = getDb();
@@ -496,26 +502,149 @@ updateAudio($db, $audioKey, [
     'tts_audio_paragraph_count'=> $nPara,
 ]);
 
-// Open output file for streaming concat.
-$fh = fopen($finalPath, 'wb');
-if (!$fh) bail($db, $audioKey, "cannot open $finalPath for write");
+// Per-paragraph parts cache. Each paragraph's MP3 bytes are written to
+// $partsDir/p<NNNNN>.mp3 as soon as Azure returns them. On the next run
+// the worker scans this directory to determine the resume point — any
+// paragraph whose part already exists is skipped (no re-synth, no
+// re-charge). The final concat happens after the loop. Pause / resume
+// / restart all key off this directory:
+//   pause   — DB status flips to 'paused'; worker exits at the next
+//             iteration boundary; parts stay on disk.
+//   resume  — worker re-spawns; pre-loop scan finds parts; loop picks
+//             up from the first missing idx.
+//   restart — endpoint wipes the parts dir before re-spawning, so the
+//             scan finds nothing and the loop runs from idx=0.
+$audioBase = is_dir(dirname(__DIR__) . '/u') ? dirname(__DIR__) : '/opt/yada-www/public';
+$partsDir  = $audioBase . '/u/tts-parts/' . $audioKey;
+// umask 0002 so subsequent file_put_contents writes part files with mode
+// 0664 (group-writable). The worker runs as root via PHP CLI, so without
+// this the parts are written 0644 and the Apache user (www-data) can't
+// delete them via the redo_paragraph endpoint — Redo would silently
+// fail. The directory needs to be www-data-group-writable too.
+umask(0002);
+if (!is_dir($partsDir)) @mkdir($partsDir, 02775, true);
+@chgrp($partsDir, 'www-data');
+$partPath = function (int $i) use ($partsDir): string {
+    return $partsDir . '/' . sprintf('p%05d.mp3', $i);
+};
+
+// Pre-loop resume scan. Re-probe each cached part's duration so the
+// cumulative offsets line up with what the build would have produced
+// in one go, and re-insert each cached paragraph's marker — the
+// DELETE-all just above is the worker's standard "clean slate" step,
+// so on resume we need to repopulate. Idempotent via ON CONFLICT.
+$startIdx        = 0;
+$cumulativeBytes = 0;
+$cumulativeMs    = 0;
+for ($i = 0; $i < $nPara; $i++) {
+    $pp = $partPath($i);
+    if (!is_file($pp) || filesize($pp) === 0) break;
+    $bytes = file_get_contents($pp);
+    if ($bytes === false || $bytes === '') break;
+    $p = $paragraphs[$i];
+    try {
+        $insertMarker->execute([
+            $audioKey,
+            $p['paragraph_key']  !== null ? (int)$p['paragraph_key']  : null,
+            $p['paragraph_page'] !== null ? (int)$p['paragraph_page'] : null,
+            (int)$p['paragraph_number'],
+            $cumulativeMs,
+            $cumulativeBytes,
+        ]);
+    } catch (Exception $e) { /* don't fail resume if marker write fails */ }
+    $cumulativeBytes += strlen($bytes);
+    $cumulativeMs    += probeDurationMs($ffprobeBin, $bytes, $tmpDir);
+    $startIdx = $i + 1;
+}
+if ($startIdx > 0) {
+    fwrite(STDERR, "resuming from paragraph $startIdx (found $startIdx cached parts)\n");
+    updateAudio($db, $audioKey, [
+        'tts_audio_message'  => "Resuming at paragraph $startIdx / $nPara",
+        'tts_audio_progress' => (int)floor($startIdx / max(1, $nPara) * 95) + 2,
+    ]);
+}
 
 $charsBilled = 0;
 $failureCount = 0;
 $failures = [];
 
+// Per-paragraph skip list: admins may delete an individual paragraph's
+// audio via the Books-tab paragraph view. Those paragraph_numbers go into
+// tts_audio_settings.skip_paragraphs and we honour them here.
+$skipParaNums = array_flip(array_map('intval', $settings['skip_paragraphs'] ?? []));
+
 foreach ($paragraphs as $idx => $p) {
-    // Cancellation check.
-    if (($idx % 5) === 0) {
-        $statusCheck = $db->prepare("SELECT tts_audio_status FROM yy_tts_audio WHERE tts_audio_key = ?");
-        $statusCheck->execute([$audioKey]);
-        $cur = $statusCheck->fetchColumn();
-        if ($cur === 'failed') {
-            fclose($fh);
-            @unlink($finalPath);
-            fwrite(STDERR, "cancelled\n");
-            exit(0);
+    // Honour admin's per-paragraph skip list.
+    if (isset($skipParaNums[(int)$p['paragraph_number']])) {
+        @unlink($partPath($idx));
+        continue;
+    }
+    // Per-iteration cache check. If this paragraph's part already exists
+    // (resume scenarios — pause/resume, restart-after-pause, or a single
+    // missing part deleted by the admin's Redo button), reuse the cached
+    // bytes instead of re-synthesising. The pre-loop scan above sets
+    // startIdx and cumulative state for the contiguous-cached prefix; this
+    // check covers the gap-fill case where parts exist NON-contiguously
+    // (e.g. parts 0,2,3,4 cached but 1 was deleted by Redo).
+    $partFile = $partPath($idx);
+    if (is_file($partFile) && filesize($partFile) > 0) {
+        $paraBytes = file_get_contents($partFile);
+        if ($paraBytes !== false && $paraBytes !== '') {
+            $paraStartMs    = $cumulativeMs;
+            $paraStartBytes = $cumulativeBytes;
+            $paraStartPage  = $p['paragraph_page'] !== null ? (int)$p['paragraph_page'] : null;
+            try {
+                $insertMarker->execute([
+                    $audioKey,
+                    $p['paragraph_key']  !== null ? (int)$p['paragraph_key']  : null,
+                    $paraStartPage,
+                    (int)$p['paragraph_number'],
+                    $paraStartMs,
+                    $paraStartBytes,
+                ]);
+            } catch (Exception $e) { /* idempotent */ }
+            $cumulativeBytes += strlen($paraBytes);
+            $cumulativeMs    += probeDurationMs($ffprobeBin, $paraBytes, $tmpDir);
+            // Light progress update — same shape as the post-synth path.
+            $pct = (int)floor(($idx + 1) / max(1, $nPara) * 95) + 2;
+            updateAudio($db, $audioKey, [
+                'tts_audio_progress' => min(99, $pct),
+                'tts_audio_message'  => sprintf('Paragraph %d / %d (%d fails, cached)', $idx + 1, $nPara, $failureCount),
+            ]);
+            continue;
         }
+    }
+
+    // Status + supersession check every iteration. Pause must be
+    // responsive, and the round-trip cost (~1ms) is dwarfed by the
+    // Azure synth call we're about to make.
+    //   'paused'  → exit cleanly; parts on disk stay for resume.
+    //   'failed' / row gone → cancellation; ditto on parts.
+    //   tts_audio_worker_pid != getmypid() → a Resume/Restart raced us
+    //     and spawned a new worker; the old one bails so two workers
+    //     never write to $partsDir simultaneously.
+    $statusCheck = $db->prepare("SELECT tts_audio_status, tts_audio_worker_pid FROM yy_tts_audio WHERE tts_audio_key = ?");
+    $statusCheck->execute([$audioKey]);
+    $row = $statusCheck->fetch();
+    $cur = $row ? $row['tts_audio_status'] : null;
+    if ($cur === 'paused') {
+        $pct = (int)floor($idx / max(1, $nPara) * 95) + 2;
+        updateAudio($db, $audioKey, [
+            'tts_audio_progress'   => min(99, $pct),
+            'tts_audio_message'    => sprintf('Paused at paragraph %d / %d', $idx, $nPara),
+            'tts_audio_worker_pid' => null,
+        ]);
+        fwrite(STDERR, "paused at idx=$idx — cached " . count(glob($partsDir . '/p*.mp3') ?: []) . " parts\n");
+        exit(0);
+    }
+    if ($cur === 'failed' || $cur === null) {
+        fwrite(STDERR, "cancelled at idx=$idx\n");
+        exit(0);
+    }
+    $regPid = isset($row['tts_audio_worker_pid']) ? (int)$row['tts_audio_worker_pid'] : 0;
+    if ($regPid > 0 && $regPid !== getmypid()) {
+        fwrite(STDERR, "superseded by worker $regPid at idx=$idx — exiting\n");
+        exit(0);
     }
 
     // Apply per-font filtering (skip + pause-on-switch) BEFORE
@@ -622,7 +751,9 @@ foreach ($paragraphs as $idx => $p) {
             if (ttsProviderUsesSsml($cfg, $pk)) {
                 $b = azureTtsSynthesizeRetry(wrapSsml(buildVoiceBlock($seg['text'], $cfg, $seg['category'])), $cfg, $err);
             } else {
-                $b = localTtsSynthesizeRetry($cfg, buildLocalSegment($seg['text'], $cfg, $seg['category']), $cfg['system']['tts_output_format'], $err);
+                // Sentence-chunk to keep each model.generate() call below the
+                // quadratic-attention cliff. See localTtsSynthesizeChunked.
+                $b = localTtsSynthesizeChunked($cfg, buildLocalSegment($seg['text'], $cfg, $seg['category']), $cfg['system']['tts_output_format'], $err);
             }
             if ($b === '') {
                 $failures[] = "para {$p['paragraph_number']} seg: $err";
@@ -654,7 +785,12 @@ foreach ($paragraphs as $idx => $p) {
         ]);
     } catch (Exception $e) { /* don't fail the build if marker write fails */ }
 
-    fwrite($fh, $paraBytes);
+    // Cache this paragraph's bytes BEFORE updating cumulative offsets, so
+    // a crash between synth and write doesn't leave the offsets pointing
+    // at a part file that doesn't exist on the next resume.
+    $pp = $partPath($idx);
+    @file_put_contents($pp, $paraBytes);
+    @chmod($pp, 0664);   // belt-and-suspenders alongside the umask above
     $cumulativeBytes += strlen($paraBytes);
     $paragraphMs      = probeDurationMs($ffprobeBin, $paraBytes, $tmpDir);
     $cumulativeMs    += $paragraphMs;
@@ -690,14 +826,33 @@ foreach ($paragraphs as $idx => $p) {
         }
     }
 
-    if (($idx % 5) === 0 || $idx === $nPara - 1) {
-        $pct = (int)floor(($idx + 1) / max(1, $nPara) * 95) + 2;
-        updateAudio($db, $audioKey, [
-            'tts_audio_progress'      => min(99, $pct),
-            'tts_audio_message'       => sprintf('Paragraph %d / %d (%d fails)', $idx + 1, $nPara, $failureCount),
-            'tts_audio_chars_billed'  => $charsBilled,
-        ]);
-    }
+    // Per-paragraph progress flush. Old throttle was every 5th iteration,
+    // which on slow engines (Chatterbox ~5-20s/paragraph) left the UI
+    // stuck on a stale percentage for a minute+ at a time. One write per
+    // paragraph is ~1ms vs the seconds we just spent on synth — invisible.
+    $pct = (int)floor(($idx + 1) / max(1, $nPara) * 95) + 2;
+    updateAudio($db, $audioKey, [
+        'tts_audio_progress'      => min(99, $pct),
+        'tts_audio_message'       => sprintf('Paragraph %d / %d (%d fails)', $idx + 1, $nPara, $failureCount),
+        'tts_audio_chars_billed'  => $charsBilled,
+    ]);
+}
+// Concatenate every cached part into the final MP3. Parts are the
+// authoritative source — they survive pause/resume and crashes, while
+// the final file is just the byte-concat of whatever's in $partsDir
+// at this moment. MP3 frames concatenate cleanly without re-encoding;
+// the per-part probeDurationMs() above already accounted for any
+// per-frame padding so $cumulativeMs is accurate.
+$fh = fopen($finalPath, 'wb');
+if (!$fh) bail($db, $audioKey, "cannot open $finalPath for write");
+$concatBytes = 0;
+for ($i = 0; $i < $nPara; $i++) {
+    $pp = $partPath($i);
+    if (!is_file($pp) || filesize($pp) === 0) continue;
+    $bytes = file_get_contents($pp);
+    if ($bytes === false || $bytes === '') continue;
+    fwrite($fh, $bytes);
+    $concatBytes += strlen($bytes);
 }
 fclose($fh);
 

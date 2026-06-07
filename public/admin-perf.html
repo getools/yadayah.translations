@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="page-version" content="1780788089">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reports / Performance - Yada Yah</title>
+    <link rel="stylesheet" href="css/app.css">
+    <link rel="stylesheet" href="css/login.css">
+    <style>
+        .reports-subnav { display: flex; gap: 0; margin: 0 0 16px; border-bottom: 2px solid #ddd; }
+        .reports-subnav a { padding: 10px 24px; text-decoration: none; color: #666; font-weight: 600; font-family: "Julius Sans One", sans-serif; font-size: 1rem; border-bottom: 3px solid transparent; }
+        .reports-subnav a:hover { color: #31345A; }
+        .reports-subnav a.active { color: #31345A; border-bottom-color: #31345A; }
+
+        .perf-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+        .perf-table th, .perf-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e0e0e0; vertical-align: middle; }
+        .perf-table thead th { background: #f8f9fa; font-weight: 600; color: #555; user-select: none; }
+        .perf-table tbody tr:hover { background: #f0f7fb; }
+        .perf-type { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; }
+        .perf-type.host { background: #fef3c7; color: #92400e; }
+        .perf-type.docker { background: #dbeafe; color: #1e40af; }
+        .perf-type.db { background: #ede9fe; color: #5b21b6; }
+        .perf-type.http { background: #d1fae5; color: #065f46; }
+        .perf-value { font-variant-numeric: tabular-nums; font-weight: 600; }
+        .perf-value.warn { color: #b45309; }
+        .perf-value.bad { color: #b91c1c; }
+        .perf-value.ok { color: #047857; }
+        .perf-spark { width: 240px; height: 38px; display: block; }
+        .perf-spark-cell { width: 250px; }
+        .perf-when { color: #888; font-size: 0.78rem; white-space: nowrap; }
+        .perf-target { color: #555; font-family: monospace; font-size: 0.78rem; word-break: break-all; max-width: 350px; }
+        .perf-status-row { font-size: 0.85rem; color: #555; margin-bottom: 14px; display: flex; gap: 16px; align-items: center; }
+        .perf-action { font-size: 0.78rem; padding: 4px 10px; }
+    </style>
+    <script src="/js/admin-nav.js?v=10"></script>
+</head>
+<body>
+
+<div id="login-screen" class="login-screen">
+    <div class="login-card">
+        <h1>Admin</h1>
+        <div class="field">
+            <label for="login-user">Login</label>
+            <input type="text" id="login-user" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="login-pass">Password</label>
+            <div class="pass-wrap">
+                <input type="password" id="login-pass" autocomplete="current-password">
+                <button type="button" class="pass-toggle" onclick="togglePassword()" title="Show/hide password">&#128065;</button>
+            </div>
+        </div>
+        <div id="login-error" class="error-messages" style="display:none"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Login</button>
+    </div>
+</div>
+
+<div id="app" class="container" style="display:none">
+    <div class="app-header">
+        <nav class="nav-tabs"></nav>
+        <div class="user-info">
+            <span id="user-display"></span>
+            <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
+        </div>
+    </div>
+
+    <h1>Reports</h1>
+
+    <nav class="reports-subnav">
+        <a href="admin-perf.html" class="active">Performance</a>
+    </nav>
+
+    <div class="perf-status-row">
+        <span>Last collector run: <strong id="last-run">—</strong></span>
+        <span>Probes: <strong id="probe-count">0</strong></span>
+        <button class="btn btn-secondary perf-action" onclick="loadChecks()">Refresh</button>
+    </div>
+
+    <div class="card">
+        <table class="perf-table">
+            <thead>
+                <tr>
+                    <th style="width:60px">Type</th>
+                    <th>Probe</th>
+                    <th>Target</th>
+                    <th style="width:110px">Latest</th>
+                    <th class="perf-spark-cell">Trend (last 48)</th>
+                    <th style="width:130px">When</th>
+                </tr>
+            </thead>
+            <tbody id="perf-rows"><tr><td colspan="6" style="text-align:center;color:#999;font-style:italic">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+var API = '/api';
+
+function checkAuth() {
+    fetch(API + '/auth.php', {credentials:'include'}).then(function(r){return safeJson(r);}).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+            if (typeof applyPagePermissions === 'function') applyPagePermissions(d.pages);
+            loadChecks();
+        } else {
+            document.getElementById('login-screen').classList.add('visible');
+        }
+    });
+}
+
+function doLogin() {
+    var u = document.getElementById('login-user').value;
+    var p = document.getElementById('login-pass').value;
+    var err = document.getElementById('login-error');
+    err.style.display = 'none';
+    fetch(API + '/auth.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({login: u, password: p})
+    }).then(function(r){return safeJson(r);}).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('login-screen').classList.remove('visible');
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+            if (typeof applyPagePermissions === 'function') applyPagePermissions(d.pages);
+            loadChecks();
+        } else {
+            err.textContent = d.error || 'Login failed';
+            err.style.display = '';
+        }
+    });
+}
+
+function doLogout() { fetch(API + '/auth.php', {method:'DELETE', credentials:'include'}).then(function(){ location.reload(); }); }
+function togglePassword() { var i = document.getElementById('login-pass'); i.type = i.type === 'password' ? 'text' : 'password'; }
+function esc(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+function formatLatest(check) {
+    var ms = check.latest_ms;
+    if (ms === null || ms === undefined) return '<span style="color:#999">—</span>';
+    var t = check.perf_check_type;
+    var v = Number(ms);
+    var label, cls = 'ok';
+    if (t === 'host' && check.perf_check_code === 'host_cpu') {
+        // steal % is the primary metric
+        label = v.toFixed(1) + '% st';
+        if (v > 50) cls = 'bad';
+        else if (v > 10) cls = 'warn';
+    } else if (t === 'host' && check.perf_check_code === 'host_mem') {
+        label = v.toFixed(0) + ' MB';
+    } else if (t === 'docker') {
+        label = v.toFixed(0) + '%';
+        if (v > 500) cls = 'bad';
+        else if (v > 200) cls = 'warn';
+    } else if (t === 'db') {
+        label = v.toFixed(0);
+    } else if (t === 'http') {
+        label = v.toFixed(0) + ' ms';
+        if (v > 3000) cls = 'bad';
+        else if (v > 1000) cls = 'warn';
+    } else {
+        label = String(ms);
+    }
+    if (check.latest_ok === false || check.latest_ok === 'f') { cls = 'bad'; label = '⚠ ' + label; }
+    return '<span class="perf-value ' + cls + '">' + esc(label) + '</span>';
+}
+
+function renderSparkline(samples, type) {
+    if (!samples || samples.length === 0) {
+        return '<svg class="perf-spark" viewBox="0 0 240 38"><text x="120" y="22" text-anchor="middle" fill="#bbb" font-size="11">no data</text></svg>';
+    }
+    var values = samples.map(function(s) { return s.perf_sample_ms === null ? null : Number(s.perf_sample_ms); });
+    var nums = values.filter(function(v) { return v !== null && !isNaN(v); });
+    if (nums.length === 0) {
+        return '<svg class="perf-spark" viewBox="0 0 240 38"><text x="120" y="22" text-anchor="middle" fill="#bbb" font-size="11">no data</text></svg>';
+    }
+    var min = Math.min.apply(null, nums);
+    var max = Math.max.apply(null, nums);
+    if (max === min) { max = min + 1; }
+    var n = values.length;
+    var w = 240, h = 38, pad = 2;
+    var stepX = n > 1 ? (w - 2 * pad) / (n - 1) : 0;
+    var pts = values.map(function(v, i) {
+        var x = pad + i * stepX;
+        if (v === null || isNaN(v)) return null;
+        var y = h - pad - ((v - min) / (max - min)) * (h - 2 * pad);
+        return [x, y];
+    });
+    var path = '';
+    var prev = null;
+    pts.forEach(function(p) {
+        if (!p) { prev = null; return; }
+        if (prev === null) path += 'M' + p[0].toFixed(1) + ' ' + p[1].toFixed(1);
+        else path += ' L' + p[0].toFixed(1) + ' ' + p[1].toFixed(1);
+        prev = p;
+    });
+    // Colour: green if last value is near min, red if near max — applies to "lower is better" metrics (http_ms, steal %)
+    var lastV = nums[nums.length - 1];
+    var ratio = (lastV - min) / (max - min);
+    var stroke = ratio < 0.33 ? '#10b981' : ratio > 0.66 ? '#ef4444' : '#3b82f6';
+    var minLabel = min.toFixed(min < 10 ? 1 : 0);
+    var maxLabel = max.toFixed(max < 10 ? 1 : 0);
+    return '<svg class="perf-spark" viewBox="0 0 240 38" preserveAspectRatio="none">'
+         +   '<path d="' + path + '" fill="none" stroke="' + stroke + '" stroke-width="1.5"/>'
+         +   '<text x="2" y="9" font-size="9" fill="#999">' + maxLabel + '</text>'
+         +   '<text x="2" y="36" font-size="9" fill="#999">' + minLabel + '</text>'
+         + '</svg>';
+}
+
+function formatWhen(dtime) {
+    if (!dtime) return '<span style="color:#bbb">never</span>';
+    var d = new Date(dtime);
+    if (isNaN(d)) return esc(dtime);
+    var now = new Date();
+    var diff = (now - d) / 1000;
+    var s;
+    if (diff < 60) s = Math.round(diff) + 's ago';
+    else if (diff < 3600) s = Math.round(diff / 60) + 'm ago';
+    else if (diff < 86400) s = Math.round(diff / 3600) + 'h ago';
+    else s = Math.round(diff / 86400) + 'd ago';
+    return '<span class="perf-when" title="' + esc(d.toISOString()) + '">' + s + '</span>';
+}
+
+function loadChecks() {
+    fetch(API + '/admin-perf.php', {credentials:'include'}).then(function(r){return safeJson(r);}).then(function(d) {
+        var rows = document.getElementById('perf-rows');
+        if (d.error) { rows.innerHTML = '<tr><td colspan="6" style="color:#c0392b">' + esc(d.error) + '</td></tr>'; return; }
+        var checks = d.checks || [];
+        document.getElementById('probe-count').textContent = checks.length;
+        var latest = checks.reduce(function(m, c) {
+            if (!c.latest_dtime) return m;
+            return (m === null || c.latest_dtime > m) ? c.latest_dtime : m;
+        }, null);
+        document.getElementById('last-run').innerHTML = latest ? formatWhen(latest) : '<span style="color:#bbb">no samples yet</span>';
+        if (checks.length === 0) {
+            rows.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#999;font-style:italic">No probes configured</td></tr>';
+            return;
+        }
+        rows.innerHTML = checks.map(function(c) {
+            return '<tr>'
+                 + '<td><span class="perf-type ' + esc(c.perf_check_type) + '">' + esc(c.perf_check_type) + '</span></td>'
+                 + '<td><strong>' + esc(c.perf_check_label) + '</strong><br><span style="color:#888;font-size:0.78rem">' + esc(c.perf_check_code) + '</span></td>'
+                 + '<td class="perf-target">' + esc(c.perf_check_target || '') + '</td>'
+                 + '<td>' + formatLatest(c) + '</td>'
+                 + '<td>' + renderSparkline(c.spark, c.perf_check_type) + '</td>'
+                 + '<td>' + formatWhen(c.latest_dtime) + '</td>'
+                 + '</tr>';
+        }).join('');
+    });
+}
+
+document.getElementById('login-pass').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin(); });
+checkAuth();
+</script>
+<script src="/js/admin-login.js?v=8"></script>
+<script src="/js/error-reporter.js?v=2"></script>
+</body>
+</html>

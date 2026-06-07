@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780690225">
+    <meta name="page-version" content="1780645985">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
-    <link rel="stylesheet" href="css/app.css?v=13">
+    <link rel="stylesheet" href="css/app.css?v=10">
     <link rel="stylesheet" href="css/login.css">
     <style>
         .tts-section { background:#fff; border:1px solid #e0e0e0; border-radius:8px; padding:16px 20px; margin-bottom:16px; }
@@ -127,6 +127,7 @@
         .badge-failed.clickable { cursor:pointer; }
         .badge-failed.clickable:hover { background:#f1c0c0; }
         .badge-none { background:#fafafa; color:#999; border:1px solid #e0e0e0; }
+        .badge-paused { background:#e1d5f5; color:#3b1f70; border:1px solid #b9a1e5; }
 
         .progress { display:inline-block; vertical-align:middle; width:120px; height:6px; background:#eee; border-radius:3px; overflow:hidden; margin-left:8px; }
         .progress .fill { display:block; height:100%; background:#27ae60; transition:width 0.3s; }
@@ -374,14 +375,27 @@
                     </select>
 
                     <div id="cv-form" style="margin-top:14px;display:none;">
+                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Voice <span style="color:#888;font-weight:normal;">(pick an existing custom voice to edit, or “+ New” to create)</span> <span id="cv-autosave-status" style="float:right;font-weight:normal;font-size:0.78rem;color:#888;"></span></label>
+                        <select id="cv-voice-select" onchange="onCustomizeVoiceSelect()" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">
+                            <option value="">+ New custom voice</option>
+                        </select>
+
                         <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Voice code <span style="color:#888;font-weight:normal;">(slug; will be prefixed per provider)</span></label>
                         <input id="cv-code" type="text" placeholder="e.g. craig" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
 
                         <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Display name</label>
-                        <input id="cv-name" type="text" placeholder='e.g. "Craig — calm narrator"' style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
+                        <input id="cv-name" type="text" placeholder='e.g. "Craig — calm narrator"' oninput="autoSaveCustomizeMeta('label', 500)" onchange="autoSaveCustomizeMeta('label', 0)" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
+
+                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Gender</label>
+                        <select id="cv-gender" onchange="autoSaveCustomizeMeta('gender', 0)" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">
+                            <option value="">— unspecified —</option>
+                            <option value="Male">Male</option>
+                            <option value="Female">Female</option>
+                            <option value="Neutral">Neutral</option>
+                        </select>
 
                         <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Description <span style="color:#888;font-weight:normal;">(optional)</span></label>
-                        <textarea id="cv-desc" rows="2" placeholder="When to pick this voice over others" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;font-family:inherit;resize:vertical;"></textarea>
+                        <textarea id="cv-desc" rows="2" placeholder="When to pick this voice over others" oninput="autoSaveCustomizeMeta('description', 500)" onchange="autoSaveCustomizeMeta('description', 0)" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;font-family:inherit;resize:vertical;"></textarea>
 
                         <label id="cv-style-label" style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Style <span style="color:#888;font-weight:normal;">(first upload must be <code>default</code>; later: e.g. <code>happy</code>, <code>stoic</code>, <code>quiet</code>, <code>upset</code>)</span></label>
                         <input id="cv-style-name" type="text" value="default" placeholder="default" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
@@ -406,10 +420,6 @@
                 </div>
             </div>
 
-            <h4 style="margin:22px 0 8px;color:#31345A;">Existing custom voices</h4>
-            <div id="cv-list" style="font-size:0.85rem;color:#666;">
-                <em>None yet. Custom voices you train above will appear here.</em>
-            </div>
         </div>
     </div>
 
@@ -575,6 +585,10 @@
             <div class="books-controls">
                 <select id="volume-select"><option value="">— Select volume —</option></select>
                 <span id="volume-summary" style="font-size:0.85rem;color:#666"></span>
+                <button type="button" id="build-all-btn" onclick="openBuildAllModal()" disabled
+                        style="margin-left:auto;padding:6px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">
+                    Build all chapters
+                </button>
             </div>
             <table class="tts-table" id="chapters-table" style="display:none">
                 <thead>
@@ -608,6 +622,32 @@
         <div class="modal-buttons">
             <button class="btn-cancel" onclick="closeBuildModal()">Cancel</button>
             <button class="btn-primary" id="build-start-btn" onclick="startBuild()">Start build</button>
+        </div>
+    </div>
+</div>
+
+<!-- ── Build-ALL-chapters modal ────────────────────────────────────── -->
+<div id="build-all-modal" class="modal-overlay">
+    <div class="modal-box">
+        <h3 id="build-all-modal-title">Build all chapters</h3>
+        <p style="font-size:0.85rem;color:#666;margin:0 0 14px">Queue every chapter in this volume in one shot. Voice config + overrides apply to every chapter — same modal as a single-chapter build.</p>
+        <div class="voice-row" style="grid-template-columns:160px 1fr">
+            <label>Scope</label>
+            <select id="build-all-scope">
+                <option value="all" selected>All chapters (rebuilds completed ones)</option>
+                <option value="missing">Missing or failed only (preserves completed)</option>
+                <option value="failed">Failed only</option>
+            </select>
+        </div>
+        <div class="voice-row" style="grid-template-columns:160px 1fr">
+            <label>Output format</label>
+            <select id="build-all-format"></select>
+        </div>
+        <div id="build-all-category-rows" style="margin-top:10px"></div>
+        <div id="build-all-status" class="status-msg"></div>
+        <div class="modal-buttons">
+            <button class="btn-cancel" onclick="closeBuildAllModal()">Cancel</button>
+            <button class="btn-primary" id="build-all-start-btn" onclick="startBuildAll()">Queue all</button>
         </div>
     </div>
 </div>
@@ -736,6 +776,11 @@ var CUSTOMIZE_PROVIDERS = {
 };
 
 var _customizeInit = false;
+// Cache of existing voices grouped by provider codePrefix (cb-, cv-, qw-)
+// so the "edit existing" picker on this tab can list them without
+// re-fetching every time the provider changes. Populated lazily by
+// loadCustomVoicesCache() on first Customize-tab open.
+var CV_VOICES_BY_PREFIX = { _loaded: false };
 function initCustomizeTab() {
     if (_customizeInit) return;
     _customizeInit = true;
@@ -748,6 +793,179 @@ function initCustomizeTab() {
               + escapeHtml(p.label) + (p.disabled ? ' — unavailable' : '') + '</option>';
     });
     sel.innerHTML = opts;
+    // Kick off the voice fetch in the background; the form is hidden
+    // until a provider is picked, so we have time before the dropdown
+    // it feeds becomes visible.
+    loadCustomVoicesCache();
+}
+
+async function loadCustomVoicesCache() {
+    if (CV_VOICES_BY_PREFIX._loaded) return;
+    try {
+        var r = await api('/admin-tts-voices.php?action=list');
+        var voices = (r && r.voices) ? r.voices : [];
+        Object.values(CUSTOMIZE_PROVIDERS).forEach(function (p) {
+            if (!p.codePrefix) return;
+            CV_VOICES_BY_PREFIX[p.codePrefix] = voices.filter(function (v) {
+                return v.tts_voice_code && v.tts_voice_code.indexOf(p.codePrefix) === 0;
+            });
+        });
+        CV_VOICES_BY_PREFIX._loaded = true;
+        // If the user already picked a provider before the fetch finished,
+        // re-populate the voice select now that we have data.
+        var provSel = document.getElementById('cv-provider');
+        if (provSel && provSel.value) {
+            var meta = CUSTOMIZE_PROVIDERS[provSel.value];
+            if (meta && meta.codePrefix) populateCvVoiceSelect(meta.codePrefix);
+        }
+    } catch (e) {
+        console.warn('Failed to load custom-voice catalog:', e);
+    }
+}
+
+function populateCvVoiceSelect(prefix) {
+    var sel = document.getElementById('cv-voice-select');
+    if (!sel) return;
+    var prev = sel.value;
+    var list = (CV_VOICES_BY_PREFIX[prefix] || []).slice();
+    // Sort by label (case-insensitive) so the list reads alphabetically.
+    list.sort(function (a, b) {
+        var la = (a.tts_voice_label || a.tts_voice_code || '').toLowerCase();
+        var lb = (b.tts_voice_label || b.tts_voice_code || '').toLowerCase();
+        return la < lb ? -1 : la > lb ? 1 : 0;
+    });
+    sel.innerHTML = '<option value="">+ New custom voice</option>';
+    list.forEach(function (v) {
+        var o = document.createElement('option');
+        o.value = v.tts_voice_code;
+        o.textContent = (v.tts_voice_label || v.tts_voice_code);
+        sel.appendChild(o);
+    });
+    // Preserve the selected voice across provider changes when possible.
+    if (prev && Array.prototype.some.call(sel.options, function (o) { return o.value === prev; })) {
+        sel.value = prev;
+    }
+}
+
+function onCustomizeVoiceSelect() {
+    var sel = document.getElementById('cv-voice-select');
+    var code = sel ? sel.value : '';
+    var meta = CUSTOMIZE_PROVIDERS[document.getElementById('cv-provider').value];
+    var btn  = document.getElementById('cv-submit');
+    var codeIn = document.getElementById('cv-code');
+    if (!code) {
+        // "+ New custom voice" — fully clear Voice code and Display name
+        // (no prefix-injection: the prefix is the user's to type, and the
+        // empty field makes it obvious nothing is being edited yet).
+        // Reset description, style, and the file picker too.
+        if (codeIn) { codeIn.value = ''; codeIn.readOnly = false; codeIn.style.background = ''; }
+        var nameIn = document.getElementById('cv-name');
+        if (nameIn) nameIn.value = '';
+        var genderIn = document.getElementById('cv-gender');
+        if (genderIn) genderIn.value = '';
+        var descIn = document.getElementById('cv-desc');
+        if (descIn) descIn.value = '';
+        var styleIn = document.getElementById('cv-style-name');
+        if (styleIn) styleIn.value = 'default';
+        var audioIn = document.getElementById('cv-audio');
+        if (audioIn) audioIn.value = '';
+        var prev    = document.getElementById('cv-preview');
+        if (prev)   { prev.removeAttribute('src'); prev.style.display = 'none'; }
+        if (btn)    btn.textContent = (meta && meta.noAudio) ? 'Register voice' : 'Train voice';
+        setCustomizeAutoSaveStatus('');
+        return;
+    }
+    // Editing an existing voice — pre-fill code + label + gender + desc.
+    var prefix = (meta && meta.codePrefix) || '';
+    var list = CV_VOICES_BY_PREFIX[prefix] || [];
+    var v = list.find ? list.find(function (x) { return x.tts_voice_code === code; })
+                      : null;
+    if (!v) {
+        for (var i = 0; i < list.length; i++) if (list[i].tts_voice_code === code) { v = list[i]; break; }
+    }
+    if (!v) return;
+    if (codeIn) {
+        codeIn.value = v.tts_voice_code;
+        codeIn.readOnly = true;          // PK in the engine + DB; can't be renamed in place.
+        codeIn.style.background = '#f4f4f4';
+    }
+    var nameIn = document.getElementById('cv-name');
+    if (nameIn) nameIn.value = v.tts_voice_label || '';
+    var genderIn = document.getElementById('cv-gender');
+    if (genderIn) {
+        // tts_voice_gender on yy_tts_voice holds 'Male'/'Female'/'Neutral'
+        // (or empty); match the option exactly when present, otherwise
+        // fall back to the blank "unspecified" option.
+        var g = (v.tts_voice_gender || '').trim();
+        var found = Array.prototype.some.call(genderIn.options, function (o) { return o.value === g; });
+        genderIn.value = found ? g : '';
+    }
+    var descIn = document.getElementById('cv-desc');
+    if (descIn) descIn.value = v.tts_voice_note || '';
+    if (btn) btn.textContent = (meta && meta.noAudio) ? 'Update voice' : 'Retrain voice';
+    setCustomizeAutoSaveStatus('');
+}
+
+// Customize tab — auto-save metadata edits on an existing custom voice.
+// Voice code is the engine + DB PK; it can't be patched in place, so the
+// auto-save only fires when an existing voice is selected in cv-voice-select.
+// "+ New custom voice" still routes through submitCustomizeVoice() / the
+// Train button, which does the audio upload + GPU register + DB upsert.
+var _cvAutoSaveTimers = {};
+function setCustomizeAutoSaveStatus(msg, color) {
+    var el = document.getElementById('cv-autosave-status');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.style.color = color || '#888';
+}
+function autoSaveCustomizeMeta(field, debounceMs) {
+    var sel = document.getElementById('cv-voice-select');
+    var code = sel ? sel.value : '';
+    if (!code) return;                   // new-voice path uses Train button
+    var prov = (document.getElementById('cv-provider').value || '').trim();
+    if (!prov) return;
+    var inputId = ({label:'cv-name', gender:'cv-gender', description:'cv-desc'})[field];
+    var inp = document.getElementById(inputId);
+    if (!inp) return;
+    if (_cvAutoSaveTimers[field]) clearTimeout(_cvAutoSaveTimers[field]);
+    var fire = function () {
+        _cvAutoSaveTimers[field] = null;
+        var fd = new FormData();
+        fd.append('mode', 'meta');
+        fd.append('provider', prov);
+        fd.append('code', code);
+        fd.append(field, inp.value);
+        setCustomizeAutoSaveStatus('Saving…', '#888');
+        fetch(API + '/admin-tts-customize.php', { method:'POST', credentials:'include', body: fd })
+          .then(function (r) { return r.json().catch(function () { return { ok:false, error:'HTTP '+r.status }; }); })
+          .then(function (d) {
+              if (!d || !d.ok) throw new Error((d && d.error) || 'save failed');
+              setCustomizeAutoSaveStatus('✓ Saved', '#2e7d32');
+              // Patch the in-memory cache so re-selecting the voice doesn't
+              // show the pre-edit value.
+              var meta = CUSTOMIZE_PROVIDERS[prov];
+              var list = CV_VOICES_BY_PREFIX[(meta && meta.codePrefix) || ''] || [];
+              for (var i = 0; i < list.length; i++) {
+                  if (list[i].tts_voice_code === code) {
+                      if (field === 'label')       list[i].tts_voice_label  = inp.value;
+                      if (field === 'gender')      list[i].tts_voice_gender = inp.value;
+                      if (field === 'description') list[i].tts_voice_note   = inp.value;
+                      break;
+                  }
+              }
+              // The shared voices cache used by Defaults / Pronunciations also
+              // carries label/gender — bust it so those tabs pick up the edit
+              // the next time they render.
+              if (typeof PRONS_VOICES_CACHE !== 'undefined') PRONS_VOICES_CACHE = null;
+              setTimeout(function () { setCustomizeAutoSaveStatus(''); }, 1500);
+          })
+          .catch(function (e) { setCustomizeAutoSaveStatus('✗ ' + (e.message || 'save failed'), '#c0392b'); });
+    };
+    if (debounceMs && debounceMs > 0) {
+        _cvAutoSaveTimers[field] = setTimeout(fire, debounceMs);
+    } else {
+        fire();
+    }
 }
 
 function onCustomizeProviderChange() {
@@ -808,25 +1026,27 @@ function onCustomizeProviderChange() {
     // Update submit button label for clarity.
     var btn = document.getElementById('cv-submit');
     if (btn) btn.textContent = hideAudio ? 'Register voice' : 'Train voice';
+    // Repopulate the existing-voice picker for this provider. Reset to
+    // "+ New custom voice" — switching providers shouldn't carry a
+    // "you're editing X" state across to an unrelated engine.
+    var voiceSel = document.getElementById('cv-voice-select');
+    if (voiceSel) voiceSel.value = '';
+    populateCvVoiceSelect(meta.codePrefix);
     // Pre-fill / swap the voice-code field with the provider's slug prefix.
     // Replaces any KNOWN prefix from another provider (cb-/cv-/qw-/ko-) so
     // switching CosyVoice → Qwen3 mid-typing changes "cv-craigwinn" to
     // "qw-craigwinn", not leaves the wrong prefix in place.
+    // Code-field handling moved to onCustomizeVoiceSelect — it stays
+    // empty when the "+ New custom voice" row is selected (the default
+    // after a provider switch) and is populated from the picked voice
+    // when an existing one is selected. Old prefix-injection on every
+    // provider change clashed with the user-typing flow.
     var codeIn = document.getElementById('cv-code');
-    if (codeIn && meta.codePrefix) {
-        var knownPrefixes = Object.values(CUSTOMIZE_PROVIDERS)
-                              .map(function (p) { return p.codePrefix; })
-                              .filter(Boolean);
-        var cur = codeIn.value || '';
-        var stripped = cur;
-        for (var i = 0; i < knownPrefixes.length; i++) {
-            if (cur.indexOf(knownPrefixes[i]) === 0) {
-                stripped = cur.slice(knownPrefixes[i].length);
-                break;
-            }
-        }
-        codeIn.value = meta.codePrefix + stripped;
-    }
+    if (codeIn) codeIn.value = '';
+    var nameIn = document.getElementById('cv-name');
+    if (nameIn) nameIn.value = '';
+    var genderIn = document.getElementById('cv-gender');
+    if (genderIn) genderIn.value = '';
 }
 
 function onCustomizeFilePicked(input) {
@@ -841,10 +1061,11 @@ async function submitCustomizeVoice() {
     var btn = document.getElementById('cv-submit');
     if (!s || !btn) return;
 
-    var prov  = (document.getElementById('cv-provider').value || '').trim();
-    var code  = (document.getElementById('cv-code').value     || '').trim();
-    var name  = (document.getElementById('cv-name').value     || '').trim();
-    var desc  = (document.getElementById('cv-desc').value     || '').trim();
+    var prov   = (document.getElementById('cv-provider').value || '').trim();
+    var code   = (document.getElementById('cv-code').value     || '').trim();
+    var name   = (document.getElementById('cv-name').value     || '').trim();
+    var gender = (document.getElementById('cv-gender').value   || '').trim();
+    var desc   = (document.getElementById('cv-desc').value     || '').trim();
     var meta  = CUSTOMIZE_PROVIDERS[prov];
     var noAudio = !!(meta && meta.noAudio);
     var file  = document.getElementById('cv-audio').files[0];
@@ -865,6 +1086,7 @@ async function submitCustomizeVoice() {
     fd.append('provider',     prov);
     fd.append('code',         code);
     fd.append('label',        name);
+    fd.append('gender',       gender);
     fd.append('description',  desc);
     fd.append('style_name',   styleName);
     if (file && !noAudio) fd.append('audio', file, file.name);
@@ -950,7 +1172,7 @@ async function bootstrap() {
     }
     populateSystemUI();
     populateRefreshProviderDropdown();
-    renderCategoryRows();
+    await renderCategoryRows();
 }
 
 function populateSystemUI() {
@@ -971,25 +1193,52 @@ function populateSystemUI() {
     }
 }
 
-function renderCategoryRows() {
+// Lazy fetch of provider list + active voices, shared by Defaults / Pronunciations
+// / Customize. Returns PRONS_VOICES_CACHE which is built by loadPronsTestSelects;
+// reusing that name avoids two parallel caches. Idempotent — safe to call from
+// any tab's load handler.
+async function ensureVoicesCache() {
+    if (PRONS_VOICES_CACHE) return PRONS_VOICES_CACHE;
+    var provRes  = await api('/admin-tts-config.php?action=list_providers');
+    var voiceRes = await api('/admin-tts-voices.php?action=list');
+    PRONS_VOICES_CACHE = {
+        providers: (provRes.providers || []),
+        voices:    (voiceRes.voices    || []).filter(function (v) { return v.tts_voice_active_flag; }),
+    };
+    return PRONS_VOICES_CACHE;
+}
+
+async function renderCategoryRows() {
     var root = $('category-rows');
+    if (!root) return;
+    var cache;
+    try {
+        cache = await ensureVoicesCache();
+    } catch (e) {
+        root.innerHTML = '<div class="status-msg error" style="padding:10px;">Failed to load providers / voices: ' + escapeHtml(String((e && e.message) || e)) + '</div>';
+        return;
+    }
+    var providers   = cache.providers;
+    var activeVoices = cache.voices;
+    // Map voice_code → voice row for fast "what provider does this voice belong to"
+    // lookup when seeding the Provider dropdown from the saved voice.
+    var voiceByCode = {};
+    activeVoices.forEach(function (v) { voiceByCode[v.tts_voice_code] = v; });
+
     root.innerHTML = '';
-    CATALOG.categories.forEach(cat => {
+    CATALOG.categories.forEach(function (cat) {
         var saved = STATE.categories[cat.code] || {};
         var row = document.createElement('div');
         row.className = 'voice-row';
-        row.style.gridTemplateColumns = '260px 1fr 160px auto auto';
+        // 6 columns now: label | provider | voice | style | prosody | ▶
+        row.style.gridTemplateColumns = '240px 130px 1fr 160px auto auto';
         var isParent = !cat.parent;
-        // Visual hierarchy: parents get a top border + bold; children
-        // indent and dim. Same treatment is used in the Build modal so
-        // both popovers read the same way.
         if (isParent) row.style.cssText += 'border-top:1px solid #ccd;margin-top:8px;padding-top:6px;';
-        var labelStyle = isParent
-            ? 'font-weight:700;color:#31345A;'
-            : 'padding-left:22px;color:#555;';
+        var labelStyle = isParent ? 'font-weight:700;color:#31345A;' : 'padding-left:22px;color:#555;';
         var voicePlaceholder = isParent ? '' : ' (inherits ' + cat.parent + ' if unset)';
         row.innerHTML =
             '<label style="' + labelStyle + '">' + escapeHtml(cat.label) + '</label>' +
+            '<select data-cat="' + cat.code + '" data-field="provider" title="TTS provider — filters the Voice dropdown to its active voices."></select>' +
             '<select data-cat="' + cat.code + '" data-field="voice" title="' + escapeHtml('Voice for ' + cat.code + voicePlaceholder) + '"></select>' +
             '<select data-field="style" title="Speaking style (e.g. cheerful, chat, narration). Empty = no style override."></select>' +
             '<div class="prosody">' +
@@ -999,38 +1248,87 @@ function renderCategoryRows() {
             '</div>' +
             '<button class="btn-listen" data-cat="' + cat.code + '" title="Play a sample with current settings">▶</button>';
         root.appendChild(row);
+
+        var provSel  = row.querySelector('select[data-field="provider"]');
         var voiceSel = row.querySelector('select[data-field="voice"]');
-        // Blank option at the top means "inherit from parent" for children;
-        // for top-level rows it means "no voice picked" (the build worker
-        // falls back to whatever the deeper parent walk surfaces, which
-        // for top-levels is just the next existing entry).
-        var blankOpt = document.createElement('option');
-        blankOpt.value = '';
-        blankOpt.textContent = cat.parent
-            ? '— inherit from ' + cat.parent + ' —'
-            : '— (no voice set) —';
-        voiceSel.appendChild(blankOpt);
-        CATALOG.voices.forEach(v => {
-            var o = document.createElement('option');
-            o.value = v.code; o.textContent = v.label;
-            o.dataset.styles = (v.styles || []).join(',');
-            voiceSel.appendChild(o);
-        });
-        voiceSel.value = saved.tts_voice_code || '';
         var styleSel = row.querySelector('select[data-field="style"]');
+
+        // Provider dropdown — populated from yy_provider rows that have voices
+        // in the catalog (filtered server-side by list_providers).
+        providers.forEach(function (p) {
+            var o = document.createElement('option');
+            o.value = String(p.provider_key);
+            o.textContent = p.provider_label || ('#' + p.provider_key);
+            provSel.appendChild(o);
+        });
+        // Initial Provider selection: derive from the saved voice's provider_key
+        // so the row reads as "the engine that supplies this voice." Falls back
+        // to the first listed provider when nothing is saved.
+        var savedVoiceCode    = saved.tts_voice_code || '';
+        var savedProviderKey  = savedVoiceCode && voiceByCode[savedVoiceCode]
+            ? voiceByCode[savedVoiceCode].provider_key
+            : (providers[0] ? providers[0].provider_key : 0);
+        provSel.value = String(savedProviderKey);
+
+        // Voice dropdown — filtered to active voices of the currently-selected
+        // provider, sorted alphabetically. Called once at render time and again
+        // whenever the user switches providers.
+        function rebuildVoiceSelect(preserveValue) {
+            var pk = parseInt(provSel.value, 10) || 0;
+            var prev = preserveValue !== undefined ? preserveValue : voiceSel.value;
+            voiceSel.innerHTML = '';
+            var blankOpt = document.createElement('option');
+            blankOpt.value = '';
+            blankOpt.textContent = cat.parent
+                ? '— inherit from ' + cat.parent + ' —'
+                : '— (no voice set) —';
+            voiceSel.appendChild(blankOpt);
+            activeVoices
+                .filter(function (v) { return v.provider_key === pk; })
+                .sort(function (a, b) {
+                    var la = (a.tts_voice_label || a.tts_voice_code || '').toLowerCase();
+                    var lb = (b.tts_voice_label || b.tts_voice_code || '').toLowerCase();
+                    return la < lb ? -1 : la > lb ? 1 : 0;
+                })
+                .forEach(function (v) {
+                    var o = document.createElement('option');
+                    o.value = v.tts_voice_code;
+                    o.textContent = v.tts_voice_label || v.tts_voice_code;
+                    // Carry the voice's styles so populateStyleOptions picks them up.
+                    o.dataset.styles = (v.tts_voice_styles || []).join(',');
+                    voiceSel.appendChild(o);
+                });
+            if (prev && Array.prototype.some.call(voiceSel.options, function (o) { return o.value === prev; })) {
+                voiceSel.value = prev;
+            } else {
+                voiceSel.value = '';
+            }
+        }
+        rebuildVoiceSelect(savedVoiceCode);
         populateStyleOptions(voiceSel, styleSel, saved.tts_voice_style || '');
-        voiceSel.addEventListener('change', function() { populateStyleOptions(voiceSel, styleSel, ''); });
-        row.querySelector('button').addEventListener('click', function() {
+
+        // Provider change: refilter voices + clear the style dropdown.
+        // Don't autosave here — the voice select is now empty, so saving
+        // would clobber the prior saved voice. Save fires once the user
+        // picks a voice (handler below).
+        provSel.addEventListener('change', function () {
+            rebuildVoiceSelect();
+            populateStyleOptions(voiceSel, styleSel, '');
+        });
+        voiceSel.addEventListener('change', function () {
+            populateStyleOptions(voiceSel, styleSel, '');
+        });
+        row.querySelector('button').addEventListener('click', function () {
             saveAndListenCategory(cat.code, row);
         });
-        // Autosave on any prosody change. Select fires on commit; number
-        // inputs save on change (Enter / blur / step button) and on
-        // debounced input so typing flushes too.
-        row.querySelectorAll('select, input[data-field]').forEach(function(el) {
-            el.addEventListener('change', function() { saveCategoryOnly(cat.code, row); });
+        // Autosave on voice / style / prosody changes. Provider isn't in this
+        // list — it's just a UI filter that doesn't get persisted (the voice's
+        // own row tells the build worker which engine to use).
+        row.querySelectorAll('select[data-field="voice"], select[data-field="style"], input[data-field]').forEach(function (el) {
+            el.addEventListener('change', function () { saveCategoryOnly(cat.code, row); });
             if (el.tagName === 'INPUT') {
-                el.addEventListener('input', function() {
-                    scheduleAutoSave(el, function() { return saveCategoryOnly(cat.code, row); }, 600);
+                el.addEventListener('input', function () {
+                    scheduleAutoSave(el, function () { return saveCategoryOnly(cat.code, row); }, 600);
                 });
             }
         });
@@ -2784,6 +3082,12 @@ async function saveTuneRow(tr) {
     var sortVal     = tr.dataset.sort || '';
     if (!print) return;
     var s = $('tunes-status');
+    // Show "Saving…" in the status line for any in-flight save. The
+    // ⏳ glyph signals "request in flight" and is replaced by the
+    // "Saved …" / error message when the API returns. Multiple in-flight
+    // saves (debounced typing → autosave) just keep showing the spinner
+    // — the latest result wins.
+    if (s) { s.textContent = '⏳ Saving "' + print + '"…'; s.className = 'status-msg'; }
     console.log('[tts] saveTuneRow', { key: key, print: print, type: type, sub: sub, ipa: ipa, sapi: sapi, voice: voiceCode, provider: providerKey, sort: sortVal });
     // We allow type to be saved even if the chosen column is empty — the
     // synthesis path silently skips empty rules. So a user can flip Type
@@ -2857,12 +3161,43 @@ async function handleTuneAction(tr, act) {
         }
         if (act === 'del') {
             if (key && !confirm('Delete "' + print + '"?')) return;
-            if (key) await api('/admin-tts-config.php', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'delete_tune', tts_tune_key: key }) });
-            tr.remove();
+            // Disable the × button and swap to a spinner so the user can
+            // see the delete is in flight. Restored only on error (row is
+            // removed on success).
+            var delBtn = tr.querySelector('[data-act="del"]');
+            var delBtnLabel = '';
+            if (delBtn) {
+                delBtnLabel = delBtn.textContent;
+                delBtn.disabled = true;
+                delBtn.textContent = '⏳';
+            }
+            var sDel = $('tunes-status');
+            if (sDel) { sDel.textContent = 'Deleting "' + print + '"…'; sDel.className = 'status-msg'; }
+            try {
+                if (key) await api('/admin-tts-config.php', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'delete_tune', tts_tune_key: key }) });
+                tr.remove();
+                if (sDel) { sDel.textContent = 'Deleted "' + print + '"'; sDel.className = 'status-msg success'; }
+            } catch (e) {
+                if (delBtn) { delBtn.disabled = false; delBtn.textContent = delBtnLabel || '×'; }
+                if (sDel) { sDel.textContent = 'Delete failed: ' + e.message; sDel.className = 'status-msg error'; }
+            }
         } else if (act === 'listen') {
+            // Disable the button and show a spinner while the preview is
+            // generated — Chatterbox / Azure synths take 1–4s, and without
+            // feedback the user assumes the click didn't register and
+            // keeps clicking. Restored in the finally block.
+            var listenBtn = tr.querySelector('[data-act="listen"]');
+            var listenBtnLabel = '';
+            if (listenBtn) {
+                listenBtnLabel = listenBtn.textContent;
+                listenBtn.disabled = true;
+                listenBtn.textContent = '⏳';
+                listenBtn.dataset.busy = '1';
+            }
             // Flush any pending autosave so the latest typed values are
             // committed — though the preview now uses the form values
             // directly via tune_override, the save keeps the DB in sync.
+            try {
             await saveTuneRow(tr);
             if (!print) return;
             // Read the row's current form values rather than what's saved
@@ -2923,6 +3258,16 @@ async function handleTuneAction(tr, act) {
             });
             var a = tunesAudio || $('preview-audio');
             a.src = URL.createObjectURL(blob); a.style.display='block'; a.play();
+            } finally {
+                // Restore the ▶ button regardless of success or error
+                // (saveTuneRow throw, API error, browser autoplay block,
+                // anything).
+                if (listenBtn) {
+                    listenBtn.disabled = false;
+                    listenBtn.textContent = listenBtnLabel || '▶';
+                    delete listenBtn.dataset.busy;
+                }
+            }
         }
     } catch (e) {
         $('tunes-status').textContent = 'Error: ' + e.message; $('tunes-status').className='status-msg error';
@@ -3101,19 +3446,129 @@ async function loadVolumes() {
 }
 
 var ACTIVE_VOLUME_CODE = '';   // URL slug like "YY-s02v03-Yada-Yahowah-Beyth-In-the-Family"
+// Multi-tab leader election. Only one tab on this origin polls at a time;
+// other tabs go silent until the leader closes. Each tab writes its
+// last-seen heartbeat into localStorage; the leader is whichever tab
+// posted the most recent heartbeat. This stops the "Chrome aborts fetches
+// because we hit the 6-per-origin limit" failure mode that was making
+// s02v04 (and any volume with running/pending chapters) refuse to load
+// when several admin-tts tabs were open.
+var _TAB_ID = String(Math.random()).slice(2) + '_' + Date.now();
+function _heartbeatTabs() {
+    try {
+        localStorage.setItem('admin-tts.tab.' + _TAB_ID, String(Date.now()));
+        // Garbage-collect heartbeats older than 12 seconds.
+        for (var i = localStorage.length - 1; i >= 0; i--) {
+            var k = localStorage.key(i);
+            if (k && k.indexOf('admin-tts.tab.') === 0) {
+                if ((Date.now() - parseInt(localStorage.getItem(k), 10)) > 12000) {
+                    localStorage.removeItem(k);
+                }
+            }
+        }
+    } catch (e) {}
+}
+function _isPollLeader() {
+    _heartbeatTabs();
+    try {
+        var bestKey = null, bestTime = 0;
+        for (var i = localStorage.length - 1; i >= 0; i--) {
+            var k = localStorage.key(i);
+            if (k && k.indexOf('admin-tts.tab.') === 0) {
+                var t = parseInt(localStorage.getItem(k), 10) || 0;
+                // Pick the LOWEST tab id as leader to make it deterministic
+                // (avoid leader-flapping when two tabs heartbeat at the
+                // same ms).
+                var thisId = k.slice('admin-tts.tab.'.length);
+                if (bestKey === null || thisId < bestKey) { bestKey = thisId; bestTime = t; }
+            }
+        }
+        return bestKey === _TAB_ID;
+    } catch (e) { return true; }
+}
+setInterval(_heartbeatTabs, 5000); // even non-leader tabs keep their heartbeat fresh
+_heartbeatTabs();
+
 async function loadChapters(volumeKey) {
     if (POLL_TIMER) { clearInterval(POLL_TIMER); POLL_TIMER = null; }
     ACTIVE_VOLUME = volumeKey;
-    if (!volumeKey) { $('chapters-table').style.display = 'none'; $('volume-summary').textContent=''; return; }
-    var r = await api('/admin-tts-books.php?action=chapters&volume_key=' + volumeKey + '&tts_key=' + TTS_KEY);
+    var allBtn = $('build-all-btn');
+    if (!volumeKey) {
+        $('chapters-table').style.display = 'none'; $('volume-summary').textContent='';
+        if (allBtn) allBtn.disabled = true;
+        return;
+    }
+    // Only clear the table when this is a fresh volume switch (different
+    // volume_key than what we're currently showing). For the recurring
+    // polling case on the same volume, leave the existing chapter rows
+    // and expanded panels in place — they'll get updated in-place by
+    // renderChapters, which snapshots+restores the panel contents.
+    // Without this guard, every 5s poll wiped the table to "Loading…",
+    // the snapshot ran on the empty placeholder, and the user's open
+    // paragraph panel collapsed on every poll.
+    var isVolumeSwitch = (volumeKey !== _PREV_VOLUME_KEY);
+    if (isVolumeSwitch) {
+        CHAPTERS = [];
+        _CHAPTER_ROWS_SIG = '';
+        $('chapters-tbody').innerHTML = '<tr><td colspan="7" style="padding:14px;color:#888;text-align:center;">Loading chapters…</td></tr>';
+        $('volume-summary').textContent = 'Loading…';
+        if (allBtn) allBtn.disabled = true;
+    }
+    _PREV_VOLUME_KEY = volumeKey;
+    var r;
+    try {
+        r = await api('/admin-tts-books.php?action=chapters&volume_key=' + volumeKey + '&tts_key=' + TTS_KEY);
+    } catch (e) {
+        $('chapters-tbody').innerHTML =
+            '<tr><td colspan="7" style="padding:18px;color:#b73d3d;text-align:center;font-size:0.9rem;line-height:1.5;">' +
+              'Couldn\'t load chapters: <strong>' + escapeHtml(e && e.message ? e.message : String(e)) + '</strong>' +
+              '<br><span style="font-size:0.8rem;color:#888;">Likely cause: multiple admin-tts tabs open piling up requests, or network drop. Close other admin tabs and reload, or try Incognito mode. The TTS workers are not affected.</span>' +
+              '<br><button onclick="loadChapters(' + volumeKey + ')" style="margin-top:10px;background:#31345A;color:#fff;border:0;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;">Retry</button>' +
+            '</td></tr>';
+        if (allBtn) allBtn.disabled = false;
+        return;
+    }
     CHAPTERS = r.chapters || [];
     ACTIVE_VOLUME_CODE = (r.volume && r.volume.volume_code) || '';
     $('volume-summary').textContent = (r.volume.volume_label || '') + ' — ' + CHAPTERS.length + ' chapters';
+    if (allBtn) allBtn.disabled = false;
     $('chapters-table').style.display = '';
+    // Lazy-load paragraph counts in parallel — initial render happens
+    // immediately with the placeholder "—" for each row's Paragraphs cell.
+    // When the counts arrive, we patch each row's cell in place so the
+    // poll diff doesn't have to re-render anything.
+    fetch(API + '/admin-tts-books.php?action=chapter_paragraph_counts&volume_key=' + volumeKey, { credentials:'include' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+          if (!d || !d.counts) return;
+          if (volumeKey !== ACTIVE_VOLUME) return;  // user switched while we waited
+          CHAPTERS.forEach(function (c) {
+              var n = d.counts[c.chapter_key];
+              if (n != null) c.paragraph_count = n;
+              // Patch the existing row's Paragraphs cell in-place.
+              var row = document.querySelector('#chapters-tbody tr[data-ck="' + c.chapter_key + '"]:not(.paragraph-expand-row)');
+              if (row) {
+                  var paraCell = row.children[2];  // # | Label | Paragraphs | …
+                  if (paraCell) paraCell.textContent = (n != null ? n : 0);
+              }
+          });
+      })
+      .catch(function () {});
     renderChapters();
     // Poll while anything is running.
+    // Poll while anything is in motion. 'paused' is a settled state — no
+    // worker is running — so we don't poll for it (the user will trigger
+    // the next state change via Resume/Restart). Pause-requested rows show
+    // status='paused' as soon as the worker exits, which the next manual
+    // reload picks up; if the user clicked Pause while a build was running,
+    // the existing 'running' poll will catch the transition.
     if (CHAPTERS.some(c => c.tts_audio_status === 'running' || c.tts_audio_status === 'pending')) {
-        POLL_TIMER = setInterval(() => loadChapters(ACTIVE_VOLUME), 3000);
+        // Only the leader tab polls. Non-leader tabs go silent.
+        if (_isPollLeader()) {
+            POLL_TIMER = setInterval(function () {
+                if (_isPollLeader()) loadChapters(ACTIVE_VOLUME);
+            }, 5000);
+        }
     }
 }
 
@@ -3148,11 +3603,32 @@ function closeTtsError() {
     if (ov) ov.style.display = 'none';
 }
 
+var _CHAPTER_ROWS_SIG = '';   // last-rendered full-table fingerprint; skip render if unchanged
+var _PREV_VOLUME_KEY = 0;     // last volume_key passed to loadChapters; used to detect actual switches vs same-volume polls
 function renderChapters() {
     var tb = $('chapters-tbody');
-    tb.innerHTML = '';
+    // Reverted to a simple "build all rows then one innerHTML swap" path.
+    // The earlier per-row diff was over-engineered; it introduced subtle
+    // bugs that left the table blank under some conditions. We preserve
+    // expand-panel HTML across the swap so the audio elements don't get
+    // recreated, which was the original motivation for the diff. Diff
+    // can be re-introduced later with proper testing.
+    var panelSnapshots = {};
+    tb.querySelectorAll('tr.paragraph-expand-row').forEach(function (row) {
+        if (row.style.display !== 'none') {
+            var grid = row.querySelector('.paragraph-grid');
+            if (grid) panelSnapshots[row.dataset.ak] = grid.innerHTML;
+        }
+    });
+    var fullSig = JSON.stringify(CHAPTERS.map(function (c) {
+        return [c.chapter_key, c.tts_audio_status || 'none', c.tts_audio_progress || 0,
+                c.tts_audio_message || '', c.tts_audio_error || '', c.tts_audio_path || '',
+                c.tts_audio_failed_paragraphs || '', c.paragraph_count || 0];
+    }));
+    if (fullSig === _CHAPTER_ROWS_SIG) return;
+    _CHAPTER_ROWS_SIG = fullSig;
+    var buf = '';
     CHAPTERS.forEach(c => {
-        var tr = document.createElement('tr');
         var st = c.tts_audio_status || 'none';
         var badge;
         if (st === 'failed') {
@@ -3174,14 +3650,37 @@ function renderChapters() {
             badge = '<span class="badge badge-' + st + '">' + st + '</span>';
         }
         var progress = '';
-        if (st === 'running' || st === 'pending') {
+        if (st === 'running' || st === 'pending' || st === 'paused') {
             progress = '<div class="progress"><span class="fill" style="width:' + (c.tts_audio_progress || 0) + '%"></span></div>';
         }
         var audio = '';
         if (st === 'complete' && c.tts_audio_path) {
             audio = '<audio controls preload="none" style="width:305px;height:28px" src="' + escapeHtml(c.tts_audio_path) + '"></audio>';
         }
-        var actions = '<button class="btn-sm" onclick="openBuildModal(' + c.chapter_key + ',' + (c.tts_audio_key || 'null') + ')">' + (st === 'complete' ? 'Rebuild' : st === 'none' ? 'Build' : 'Settings') + '</button>';
+        // 'running' / 'pending' rows hide the primary button entirely —
+        // openBuildModal → startBuild → start action wipes the parts cache
+        // and re-queues, which isn't what an in-flight chapter wants. The
+        // dedicated Pause / Cancel buttons below cover the in-flight cases.
+        // 'failed' and 'paused' keep Settings because the admin may legitimately
+        // want to tweak voice config before retrying / restarting.
+        var actions = '';
+        if (st !== 'running' && st !== 'pending') {
+            var primaryLabel = (st === 'complete') ? 'Rebuild'
+                             : (st === 'none')     ? 'Build'
+                             :                       'Settings';
+            actions = '<button class="btn-sm" onclick="openBuildModal(' + c.chapter_key + ',' + (c.tts_audio_key || 'null') + ')">' + primaryLabel + '</button>';
+        }
+        // Paused: offer Resume (continue from next paragraph) + Restart
+        // (wipe parts and start from the beginning). The Settings button
+        // above still opens the build modal for voice tweaks before resume.
+        if (st === 'paused' && c.tts_audio_key) {
+            actions += ' <button class="btn-sm" style="background:#2e7d32;color:#fff;" '
+                     + 'title="Continue from the next paragraph using the cached audio for completed paragraphs" '
+                     + 'onclick="resumeBuild(' + c.tts_audio_key + ')">▶ Resume</button>';
+            actions += ' <button class="btn-sm" style="background:#b85c00;color:#fff;" '
+                     + 'title="Discard cached paragraphs and rebuild this chapter from scratch" '
+                     + 'onclick="restartBuild(' + c.tts_audio_key + ',' + c.chapter_number + ')">↻ Restart</button>';
+        }
         // Retry-failed button — visible only when a completed build has
         // outstanding paragraph failures cached for re-synth. Postgres
         // ships int[] as '{44,45}' over PDO; parse to count for the label.
@@ -3197,6 +3696,9 @@ function renderChapters() {
             }
         }
         if (st === 'running' || st === 'pending') {
+            actions += ' <button class="btn-sm" style="background:#5c4a8a;color:#fff;" '
+                     + 'title="Stop after the current paragraph; cached paragraphs are kept for later Resume" '
+                     + 'onclick="pauseBuild(' + c.tts_audio_key + ')">⏸ Pause</button>';
             actions += '<button class="btn-sm btn-del" onclick="cancelBuild(' + c.tts_audio_key + ')">Cancel</button>';
         } else if (c.tts_audio_key) {
             // Delete button — wipes the row, markers, MP3, parts cache.
@@ -3217,30 +3719,239 @@ function renderChapters() {
         } else {
             readCell = '<span style="color:#bbb;" title="No flipbook page configured for this chapter">—</span>';
         }
-        tr.innerHTML =
-            '<td>' + escapeHtml(c.chapter_number) + '</td>' +
-            '<td>' + escapeHtml(c.chapter_label || '') + (c.tts_audio_message ? '<div style="font-size:0.78rem;color:#888">' + escapeHtml(c.tts_audio_message) + '</div>' : '') + '</td>' +
-            '<td>' + escapeHtml(c.paragraph_count || 0) + '</td>' +
-            '<td style="white-space:nowrap;">' + readCell + '</td>' +
-            '<td>' + badge + progress + '</td>' +
-            '<td>' + audio + '</td>' +
-            '<td class="col-actions">' + actions + '</td>';
-        tb.appendChild(tr);
+        // Expand caret — only meaningful when there's an audio row
+        // (existing tts_audio_key). Click toggles a sub-<tr> that fetches
+        // /admin-tts-build.php?action=list_paragraphs and renders the
+        // per-paragraph mini-table inline.
+        var caret = c.tts_audio_key
+            ? '<span class="expand-caret" data-ak="' + c.tts_audio_key + '" data-ck="' + c.chapter_key + '" onclick="toggleChapterParas(this)" style="cursor:pointer;color:#31345A;font-weight:700;user-select:none;display:inline-block;width:14px;">▸</span> '
+            : '';
+        buf += '<tr data-ck="' + c.chapter_key + '">'
+            + '<td>' + caret + escapeHtml(c.chapter_number) + '</td>'
+            + '<td>' + escapeHtml(c.chapter_label || '') + (c.tts_audio_message ? '<div style="font-size:0.78rem;color:#888">' + escapeHtml(c.tts_audio_message) + '</div>' : '') + '</td>'
+            + '<td>' + (c.paragraph_count != null ? escapeHtml(c.paragraph_count) : '<span style="color:#bbb;">—</span>') + '</td>'
+            + '<td style="white-space:nowrap;">' + readCell + '</td>'
+            + '<td>' + badge + progress + '</td>'
+            + '<td>' + audio + '</td>'
+            + '<td class="col-actions">' + actions + '</td>'
+            + '</tr>';
+        if (c.tts_audio_key) {
+            buf += '<tr class="paragraph-expand-row" data-ck="' + c.chapter_key + '" data-ak="' + c.tts_audio_key + '" style="display:none;">'
+                 + '<td colspan="7" style="background:#f7f7fa;padding:8px 14px;">'
+                 +    '<div class="paragraph-grid">Loading paragraphs…</div>'
+                 + '</td></tr>';
+        }
     });
+    // Single DOM swap. Then restore expanded panel contents so audio
+    // elements that were already playing keep their state.
+    tb.innerHTML = buf;
+    Object.keys(panelSnapshots).forEach(function (ak) {
+        var row = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"]');
+        if (!row) return;
+        row.style.display = '';
+        var grid = row.querySelector('.paragraph-grid');
+        if (grid) grid.innerHTML = panelSnapshots[ak];
+        var caret = document.querySelector('.expand-caret[data-ak="' + ak + '"]');
+        if (caret) caret.textContent = '▾';
+    });
+}
+
+window._expandedAudioKeys = window._expandedAudioKeys || new Set();
+
+async function toggleChapterParas(el, forceOpen) {
+    var ak = +el.dataset.ak;
+    var row = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"]');
+    if (!row) return;
+    var willOpen = forceOpen || row.style.display === 'none';
+    row.style.display = willOpen ? '' : 'none';
+    el.textContent = willOpen ? '▾' : '▸';
+    if (willOpen) {
+        window._expandedAudioKeys.add(ak);
+        await loadParagraphRows(ak, row.querySelector('.paragraph-grid'));
+    } else {
+        window._expandedAudioKeys.delete(ak);
+    }
+}
+
+async function loadParagraphRows(ak, container) {
+    if (!container) return;
+    container.innerHTML = 'Loading paragraphs…';
+    try {
+        var r = await api('/admin-tts-build.php?action=list_paragraphs&tts_audio_key=' + ak);
+        var rows = (r && r.paragraphs) || [];
+        if (!rows.length) { container.textContent = 'No paragraphs found.'; return; }
+        var doneCount = rows.filter(function (p) { return p.has_part; }).length;
+        var html = '<div style="margin-bottom:6px;display:flex;align-items:center;gap:10px;font-size:0.8rem;color:#666;">'
+                 +   '<span>' + doneCount + ' of ' + rows.length + ' synthesised</span>'
+                 +   '<a href="#" onclick="event.preventDefault();loadParagraphRows(' + ak + ',this.closest(\'.paragraph-grid\'));" '
+                 +      'style="color:#31345A;text-decoration:none;font-weight:600;">↻ Refresh list</a>'
+                 + '</div>'
+                 + '<table class="paragraph-mini-table" style="width:100%;border-collapse:collapse;font-size:0.83rem;">'
+                 + '<thead><tr style="border-bottom:1px solid #ccd;">'
+                 +   '<th style="width:42px;text-align:right;padding:2px 6px;" title="Position in this chapter (1-based)">#</th>'
+                 +   '<th style="width:46px;padding:2px 6px;" title="paragraph_number column on yy_paragraph (unique per volume)">p#</th>'
+                 +   '<th style="width:46px;padding:2px 6px;">page</th>'
+                 +   '<th style="padding:2px 6px;">text</th>'
+                 +   '<th style="width:235px;padding:2px 6px;">audio</th>'
+                 +   '<th style="width:130px;padding:2px 6px;"></th>'
+                 + '</tr></thead><tbody>';
+        rows.forEach(function (p, posInChapter) {
+            var rowStyle = p.is_skipped ? 'opacity:0.55;background:#fdf2f2;' :
+                           p.is_failed  ? 'background:#fff5e6;' : '';
+            html += '<tr style="border-bottom:1px solid #eee;' + rowStyle + '">'
+                 +   '<td style="text-align:right;padding:3px 6px;color:#222;font-weight:600;" title="Position in chapter (= part-file index)">' + (posInChapter + 1) + '</td>'
+                 +   '<td style="text-align:right;padding:3px 6px;color:#888;font-size:0.78rem;" title="paragraph_number — unique per volume">' + p.paragraph_number + '</td>'
+                 +   '<td style="padding:3px 6px;color:#666;">' + (p.paragraph_page == null ? '—' : p.paragraph_page) + '</td>'
+                 +   '<td style="padding:3px 6px;">'
+                 +     (p.is_table ? '<span title="parser flagged as table; auto-skipped" style="color:#888;font-style:italic;font-size:0.78rem;">[table] </span>' : '')
+                 +     (p.is_skipped ? '<span title="excluded by Delete" style="color:#c0392b;font-weight:600;font-size:0.78rem;">[skipped] </span>' : '')
+                 +     escapeHtml(p.preview || '')
+                 +   '</td>'
+                 +   '<td style="padding:3px 6px;">'
+                 +     (p.has_part
+                          ? '<audio controls preload="none" style="width:225px;height:24px;vertical-align:middle;" src="' + escapeHtml(p.part_url) + '"></audio>'
+                          : '<span style="color:#bbb;font-size:0.78rem;">— not yet synthesised —</span>')
+                 +   '</td>'
+                 +   '<td style="padding:3px 6px;text-align:right;white-space:nowrap;">'
+                 +     '<button class="btn-sm" title="Delete the cached audio so the worker re-synths this paragraph" onclick="redoParagraph(' + ak + ',' + p.idx + ')">↻ Redo</button>'
+                 +     ' <button class="btn-sm btn-del" title="Skip this paragraph in all future builds of this chapter" onclick="deleteParagraph(' + ak + ',' + p.idx + ',' + p.paragraph_number + ')">×</button>'
+                 +   '</td>'
+                 + '</tr>';
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (e) {
+        container.textContent = 'Failed to load: ' + (e.message || e);
+    }
+}
+
+async function redoParagraph(ak, idx) {
+    var btn = event && event.target && event.target.closest('button');
+    var origText = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+    try {
+        var res = await api('/admin-tts-build.php?action=redo_paragraph', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ action:'redo_paragraph', tts_audio_key: ak, idx: idx }),
+        });
+        // Brief flash so the user sees the action took. The auto-refresh of
+        // the panel below will then show the part file gone + the worker's
+        // updated state in the chapter row.
+        if (btn) { btn.textContent = res.requeued ? '✓ queued' : '✓'; }
+    } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = origText || '↻ Redo'; }
+        alert('Redo failed: ' + (e.message || e));
+        return;
+    }
+    var container = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"] .paragraph-grid');
+    if (container) await loadParagraphRows(ak, container);
+    loadChapters(ACTIVE_VOLUME);
+    if (btn) setTimeout(function () { btn.disabled = false; btn.textContent = origText || '↻ Redo'; }, 1500);
+}
+
+async function deleteParagraph(ak, idx, paragraphNumber) {
+    if (!confirm('Skip paragraph #' + paragraphNumber + ' in future builds of this chapter?\n\nThis deletes its current audio AND adds it to the chapter\'s skip list. Undo by Redo on the same row.')) return;
+    try {
+        await api('/admin-tts-build.php?action=delete_paragraph', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ action:'delete_paragraph', tts_audio_key: ak, idx: idx, paragraph_number: paragraphNumber }),
+        });
+    } catch (e) { alert('Delete failed: ' + (e.message || e)); return; }
+    var container = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"] .paragraph-grid');
+    if (container) loadParagraphRows(ak, container);
+}
+
+// Populate the format <select> from CATALOG.formats with the system
+// default pre-selected. Shared by the single-chapter and build-all modals.
+function populateBuildFormat(selectEl) {
+    selectEl.innerHTML = '';
+    CATALOG.formats.forEach(f => {
+        var o = document.createElement('option');
+        o.value = f.code; o.textContent = f.label;
+        selectEl.appendChild(o);
+    });
+    selectEl.value = STATE.system && STATE.system.tts_output_format
+        ? STATE.system.tts_output_format
+        : 'audio-24khz-48kbitrate-mono-mp3';
+}
+
+// Build the per-category voice/style/prosody grid into `root`. Shared by
+// the single-chapter and build-all modals. Returns nothing — callers
+// later read overrides back out via collectBuildOverrides(root).
+function renderBuildCategoryRows(root) {
+    root.innerHTML = '';
+    CATALOG.categories.forEach(cat => {
+        var saved = STATE.categories[cat.code] || {};
+        var row = document.createElement('div');
+        row.className = 'voice-row';
+        row.style.gridTemplateColumns = '260px 1fr 160px auto';
+        var isParent = !cat.parent;
+        if (isParent) row.style.cssText += 'border-top:1px solid #ccd;margin-top:8px;padding-top:6px;';
+        var labelStyle = isParent
+            ? 'font-weight:700;color:#31345A;'
+            : 'padding-left:22px;color:#555;';
+        var voiceTitle = isParent
+            ? 'Voice for ' + cat.code
+            : 'Voice for ' + cat.code + ' (inherits ' + cat.parent + ' if unset)';
+        row.innerHTML =
+            '<label style="' + labelStyle + '">' + escapeHtml(cat.label) + '</label>' +
+            '<select data-cat="' + cat.code + '" data-field="voice" title="' + escapeHtml(voiceTitle) + '"></select>' +
+            '<select data-field="style" title="Speaking style — defaults to the Voices-tab setting"></select>' +
+            '<div class="prosody">' +
+                '<span style="display:inline-flex;align-items:center;gap:4px;">rate <input type="number" data-field="rate" min="-50" max="200" step="5" value="' + (saved.tts_voice_rate_pct || 0) + '"><span title="Percent — positive speeds the voice up, negative slows it down" style="margin-left:2px;cursor:help;">%</span></span>' +
+                '<span style="display:inline-flex;align-items:center;gap:4px;">pitch <input type="number" data-field="pitch" min="-12" max="12" step="0.1" value="' + (saved.tts_voice_pitch_st || 0) + '" style="width:73px"><span title="Semitones — 12 = one octave" style="margin-left:2px;cursor:help;">st</span></span>' +
+                '<span style="display:inline-flex;align-items:center;gap:4px;">vol <input type="number" data-field="volume" min="0" max="100" step="5" value="' + (saved.tts_voice_volume || 100) + '" style="width:60px"></span>' +
+            '</div>';
+        root.appendChild(row);
+        var voiceSel = row.querySelector('select[data-field="voice"]');
+        var blankOpt = document.createElement('option');
+        blankOpt.value = '';
+        blankOpt.textContent = cat.parent
+            ? '— inherit from ' + cat.parent + ' —'
+            : '— (use saved default) —';
+        voiceSel.appendChild(blankOpt);
+        CATALOG.voices.forEach(v => {
+            var o = document.createElement('option');
+            o.value = v.code; o.textContent = v.label;
+            o.dataset.styles = (v.styles || []).join(',');
+            voiceSel.appendChild(o);
+        });
+        voiceSel.value = saved.tts_voice_code || '';
+        var styleSel = row.querySelector('select[data-field="style"]');
+        populateStyleOptions(voiceSel, styleSel, saved.tts_voice_style || '');
+        voiceSel.addEventListener('change', function() { populateStyleOptions(voiceSel, styleSel, ''); });
+    });
+}
+
+// Read the override block out of a populated voice-row container. Same
+// shape as the single-chapter overrides object (cat → {voice_code, style,
+// rate_pct, pitch_st, volume}). admin-tts-build.php's start / start_all
+// actions both whitelist these keys when merging into the snapshot.
+function collectBuildOverrides(root) {
+    var overrides = {};
+    root.querySelectorAll('.voice-row').forEach(function (row) {
+        var sel = row.querySelector('select[data-field="voice"]');
+        if (!sel) return;
+        var styleSel = row.querySelector('select[data-field="style"]');
+        var rate = row.querySelector('input[data-field="rate"]');
+        var pitch = row.querySelector('input[data-field="pitch"]');
+        var vol = row.querySelector('input[data-field="volume"]');
+        overrides[sel.dataset.cat] = {
+            voice_code: sel.value,
+            style:      styleSel && styleSel.value ? styleSel.value : null,
+            rate_pct:   rate  ? parseInt(rate.value, 10)    || 0   : 0,
+            pitch_st:   pitch ? parseFloat(pitch.value)     || 0   : 0,
+            volume:     vol   ? parseInt(vol.value, 10)     || 100 : 100,
+        };
+    });
+    return overrides;
 }
 
 function openBuildModal(chapterKey, audioKey) {
     var ch = CHAPTERS.find(c => c.chapter_key === chapterKey);
     if (!ch) return;
     $('build-modal-title').textContent = 'Build audio — chapter ' + ch.chapter_number;
-    var fmt = $('build-format');
-    fmt.innerHTML = '';
-    CATALOG.formats.forEach(f => {
-        var o = document.createElement('option');
-        o.value = f.code; o.textContent = f.label;
-        fmt.appendChild(o);
-    });
-    fmt.value = STATE.system?.tts_output_format || 'audio-24khz-48kbitrate-mono-mp3';
+    populateBuildFormat($('build-format'));
 
     var root = $('build-category-rows');
     root.innerHTML = '';
@@ -3300,6 +4011,49 @@ function openBuildModal(chapterKey, audioKey) {
 
 function closeBuildModal() { $('build-modal').classList.remove('visible'); }
 
+function openBuildAllModal() {
+    if (!ACTIVE_VOLUME) return;
+    var vol = (window.VOLUMES || []).find(function (v) { return v.volume_key === ACTIVE_VOLUME; });
+    var label = vol ? vol.volume_label : ('volume ' + ACTIVE_VOLUME);
+    $('build-all-modal-title').textContent = 'Build all chapters — ' + label;
+    populateBuildFormat($('build-all-format'));
+    renderBuildCategoryRows($('build-all-category-rows'));
+    $('build-all-status').textContent = '';
+    $('build-all-status').className = 'status-msg';
+    $('build-all-scope').value = 'all';
+    $('build-all-modal').classList.add('visible');
+}
+function closeBuildAllModal() { $('build-all-modal').classList.remove('visible'); }
+
+async function startBuildAll() {
+    var btn = $('build-all-start-btn');
+    btn.disabled = true; $('build-all-status').textContent = 'Queuing…';
+    $('build-all-status').className = 'status-msg';
+    var overrides = collectBuildOverrides($('build-all-category-rows'));
+    try {
+        var res = await api('/admin-tts-build.php?action=start_all', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+                action:'start_all',
+                tts_key: TTS_KEY,
+                volume_key: ACTIVE_VOLUME,
+                scope: $('build-all-scope').value,
+                output_format: $('build-all-format').value,
+                voice_overrides: overrides,
+            }),
+        });
+        var msg = 'Queued ' + res.queued + ' chapter(s); ' + res.spawned + ' worker(s) started (cap ' + res.cap + ').';
+        if (res.queued === 0) msg = res.message || 'No chapters matched the scope filter.';
+        $('build-all-status').textContent = msg;
+        $('build-all-status').className = 'status-msg success';
+        setTimeout(closeBuildAllModal, 900);
+        loadChapters(ACTIVE_VOLUME);
+    } catch (e) {
+        $('build-all-status').textContent = 'Error: ' + e.message;
+        $('build-all-status').className = 'status-msg error';
+    } finally { btn.disabled = false; }
+}
+
 async function startBuild() {
     var btn = $('build-start-btn');
     btn.disabled = true; $('build-status').textContent = 'Queuing…';
@@ -3350,6 +4104,47 @@ async function cancelBuild(audioKey) {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ action:'cancel', tts_audio_key: audioKey }),
     });
+    loadChapters(ACTIVE_VOLUME);
+}
+
+// Pause at the next paragraph boundary. The worker checks tts_audio_status
+// at the start of each iteration; flipping to 'paused' here lets the
+// in-flight Azure synth complete and persist to the parts cache before
+// the worker exits cleanly. Resume picks up from the first missing part.
+async function pauseBuild(audioKey) {
+    try {
+        await api('/admin-tts-build.php?action=pause', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ action:'pause', tts_audio_key: audioKey }),
+        });
+    } catch (e) { alert('Pause failed: ' + (e.message || e)); }
+    loadChapters(ACTIVE_VOLUME);
+}
+
+// Resume a paused build. The worker scans the parts cache on startup and
+// jumps straight to the first paragraph index that isn't cached — no
+// re-synthesising completed paragraphs, no per-paragraph Azure charge.
+async function resumeBuild(audioKey) {
+    try {
+        await api('/admin-tts-build.php?action=resume', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ action:'resume', tts_audio_key: audioKey }),
+        });
+    } catch (e) { alert('Resume failed: ' + (e.message || e)); }
+    loadChapters(ACTIVE_VOLUME);
+}
+
+// Restart from scratch. Wipes the parts cache + markers and re-queues
+// the build. The original voice / format snapshot stored on the row is
+// preserved — same settings, fresh synthesis.
+async function restartBuild(audioKey, chapterNum) {
+    if (!confirm('Discard cached paragraphs and rebuild chapter ' + chapterNum + ' from scratch?\n\nThis re-runs Azure for every paragraph (full charge).')) return;
+    try {
+        await api('/admin-tts-build.php?action=restart', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ action:'restart', tts_audio_key: audioKey }),
+        });
+    } catch (e) { alert('Restart failed: ' + (e.message || e)); }
     loadChapters(ACTIVE_VOLUME);
 }
 
