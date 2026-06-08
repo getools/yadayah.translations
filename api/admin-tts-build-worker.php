@@ -674,16 +674,41 @@ foreach ($paragraphs as $idx => $p) {
     // chapter number announced. The configured __chapter_before__,
     // __chapter_between__, and __chapter_after__ pauses wrap the line.
     if ($idx === 0 && $chNum > 0) {
-        // Chapter opener: announce just the chapter number. The chapter
-        // title is repeated as paragraph idx=1 (the italic "Title ~ Subtitle"
-        // line that opens every YY chapter), so reading the title here too
-        // would have it spoken twice. The idx=1 italic-subhead handler
-        // below wraps the title paragraph with the right between/after
-        // pauses on its own.
-        $headingText =
-              "\x01PAUSE_0_{$pauseChapBefore}\x01"
-            . "Chapter $chNum"
-            . "\x01PAUSE_0_{$pauseChapAfter}\x01";
+        // Detect which YY structure variant this paragraph follows:
+        //
+        //   (A) Legacy:  idx=0 is JUST the chapter number ("1"), idx=1 is
+        //                the italic title line ("Babel ~ Confusion").
+        //   (B) Newer:   idx=0 merges the number AND the title on one
+        //                line ("1 Babel ~ Confusion"), idx=1 is the
+        //                italic *subtitle* ("Corrupting by Commingling…").
+        //
+        // Found in s02v03 chapter 1: paragraph #44 = "1 Babel ~ Confusion",
+        // paragraph #45 = "Corrupting by Commingling…". The old code path
+        // dropped everything after the number, so the title was never
+        // spoken (idx=1 was the subtitle, not the title — nothing read it).
+        //
+        // Rule: strip the leading "<num><sep>" prefix from the heading
+        // paragraph; if anything alphabetic remains, that's the title
+        // and it gets read after the "Chapter N" announcement. If only
+        // the number was present, the title comes through idx=1 as before.
+        $headingPlain = trim(preg_replace('/\s+/u', ' ', strip_tags($rawHtml)));
+        $remainder    = preg_replace('/^\s*' . preg_quote((string)$chNum, '/') . '\s*[.\-:)]?\s*/u', '', $headingPlain);
+        if ($remainder !== '' && $remainder !== $headingPlain && preg_match('/[\p{L}]/u', $remainder)) {
+            // (B) Newer structure — read "Chapter N" then the merged title.
+            $headingText =
+                  "\x01PAUSE_0_{$pauseChapBefore}\x01"
+                . "Chapter $chNum"
+                . "\x01PAUSE_0_{$pauseChapBetween}\x01"
+                . $remainder
+                . "\x01PAUSE_0_{$pauseChapAfter}\x01";
+        } else {
+            // (A) Legacy structure — heading paragraph IS just the number;
+            // the title is in idx=1 and will be wrapped by the subhead handler.
+            $headingText =
+                  "\x01PAUSE_0_{$pauseChapBefore}\x01"
+                . "Chapter $chNum"
+                . "\x01PAUSE_0_{$pauseChapAfter}\x01";
+        }
         $segs = [['category' => 'main', 'text' => $headingText]];
     } else if (isset($introOverrides[(int)$p['paragraph_number']])) {
         // Paragraph was pre-classified by one of the prepass detectors:
@@ -761,7 +786,12 @@ foreach ($paragraphs as $idx => $p) {
         foreach ($segs as $seg) {
             $pk = ttsResolveProviderKey($cfg, $seg['category']);
             $err = '';
-            if (ttsProviderUsesSsml($cfg, $pk)) {
+            $transport = ttsProviderTransport($cfg, $pk);
+            if ($transport === 'elevenlabs-cloud') {
+                $elSeg = buildLocalSegment($seg['text'], $cfg, $seg['category']);
+                $elSeg['provider_key'] = $pk;
+                $b = elevenlabsTtsSynthesize($cfg, $elSeg, $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3', $err);
+            } elseif ($transport === 'azure-ssml') {
                 $b = azureTtsSynthesizeRetry(wrapSsml(buildVoiceBlock($seg['text'], $cfg, $seg['category'])), $cfg, $err);
             } else {
                 // Sentence-chunk to keep each model.generate() call below the

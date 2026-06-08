@@ -787,6 +787,90 @@ function wrapSsml(string $voiceBlocks): string {
         . '</speak>';
 }
 
+/**
+ * Synthesize one segment via the ElevenLabs cloud TTS API. Same return
+ * contract as azureTtsSynthesize() / localTtsSynthesize(): mp3 bytes on
+ * success, '' with $err set on failure.
+ *
+ * Voice + model come from the provider row: tts_voice_code is the
+ * ElevenLabs voice_id (e.g. "21m00Tcm4TlvDq8ikWAM"), provider_model_id
+ * names the synthesis model ("eleven_v3" / "eleven_turbo_v2_5"). When
+ * the model is v3 we pass any inline audio tags through verbatim — they
+ * survive the buildLocalSegment normalisation that already strips SSML
+ * for non-SSML providers. Turbo gets plain text.
+ *
+ * Rate/pitch from the per-category prosody knobs map onto ElevenLabs's
+ * `voice_settings.speed` (Turbo accepts it; v3 ignores it gracefully) and
+ * we leave stability/similarity at the provider's saner defaults.
+ */
+function elevenlabsTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?string &$err = null): string {
+    $key = readEnv('ELEVENLABS_API_KEY');
+    if (!$key) { $err = 'ELEVENLABS_API_KEY not set in .env'; return ''; }
+
+    $prov = $cfg['providers'][$seg['provider_key']] ?? null;
+    if (!$prov) { $err = 'unknown provider_key ' . ($seg['provider_key'] ?? '?'); return ''; }
+    $modelId = (string)($prov['provider_model_id'] ?? 'eleven_turbo_v2_5');
+    $voiceId = (string)($seg['voice'] ?? '');
+    if ($voiceId === '') { $err = 'no voice_id on segment'; return ''; }
+
+    // Map our internal output_format hint to one ElevenLabs accepts via
+    // the `output_format` query param. ElevenLabs uses its own constant
+    // names; we pick the closest match per family.
+    $fmtMap = [
+        'mp3'  => 'mp3_44100_128',
+        'opus' => 'opus_48000_128',
+        'wav'  => 'pcm_24000',
+        'pcm'  => 'pcm_24000',
+    ];
+    $family = (strpos($outputFormat, 'opus') !== false) ? 'opus'
+            : ((strpos($outputFormat, 'pcm') !== false || strpos($outputFormat, 'wav') !== false) ? 'wav' : 'mp3');
+    $elFmt = $fmtMap[$family] ?? 'mp3_44100_128';
+
+    // Rate from category settings → 0.5–2.0 speed multiplier. Pitch can't
+    // map cleanly (ElevenLabs has no pitch knob today) so we just drop it.
+    $ratePct = (int)($seg['rate'] ?? 0);
+    $speed = max(0.5, min(2.0, 1.0 + ($ratePct / 100.0)));
+
+    $voiceSettings = ['stability' => 0.5, 'similarity_boost' => 0.75];
+    if ($modelId === 'eleven_turbo_v2_5' || $modelId === 'eleven_flash_v2_5') {
+        $voiceSettings['speed'] = $speed;
+    }
+
+    $payload = [
+        'text'           => (string)($seg['text'] ?? ''),
+        'model_id'       => $modelId,
+        'voice_settings' => $voiceSettings,
+    ];
+    if ($payload['text'] === '') { $err = 'empty text'; return ''; }
+
+    $url = 'https://api.elevenlabs.io/v1/text-to-speech/'
+         . rawurlencode($voiceId) . '?output_format=' . rawurlencode($elFmt);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_HTTPHEADER     => [
+            'xi-api-key: ' . $key,
+            'Content-Type: application/json',
+            'Accept: audio/mpeg',
+        ],
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_TIMEOUT        => 180,
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $cerr = curl_error($ch);
+    curl_close($ch);
+    if ($resp === false || $code >= 400) {
+        $body = $cerr ?: trim((string)$resp);
+        if ($body === '') $body = '[empty response]';
+        else $body = substr($body, 0, 400);
+        $err = "ElevenLabs TTS HTTP $code: $body";
+        return '';
+    }
+    return (string)$resp;
+}
+
 function azureTtsSynthesize(string $ssml, array $cfg, ?string &$err = null): string {
     $key = readEnv('AZURE_SPEECH_KEY');
     if (!$key) { $err = 'AZURE_SPEECH_KEY not set'; return ''; }
@@ -1163,6 +1247,24 @@ function ttsProviderUsesSsml(array $cfg, int $providerKey): bool {
     $p = $cfg['providers'][$providerKey] ?? null;
     if (!$p) return true;
     return (($p['provider_markup_format'] ?? 'ssml') === 'ssml');
+}
+
+/**
+ * Classify a provider by where its synthesis call lands:
+ *   'azure-ssml'        → azureTtsSynthesize via the SSML path
+ *   'elevenlabs-cloud'  → elevenlabsTtsSynthesize via the ElevenLabs HTTP API
+ *   'gpu-tailnet'       → localTtsSynthesize via the Puget gateway (Chatterbox / CosyVoice / Qwen3 / Kokoro)
+ *
+ * Used by preview + build worker to pick the right synth function. Unknown
+ * providers fall back to 'azure-ssml' (same safety as ttsProviderUsesSsml).
+ */
+function ttsProviderTransport(array $cfg, int $providerKey): string {
+    $p = $cfg['providers'][$providerKey] ?? null;
+    if (!$p) return 'azure-ssml';
+    $main = strtolower((string)($p['provider_main'] ?? ''));
+    if ($main === 'elevenlabs') return 'elevenlabs-cloud';
+    if (($p['provider_markup_format'] ?? 'ssml') === 'ssml') return 'azure-ssml';
+    return 'gpu-tailnet';
 }
 
 /**

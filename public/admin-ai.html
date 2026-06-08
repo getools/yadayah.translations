@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="page-version" content="1780948506">
+    <meta charset="UTF-8">
+    <title>AI — Yada Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="/favicon.ico">
+    <style>
+        :root { --fg:#222; --muted:#666; --line:#e2e2e2; --bg:#fafafa; --card:#fff; --accent:#31345A; --accent-hover:#252850; --ok:#1f883d; --warn:#c47a00; --err:#b3261e; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; background: var(--bg); color: var(--fg); }
+        header { background: var(--accent); color: #fff; padding: 14px 24px; display:flex; align-items:center; gap:16px; }
+        header h1 { font-size: 1.2rem; margin: 0; font-weight: 600; }
+        header nav a { color: #fff; opacity: 0.8; text-decoration: none; font-size: 0.88rem; margin-right: 12px; }
+        header nav a:hover { opacity: 1; text-decoration: underline; }
+        main { max-width: 1100px; margin: 0 auto; padding: 22px; }
+        section { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; margin-bottom: 18px; }
+        section h2 { font-size: 1rem; margin: 0 0 12px; color: #333; }
+        .desc { color: var(--muted); font-size: 0.85rem; margin: -4px 0 12px; }
+        label { font-weight: 600; font-size: 0.86rem; color:#444; display:block; margin: 10px 0 4px; }
+        input[type=text], textarea, input[type=number], select { width:100%; padding:7px 10px; border:1px solid #ccc; border-radius:4px; font:inherit; font-size:0.9rem; background:#fff; }
+        textarea { min-height: 70px; resize: vertical; }
+        button { background: var(--accent); color:#fff; border:none; border-radius:4px; padding:8px 16px; cursor:pointer; font-weight:600; font-size:0.9rem; }
+        button:hover { background: var(--accent-hover); }
+        button[disabled] { background:#888; cursor:wait; }
+        button.ghost { background:#eee; color:#333; }
+        button.ghost:hover { background:#ddd; }
+        button.danger { background:#b3261e; }
+        button.danger:hover { background:#922018; }
+        .tabs { display:flex; gap:4px; border-bottom: 2px solid var(--line); margin-bottom: 16px; }
+        .tab { background: transparent; color: #555; border: none; border-radius: 6px 6px 0 0; padding: 9px 18px; cursor: pointer; font-weight: 600; font-size: 0.95rem; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab:hover { background: #f0f0f3; color: var(--fg); }
+        .tab.active { color: var(--accent); border-bottom-color: var(--accent); background: #fff; }
+        .tab-panel { display: block; }
+        .tab-panel.hidden { display: none; }
+        .provider-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin: 6px 0 4px; }
+        .provider-card { border:1px solid var(--line); border-radius:6px; padding:10px 12px; cursor:pointer; background:#fcfcfc; position:relative; }
+        .provider-card.selected { border-color: var(--accent); background:#f4f5fb; box-shadow: 0 0 0 1px var(--accent) inset; }
+        .provider-card.offline { opacity: 0.55; cursor: not-allowed; }
+        .provider-card .pname { font-weight:600; font-size:0.92rem; }
+        .provider-card .pmeta { font-size:0.78rem; color: var(--muted); margin-top:3px; }
+        .provider-card .badge { position:absolute; top:8px; right:10px; font-size:0.7rem; padding:2px 6px; border-radius:10px; font-weight:600; }
+        .badge.on { background:#daf3e0; color: var(--ok); }
+        .badge.off { background:#eee; color:#777; }
+        .badge.in-flight { background:#fdf3da; color: var(--warn); }
+        .badge.done { background:#daf3e0; color: var(--ok); }
+        .badge.fail { background:#fbe1de; color: var(--err); }
+        .badge.cancelled { background:#eee; color:#666; }
+        .input-actions { display:flex; gap:8px; flex-wrap: wrap; margin-bottom:8px; }
+        .input-actions button { padding:5px 10px; font-size:0.82rem; }
+        .uploader { border:2px dashed #ccc; border-radius:6px; padding:18px; text-align:center; background:#fff; cursor:pointer; }
+        .uploader.drag { border-color: var(--accent); background:#f4f5fb; }
+        .uploader input[type=file] { display:none; }
+        .thumbs { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+        .thumb { position: relative; width: 92px; }
+        .thumb img { width:92px; height:92px; object-fit:cover; border-radius:4px; border:1px solid var(--line); display:block; }
+        .thumb .role { position:absolute; top:4px; left:4px; background:rgba(0,0,0,0.62); color:#fff; font-size:0.66rem; padding:1px 5px; border-radius:3px; }
+        .thumb .actions { position:absolute; top:4px; right:4px; display:flex; gap:3px; }
+        .thumb .actions button { background:#000a; color:#fff; border:none; width:18px; height:18px; border-radius:50%; cursor:pointer; padding:0; font-size:0.7rem; line-height:1; }
+        .thumb .source-tag { position:absolute; bottom:3px; left:3px; right:3px; background:rgba(0,0,0,0.6); color:#fff; font-size:0.62rem; padding:1px 4px; border-radius:3px; text-align:center; }
+        .params-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px 12px; align-items: end; }
+        .params-grid > div { display: flex; flex-direction: column; }
+        .params-grid label { margin: 0 0 3px; font-weight: 600; color:#555; font-size: 0.78rem; }
+        .jobs-table { width:100%; border-collapse: collapse; font-size: 0.88rem; }
+        .jobs-table th { text-align:left; font-weight:600; color:#555; padding:8px 8px; border-bottom: 1px solid var(--line); font-size:0.8rem; text-transform: uppercase; letter-spacing: 0.4px; }
+        .jobs-table td { padding:8px 8px; border-bottom: 1px solid #f1f1f1; vertical-align: top; }
+        .jobs-table tr.expanded > td { background: #fbfbfd; }
+        .progress { background:#eee; border-radius:3px; height:8px; min-width:80px; overflow:hidden; }
+        .progress > i { display:block; height:100%; background: var(--accent); transition: width 0.3s; }
+        .prompt-snip { color:#444; max-width: 340px; }
+        .row-detail { padding: 6px 8px 12px; background:#fbfbfd; font-size:0.85rem; color:#555; }
+        .row-detail video, .row-detail img { max-width: 240px; border:1px solid var(--line); border-radius:4px; margin: 6px 6px 0 0; vertical-align: top; }
+        .row-actions { display:flex; gap:6px; flex-wrap: wrap; }
+        .row-actions button { padding:4px 10px; font-size:0.78rem; }
+        .toast { position: fixed; bottom: 20px; right: 20px; background: var(--accent); color:#fff; padding: 12px 18px; border-radius:6px; font-size:0.88rem; z-index:5000; box-shadow: 0 4px 12px #0002; max-width: 360px; opacity: 0; transform: translateY(8px); transition: opacity 0.2s, transform 0.2s; }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.err { background: var(--err); }
+        .empty { color: var(--muted); font-style: italic; padding: 18px 8px; }
+        .small { font-size: 0.78rem; color: var(--muted); }
+        details { margin-top: 8px; }
+        details > summary { cursor: pointer; font-size: 0.84rem; color: var(--muted); padding: 4px 0; }
+        .modal-overlay { position:fixed; inset:0; background:#0009; z-index:6000; display:flex; align-items:center; justify-content:center; padding:24px; }
+        .modal-overlay.hidden { display:none; }
+        .modal { background:#fff; border-radius:8px; max-width:840px; width:100%; max-height:90vh; display:flex; flex-direction:column; overflow:hidden; }
+        .modal-header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; }
+        .modal-header h3 { margin:0; font-size:1rem; }
+        .modal-header .close-x { background:transparent; color:#666; border:none; font-size:1.4rem; padding:0; width:28px; cursor:pointer; }
+        .modal-body { padding:14px 18px; overflow-y:auto; flex:1; }
+        .picker-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+        .picker-cell { border:1px solid var(--line); border-radius:6px; overflow:hidden; cursor:pointer; background:#fcfcfc; }
+        .picker-cell:hover { border-color: var(--accent); }
+        .picker-cell .pthumb { width:100%; height:120px; background:#222; display:block; object-fit:cover; }
+        .picker-cell .pinfo { padding:6px 8px; font-size:0.74rem; color:#555; }
+        .picker-cell .pinfo .ptag { background: var(--accent); color:#fff; padding:1px 5px; border-radius:3px; font-weight:600; margin-right:4px; }
+        .picker-section { margin-bottom: 18px; }
+        .picker-section h4 { font-size:0.82rem; color:#777; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .mask-painter { position:relative; background:#222; display:inline-block; max-width:100%; }
+        .mask-painter canvas { display:block; max-width:100%; }
+        .mask-painter .canvas-base { position:absolute; inset:0; }
+        .mask-toolbar { padding:8px; display:flex; gap:8px; align-items:center; background:#f5f5f7; border-top:1px solid var(--line); }
+        .mask-toolbar label { margin:0; font-size:0.75rem; font-weight:500; }
+        .mask-toolbar input[type=range] { width:120px; }
+        .image-results { display:flex; flex-wrap:wrap; gap:6px; }
+        .image-results img { max-width:200px; max-height:200px; border:1px solid var(--line); border-radius:4px; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>AI</h1>
+    <nav>
+        <a href="/admin-tts.html">TTS</a>
+        <a href="/admin-books.html">Books</a>
+    </nav>
+</header>
+
+<main>
+    <div class="tabs">
+        <button class="tab active" data-tab="video">Video</button>
+        <button class="tab" data-tab="image">Image</button>
+    </div>
+
+    <div class="tab-panel" data-panel="video">
+        <section>
+            <h2>Image to Video</h2>
+
+            <label>Service</label>
+            <div id="video-providers" class="provider-grid"><div class="empty">Loading services…</div></div>
+
+            <label style="margin-top:14px">Input images</label>
+            <div class="input-actions">
+                <button class="ghost" data-act="pick" data-tab-target="video">Use previous output…</button>
+            </div>
+            <div class="desc" style="margin:0 0 6px">First image is the <em>start frame</em>; if a service supports first/last-frame mode and you add two, the second becomes the <em>end frame</em>.</div>
+            <div id="video-uploader" class="uploader" tabindex="0">
+                <div>Click or drop image files here (PNG / JPG / WebP)</div>
+                <input type="file" multiple accept="image/png,image/jpeg,image/webp">
+            </div>
+            <div id="video-thumbs" class="thumbs"></div>
+
+            <label style="margin-top:14px">Prompt</label>
+            <textarea data-field="prompt" placeholder="A slow cinematic camera move, golden hour, dust motes…"></textarea>
+
+            <label style="margin-top:10px">Negative prompt (optional)</label>
+            <textarea data-field="negative" placeholder="low quality, watermark, text…"></textarea>
+
+            <label style="margin-top:14px">Video parameters</label>
+            <div class="desc" style="margin:-2px 0 8px">Common-denominator knobs every service accepts. <span data-hint="duration" class="small" style="display:block;margin-top:2px;"></span></div>
+            <div class="params-grid">
+                <div><label>Duration (sec)</label><input type="number" data-p="duration_sec" min="1" max="30" step="0.5" value="4"></div>
+                <div><label>Width (px)</label><input type="number" data-p="width" min="256" max="2048" step="16" value="720"></div>
+                <div><label>Height (px)</label><input type="number" data-p="height" min="256" max="2048" step="16" value="480"></div>
+                <div><label>FPS</label><input type="number" data-p="fps" min="8" max="60" step="1" value="16"></div>
+                <div><label>Seed</label><input type="number" data-p="seed" placeholder="random"></div>
+                <div><label>Inference steps</label><input type="number" data-p="num_inference_steps" min="1" max="200" step="1" value="30"></div>
+                <div><label>Guidance scale</label><input type="number" data-p="guidance_scale" min="0" max="20" step="0.5" value="5"></div>
+            </div>
+            <details style="margin-top:12px">
+                <summary>Advanced parameters (raw JSON; merged over the structured fields)</summary>
+                <textarea data-field="adv-params" placeholder='{"scheduler": "ddim"}' style="font-family: ui-monospace, Menlo, monospace; min-height: 64px;"></textarea>
+            </details>
+
+            <div style="margin-top:16px; display:flex; gap:10px; align-items:center;">
+                <button data-act="submit">Generate video</button>
+                <span data-slot="submit-status" class="small"></span>
+            </div>
+        </section>
+
+        <section>
+            <h2>Recent video jobs</h2>
+            <table class="jobs-table">
+                <thead>
+                    <tr><th style="width:50px">#</th><th style="width:120px">Service</th><th>Prompt</th><th style="width:110px">Status</th><th style="width:160px">Progress</th><th style="width:110px">Started</th></tr>
+                </thead>
+                <tbody data-slot="jobs"><tr><td colspan="6"><div class="empty">No jobs yet.</div></td></tr></tbody>
+            </table>
+        </section>
+    </div>
+
+    <div class="tab-panel hidden" data-panel="image">
+        <section>
+            <h2>Text to Image</h2>
+
+            <label>Service</label>
+            <div id="image-providers" class="provider-grid"><div class="empty">Loading services…</div></div>
+
+            <label style="margin-top:14px">Starter image (optional — img2img / inpainting)</label>
+            <div class="input-actions">
+                <button class="ghost" data-act="pick" data-tab-target="image">Use previous output…</button>
+            </div>
+            <div class="desc" style="margin:0 0 6px">Skip to generate from prompt only. Add an image to do img2img; add a mask to inpaint a region.</div>
+            <div id="image-uploader" class="uploader" tabindex="0">
+                <div>Click or drop an image (optional)</div>
+                <input type="file" multiple accept="image/png,image/jpeg,image/webp">
+            </div>
+            <div id="image-thumbs" class="thumbs"></div>
+
+            <label style="margin-top:14px">Prompt</label>
+            <textarea data-field="prompt" placeholder="A tabby cat reading a leather-bound book by candlelight, photorealistic"></textarea>
+
+            <label style="margin-top:10px">Negative prompt (optional)</label>
+            <textarea data-field="negative" placeholder="low quality, blurry, watermark, text…"></textarea>
+
+            <label style="margin-top:14px">Image parameters</label>
+            <div class="desc" style="margin:-2px 0 8px">Common knobs every service accepts. <span data-hint="dim" class="small" style="display:block;margin-top:2px;"></span></div>
+            <div class="params-grid">
+                <div>
+                    <label>Aspect</label>
+                    <select data-p="aspect">
+                        <option value="1:1">Square 1:1</option>
+                        <option value="16:9">Landscape 16:9</option>
+                        <option value="9:16">Portrait 9:16</option>
+                        <option value="4:3">Photo 4:3</option>
+                        <option value="3:4">Photo 3:4</option>
+                        <option value="custom">Custom (use W/H)</option>
+                    </select>
+                </div>
+                <div><label>Width (px)</label><input type="number" data-p="width" min="256" max="2048" step="16" value="1024"></div>
+                <div><label>Height (px)</label><input type="number" data-p="height" min="256" max="2048" step="16" value="1024"></div>
+                <div><label>Images (1-4)</label><input type="number" data-p="n_images" min="1" max="4" step="1" value="1"></div>
+                <div>
+                    <label>Style</label>
+                    <select data-p="style">
+                        <option value="">None</option>
+                        <option value="photo">Photorealistic</option>
+                        <option value="illustration">Illustration</option>
+                        <option value="anime">Anime</option>
+                        <option value="3d">3D Render</option>
+                        <option value="oil-painting">Oil Painting</option>
+                        <option value="watercolor">Watercolor</option>
+                        <option value="line-art">Line Art</option>
+                    </select>
+                </div>
+                <div>
+                    <label>Format</label>
+                    <select data-p="format">
+                        <option value="png">PNG</option>
+                        <option value="jpg">JPG</option>
+                        <option value="webp">WebP</option>
+                    </select>
+                </div>
+                <div><label>Seed</label><input type="number" data-p="seed" placeholder="random"></div>
+                <div><label>Inference steps</label><input type="number" data-p="num_inference_steps" min="1" max="100" step="1" value="28"></div>
+                <div><label>Guidance scale</label><input type="number" data-p="guidance_scale" min="0" max="20" step="0.5" value="3.5"></div>
+            </div>
+
+            <details style="margin-top:12px">
+                <summary>Advanced parameters (raw JSON; merged over the structured fields)</summary>
+                <textarea data-field="adv-params" placeholder='{"scheduler": "euler"}' style="font-family: ui-monospace, Menlo, monospace; min-height: 64px;"></textarea>
+            </details>
+
+            <div style="margin-top:16px; display:flex; gap:10px; align-items:center;">
+                <button data-act="submit">Generate image</button>
+                <span data-slot="submit-status" class="small"></span>
+            </div>
+        </section>
+
+        <section>
+            <h2>Recent image jobs</h2>
+            <table class="jobs-table">
+                <thead>
+                    <tr><th style="width:50px">#</th><th style="width:120px">Service</th><th>Prompt</th><th style="width:110px">Status</th><th style="width:160px">Progress</th><th style="width:110px">Started</th></tr>
+                </thead>
+                <tbody data-slot="jobs"><tr><td colspan="6"><div class="empty">No jobs yet.</div></td></tr></tbody>
+            </table>
+        </section>
+    </div>
+</main>
+
+<div id="picker-modal" class="modal-overlay hidden">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>Use a previous output as input</h3>
+            <button class="close-x" data-act="picker-close">×</button>
+        </div>
+        <div class="modal-body" id="picker-body"><div class="empty">Loading…</div></div>
+    </div>
+</div>
+
+<div id="mask-modal" class="modal-overlay hidden">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>Mark region (paint = inpaint area; black = preserve)</h3>
+            <button class="close-x" data-act="mask-close">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="mask-painter" id="mask-painter-wrap">
+                <canvas id="mask-base"></canvas>
+                <canvas id="mask-overlay" class="canvas-base"></canvas>
+            </div>
+            <div class="mask-toolbar">
+                <label>Brush <input type="range" id="mask-brush" min="4" max="120" value="40"></label>
+                <span id="mask-brush-val" class="small">40</span>
+                <button class="ghost" id="mask-clear">Clear</button>
+                <button class="ghost" id="mask-invert">Invert</button>
+                <button id="mask-save">Save mask</button>
+                <span class="small" id="mask-status"></span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let toastTimer = null;
+function toast(msg, kind) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.className = 'toast show' + (kind === 'err' ? ' err' : '');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.className = 'toast', 3500);
+}
+function fmtDateShort(s) {
+    if (!s) return '';
+    try {
+        const d = new Date(s); const now = new Date();
+        const diffMin = (now - d) / 60000;
+        if (diffMin < 1)    return 'just now';
+        if (diffMin < 60)   return Math.floor(diffMin) + 'm ago';
+        if (diffMin < 1440) return Math.floor(diffMin / 60) + 'h ago';
+        return d.toLocaleDateString();
+    } catch (e) { return s; }
+}
+function badgeForStatus(st) {
+    switch (st) {
+        case 'pending':   return '<span class="badge in-flight">pending</span>';
+        case 'running':   return '<span class="badge in-flight">running</span>';
+        case 'complete':  return '<span class="badge done">complete</span>';
+        case 'failed':    return '<span class="badge fail">failed</span>';
+        case 'cancelled': return '<span class="badge cancelled">cancelled</span>';
+        default:          return '<span class="badge off">' + esc(st || '?') + '</span>';
+    }
+}
+
+class TabController {
+    constructor(name) {
+        this.name = name;
+        this.api = name === 'video' ? '/api/admin-ai-video.php' : '/api/admin-ai-image.php';
+        this.keyField = name === 'video' ? 'i2v_job_key' : 't2i_job_key';
+        this.panel = document.querySelector('.tab-panel[data-panel="' + name + '"]');
+        this.state = {
+            providers: [], selectedProviderKey: null,
+            files: [], jobs: new Map(), expanded: new Set(),
+        };
+        this.elProviders   = this.panel.querySelector('[id$="-providers"]');
+        this.elUploader    = this.panel.querySelector('[id$="-uploader"]');
+        this.elFileInput   = this.elUploader.querySelector('input[type=file]');
+        this.elThumbs      = this.panel.querySelector('[id$="-thumbs"]');
+        this.elPrompt      = this.panel.querySelector('[data-field="prompt"]');
+        this.elNegative    = this.panel.querySelector('[data-field="negative"]');
+        this.elAdvParams   = this.panel.querySelector('[data-field="adv-params"]');
+        this.elSubmit      = this.panel.querySelector('[data-act="submit"]');
+        this.elSubmitStat  = this.panel.querySelector('[data-slot="submit-status"]');
+        this.elJobsBody    = this.panel.querySelector('[data-slot="jobs"]');
+        this.elPickBtn     = this.panel.querySelector('[data-act="pick"]');
+        this.elHintDur     = this.panel.querySelector('[data-hint="duration"]');
+        this.elHintDim     = this.panel.querySelector('[data-hint="dim"]');
+    }
+
+    paramInput(name) { return this.panel.querySelector('[data-p="' + name + '"]'); }
+    readNum(name, fb) { const el = this.paramInput(name); if (!el || el.value === '') return fb; const v = parseFloat(el.value); return isFinite(v) ? v : fb; }
+
+    init() {
+        this.setupUploader();
+        this.elSubmit.addEventListener('click', () => this.submit());
+        this.elPickBtn.addEventListener('click', () => Picker.open(this));
+        if (this.name === 'image') {
+            const asp = this.paramInput('aspect');
+            if (asp) asp.addEventListener('change', () => this.applyAspect());
+        }
+        this.loadProviders();
+        this.refreshJobs();
+        setInterval(() => this.refreshJobs(), 4000);
+    }
+
+    async loadProviders() {
+        try {
+            const r = await fetch(this.api + '?action=list_providers');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const d = await r.json();
+            this.state.providers = d.providers || [];
+            this.renderProviders();
+        } catch (e) {
+            this.elProviders.innerHTML = '<div class="empty">Failed to load services: ' + esc(e.message) + '</div>';
+        }
+    }
+    renderProviders() {
+        const el = this.elProviders;
+        if (!this.state.providers.length) { el.innerHTML = '<div class="empty">No services registered yet.</div>'; return; }
+        el.innerHTML = '';
+        for (const p of this.state.providers) {
+            const div = document.createElement('div');
+            const online = !!p.online;
+            const active = !!p.provider_active && !!p.map_active;
+            const usable = online && active;
+            div.className = 'provider-card' + (this.state.selectedProviderKey === p.provider_key ? ' selected' : '') + (usable ? '' : ' offline');
+            const lines = [];
+            if (this.name === 'video') {
+                if (p.supports_single_image)     lines.push('single image');
+                if (p.supports_first_last_frame) lines.push('first/last frame');
+                if (p.max_duration_sec)          lines.push('up to ' + p.max_duration_sec + 's');
+            } else {
+                if (p.supports_init_image)       lines.push('img2img');
+                if (p.supports_inpainting)       lines.push('inpaint');
+                if (p.max_dim)                   lines.push('≤ ' + p.max_dim + 'px');
+                if (p.max_batch)                 lines.push('batch up to ' + p.max_batch);
+            }
+            div.innerHTML =
+                '<div class="badge ' + (usable ? 'on' : 'off') + '">' + (usable ? 'ready' : (online ? 'inactive' : 'offline')) + '</div>' +
+                '<div class="pname">' + esc(p.label) + '</div>' +
+                '<div class="pmeta">' + esc(p.model_id) + ' &middot; ' + esc(lines.join(' &middot; ') || 'capabilities unknown') + '</div>';
+            if (usable) {
+                div.addEventListener('click', () => {
+                    this.state.selectedProviderKey = p.provider_key;
+                    this.renderProviders();
+                    this.updateHints();
+                });
+            }
+            el.appendChild(div);
+        }
+    }
+    updateHints() {
+        if (this.elHintDur) {
+            const p = this.state.providers.find(x => x.provider_key === this.state.selectedProviderKey);
+            if (p && p.max_duration_sec != null) {
+                this.elHintDur.textContent = 'Max duration for ' + p.label + ': ' + p.max_duration_sec + 's';
+                const dur = this.paramInput('duration_sec');
+                if (dur && parseFloat(dur.value) > p.max_duration_sec) dur.value = p.max_duration_sec;
+                if (dur) dur.max = p.max_duration_sec;
+            } else if (this.elHintDur) { this.elHintDur.textContent = ''; }
+        }
+        if (this.elHintDim) {
+            const p = this.state.providers.find(x => x.provider_key === this.state.selectedProviderKey);
+            if (p && p.max_dim != null) {
+                this.elHintDim.textContent = 'Max dimension for ' + p.label + ': ' + p.max_dim + 'px (rounded to 16)';
+                ['width','height'].forEach(k => { const el = this.paramInput(k); if (el) el.max = p.max_dim; });
+            } else if (this.elHintDim) { this.elHintDim.textContent = ''; }
+        }
+    }
+
+    applyAspect() {
+        const asp = this.paramInput('aspect').value;
+        if (asp === 'custom') return;
+        const [aw, ah] = asp.split(':').map(Number);
+        const baseEdge = 1024;
+        let w, h;
+        if (aw >= ah) { w = baseEdge; h = Math.round(baseEdge * ah / aw / 16) * 16; }
+        else          { h = baseEdge; w = Math.round(baseEdge * aw / ah / 16) * 16; }
+        this.paramInput('width').value  = w;
+        this.paramInput('height').value = h;
+    }
+
+    setupUploader() {
+        const drop = this.elUploader;
+        const input = this.elFileInput;
+        drop.addEventListener('click', () => input.click());
+        drop.addEventListener('keypress', e => { if (e.key === 'Enter' || e.key === ' ') input.click(); });
+        drop.addEventListener('dragover',  e => { e.preventDefault(); drop.classList.add('drag'); });
+        drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+        drop.addEventListener('drop', e => {
+            e.preventDefault(); drop.classList.remove('drag');
+            if (e.dataTransfer.files) this.addFiles(e.dataTransfer.files);
+        });
+        input.addEventListener('change', e => { if (e.target.files) this.addFiles(e.target.files); input.value = ''; });
+    }
+    addFiles(fileList) {
+        for (const f of fileList) {
+            if (!/^image\/(png|jpe?g|webp)$/i.test(f.type)) { toast('Skipped non-image: ' + f.name, 'err'); continue; }
+            this.state.files.push({ file: f, role: 'init', source: 'upload' });
+        }
+        this.renderThumbs();
+    }
+    addPrev(ref, blob, filename) {
+        const file = new File([blob], filename, { type: blob.type || 'image/png' });
+        this.state.files.push({ file, role: 'init', source: 'prev', ref });
+        this.renderThumbs();
+    }
+    addMask(blob) {
+        this.state.files = this.state.files.filter(x => x.role !== 'mask');
+        const file = new File([blob], 'mask.png', { type: 'image/png' });
+        this.state.files.push({ file, role: 'mask', source: 'paint' });
+        this.renderThumbs();
+    }
+    renderThumbs() {
+        const el = this.elThumbs; el.innerHTML = '';
+        const initOnly = this.state.files.filter(x => x.role === 'init');
+        this.state.files.forEach((entry, idx) => {
+            const wrap = document.createElement('div'); wrap.className = 'thumb';
+            const img = document.createElement('img');
+            img.src = URL.createObjectURL(entry.file);
+            img.onload = () => URL.revokeObjectURL(img.src);
+            wrap.appendChild(img);
+            const roleTag = document.createElement('div'); roleTag.className = 'role';
+            if (entry.role === 'mask') roleTag.textContent = 'mask';
+            else {
+                const i = initOnly.indexOf(entry);
+                roleTag.textContent = (this.name === 'video')
+                    ? (i === 0 ? 'start' : (i === initOnly.length - 1 && initOnly.length > 1) ? 'end' : 'frame ' + (i + 1))
+                    : (i === 0 ? 'init' : 'init ' + (i + 1));
+            }
+            wrap.appendChild(roleTag);
+            const actions = document.createElement('div'); actions.className = 'actions';
+            if (entry.role === 'init') {
+                const maskBtn = document.createElement('button'); maskBtn.title = 'Mark region'; maskBtn.textContent = '✎';
+                maskBtn.addEventListener('click', e => { e.stopPropagation(); MaskPainter.open(this, entry); });
+                actions.appendChild(maskBtn);
+            }
+            const rm = document.createElement('button'); rm.title = 'Remove'; rm.textContent = '×';
+            rm.addEventListener('click', e => { e.stopPropagation(); this.state.files.splice(idx, 1); this.renderThumbs(); });
+            actions.appendChild(rm);
+            wrap.appendChild(actions);
+            if (entry.source !== 'upload') {
+                const tag = document.createElement('div'); tag.className = 'source-tag';
+                tag.textContent = entry.source === 'prev' ? 'from previous' : entry.source;
+                wrap.appendChild(tag);
+            }
+            el.appendChild(wrap);
+        });
+    }
+
+    buildParams() {
+        let p;
+        if (this.name === 'video') {
+            p = {
+                duration_sec:        this.readNum('duration_sec', 4),
+                width:               Math.round(this.readNum('width', 720)),
+                height:              Math.round(this.readNum('height', 480)),
+                fps:                 Math.round(this.readNum('fps', 16)),
+                num_inference_steps: Math.round(this.readNum('num_inference_steps', 30)),
+                guidance_scale:      this.readNum('guidance_scale', 5),
+            };
+        } else {
+            p = {
+                width:               Math.round(this.readNum('width', 1024)),
+                height:              Math.round(this.readNum('height', 1024)),
+                n_images:            Math.max(1, Math.min(4, Math.round(this.readNum('n_images', 1)))),
+                num_inference_steps: Math.round(this.readNum('num_inference_steps', 28)),
+                guidance_scale:      this.readNum('guidance_scale', 3.5),
+            };
+            const style  = this.paramInput('style');
+            const format = this.paramInput('format');
+            if (style  && style.value)  p.style  = style.value;
+            if (format && format.value) p.format = format.value;
+        }
+        const seedEl = this.paramInput('seed');
+        if (seedEl && seedEl.value.trim() !== '') p.seed = Math.round(parseFloat(seedEl.value));
+        const adv = this.elAdvParams.value.trim();
+        if (adv !== '') {
+            let parsed;
+            try { parsed = JSON.parse(adv); }
+            catch (e) { throw new Error('Advanced JSON: ' + e.message); }
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) Object.assign(p, parsed);
+        }
+        return p;
+    }
+
+    async submit() {
+        if (!this.state.selectedProviderKey) { toast('Pick a service first', 'err'); return; }
+        const prompt = this.elPrompt.value.trim();
+        if (!prompt) { toast('Prompt is required', 'err'); return; }
+        if (this.name === 'video' && !this.state.files.length) { toast('Video needs at least one image', 'err'); return; }
+        let paramsObj;
+        try { paramsObj = this.buildParams(); }
+        catch (e) { toast(e.message, 'err'); return; }
+
+        const fd = new FormData();
+        fd.append('provider_key', this.state.selectedProviderKey);
+        fd.append('prompt', prompt);
+        const negative = this.elNegative.value.trim();
+        if (negative) fd.append('negative_prompt', negative);
+        fd.append('params', JSON.stringify(paramsObj));
+
+        const initField = this.name === 'video' ? 'images[]' : 'init_images[]';
+        for (const entry of this.state.files) {
+            if (entry.role === 'init') fd.append(initField, entry.file, entry.file.name);
+            else if (entry.role === 'mask') fd.append('mask', entry.file, 'mask.png');
+        }
+        const prevEntry = this.state.files.find(x => x.role === 'init' && x.source === 'prev');
+        if (prevEntry && prevEntry.ref) fd.append('prev_ref', JSON.stringify(prevEntry.ref));
+
+        this.elSubmit.disabled = true;
+        this.elSubmitStat.textContent = 'submitting…';
+        try {
+            const r = await fetch(this.api, { method: 'POST', body: fd });
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            const k = d[this.keyField];
+            toast('Job ' + k + ' queued.');
+            this.state.files = [];
+            this.elPrompt.value = ''; this.elNegative.value = ''; this.elAdvParams.value = '';
+            this.renderThumbs();
+            this.refreshJobs();
+        } catch (e) {
+            toast('Submit failed: ' + e.message, 'err');
+        } finally {
+            this.elSubmit.disabled = false; this.elSubmitStat.textContent = '';
+        }
+    }
+
+    async refreshJobs() {
+        let payload;
+        try {
+            const r = await fetch(this.api + '?action=list_jobs&limit=50');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            payload = await r.json();
+        } catch (e) {
+            console.warn('[' + this.name + '] list_jobs poll failed (keeping existing rows):', e);
+            return;
+        }
+        const jobs = payload.jobs || [];
+        const body = this.elJobsBody;
+        if (!jobs.length) {
+            if (this.state.jobs.size > 0) this.state.jobs.clear();
+            body.innerHTML = '<tr><td colspan="6"><div class="empty">No jobs yet.</div></td></tr>';
+            return;
+        }
+        if (body.querySelector('.empty')) body.innerHTML = '';
+        const present = new Set(jobs.map(j => Number(j[this.keyField])));
+        for (const [key, ref] of this.state.jobs) {
+            if (!present.has(key)) {
+                ref.row.remove(); if (ref.detail) ref.detail.remove();
+                this.state.jobs.delete(key);
+            }
+        }
+        let prev = null;
+        for (const j of jobs) {
+            const key = Number(j[this.keyField]);
+            let ref = this.state.jobs.get(key);
+            if (!ref) { ref = this.createRow(j); this.state.jobs.set(key, ref); }
+            this.updateRow(ref, j);
+            const after = prev ? (prev.detail || prev.row) : null;
+            const expectedNext = after ? after.nextSibling : body.firstChild;
+            if (ref.row !== expectedNext) {
+                body.insertBefore(ref.row, expectedNext);
+                if (ref.detail) body.insertBefore(ref.detail, ref.row.nextSibling);
+            }
+            prev = ref;
+        }
+    }
+
+    createRow(j) {
+        const tr = document.createElement('tr');
+        tr.dataset.key = j[this.keyField];
+        tr.innerHTML =
+            '<td class="c-key"></td><td class="c-service"></td><td class="c-prompt prompt-snip"></td>' +
+            '<td class="c-status"></td>' +
+            '<td class="c-progress"><div class="progress"><i style="width:0%"></i></div><span class="c-msg small"></span></td>' +
+            '<td class="c-when small"></td>';
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', () => this.toggleExpand(Number(j[this.keyField])));
+        return {
+            row: tr, detail: null,
+            cells: {
+                key: tr.querySelector('.c-key'),
+                service: tr.querySelector('.c-service'),
+                prompt: tr.querySelector('.c-prompt'),
+                status: tr.querySelector('.c-status'),
+                progress: tr.querySelector('.c-progress > .progress > i'),
+                msg: tr.querySelector('.c-msg'),
+                when: tr.querySelector('.c-when'),
+            },
+            last: {},
+        };
+    }
+    updateRow(ref, j) {
+        const set = (slot, val, node, fn) => { if (ref.last[slot] === val) return; ref.last[slot] = val; fn(node, val); };
+        const promptCol = this.keyField === 'i2v_job_key' ? 'i2v_job_prompt' : 't2i_job_prompt';
+        const statusCol = this.keyField === 'i2v_job_key' ? 'i2v_job_status' : 't2i_job_status';
+        const progCol   = this.keyField === 'i2v_job_key' ? 'i2v_job_progress' : 't2i_job_progress';
+        const msgCol    = this.keyField === 'i2v_job_key' ? 'i2v_job_message' : 't2i_job_message';
+        const startCol  = this.keyField === 'i2v_job_key' ? 'i2v_job_started_dtime' : 't2i_job_started_dtime';
+        const dCol      = this.keyField === 'i2v_job_key' ? 'i2v_job_dtime' : 't2i_job_dtime';
+        set('key',      String(j[this.keyField]),                       ref.cells.key,      (n,v) => n.textContent = v);
+        set('service',  String(j.provider_model_id || '?'),             ref.cells.service,  (n,v) => n.textContent = v);
+        set('prompt',   String(j[promptCol] || ''),                     ref.cells.prompt,   (n,v) => n.textContent = v.length > 90 ? v.slice(0, 90) + '…' : v);
+        set('status',   String(j[statusCol] || '?'),                    ref.cells.status,   (n,v) => n.innerHTML = badgeForStatus(v));
+        set('progress', Number(j[progCol] || 0),                        ref.cells.progress, (n,v) => n.style.width = Math.max(0, Math.min(100, v)) + '%');
+        set('msg',      String(j[msgCol] || ''),                        ref.cells.msg,      (n,v) => n.textContent = v);
+        set('when',     String(j[startCol] || j[dCol] || ''),           ref.cells.when,     (n,v) => n.textContent = fmtDateShort(v));
+        if (this.state.expanded.has(Number(j[this.keyField]))) this.refreshDetail(ref, j);
+    }
+    toggleExpand(key) {
+        const ref = this.state.jobs.get(key); if (!ref) return;
+        if (this.state.expanded.has(key)) {
+            this.state.expanded.delete(key);
+            if (ref.detail) { ref.detail.remove(); ref.detail = null; }
+            ref.row.classList.remove('expanded');
+        } else {
+            this.state.expanded.add(key);
+            ref.row.classList.add('expanded');
+            ref.detail = document.createElement('tr');
+            ref.detail.innerHTML = '<td colspan="6"><div class="row-detail"></div></td>';
+            ref.row.parentNode.insertBefore(ref.detail, ref.row.nextSibling);
+            fetch(this.api + '?action=status&' + this.keyField + '=' + key)
+                .then(r => r.json()).then(j => this.refreshDetail(ref, j))
+                .catch(e => ref.detail && (ref.detail.querySelector('.row-detail').textContent = 'detail load failed: ' + e.message));
+        }
+    }
+    refreshDetail(ref, j) {
+        if (!ref.detail) return;
+        const d = ref.detail.querySelector('.row-detail');
+        const blocks = [];
+        const err = this.name === 'video' ? j.i2v_job_error : j.t2i_job_error;
+        const status = this.name === 'video' ? j.i2v_job_status : j.t2i_job_status;
+        const started = this.name === 'video' ? j.i2v_job_started_dtime : j.t2i_job_started_dtime;
+        const completed = this.name === 'video' ? j.i2v_job_completed_dtime : j.t2i_job_completed_dtime;
+        const size = this.name === 'video' ? j.i2v_job_size_bytes : j.t2i_job_size_bytes;
+        if (err) blocks.push('<div><strong>Error:</strong> ' + esc(err) + '</div>');
+        blocks.push('<div class="small">Started: ' + esc(started || '—') + ' &middot; Completed: ' + esc(completed || '—') + ' &middot; Size: ' + (size ? Math.round(size / 1024) + 'kB' : '—') + '</div>');
+        if (this.name === 'video') {
+            if (j.i2v_job_output_path) {
+                blocks.push('<div style="margin-top:8px">Output:</div><video src="' + esc(j.i2v_job_output_path) + '" controls preload="metadata"></video>' +
+                            '<div class="small"><a href="' + esc(j.i2v_job_output_path) + '" download>Download</a></div>');
+            }
+        } else {
+            const outsRaw = j.t2i_job_outputs;
+            let outs = [];
+            try { outs = typeof outsRaw === 'string' ? JSON.parse(outsRaw) : (outsRaw || []); } catch (e) {}
+            if (outs.length) {
+                blocks.push('<div style="margin-top:8px">Outputs:</div><div class="image-results">' +
+                    outs.map(o => '<a href="' + esc(o.path) + '" target="_blank"><img src="' + esc(o.path) + '"></a>').join('') +
+                    '</div>');
+            }
+        }
+        const actions = '<div class="row-actions" style="margin-top:10px">' +
+            ((status === 'pending' || status === 'running') ? '<button class="ghost" data-act="cancel">Cancel</button>' : '') +
+            '<button class="danger" data-act="delete">Delete job</button></div>';
+        blocks.push(actions);
+        d.innerHTML = blocks.join('');
+        d.querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', e => {
+            e.stopPropagation();
+            const act = b.dataset.act;
+            const k = Number(ref.row.dataset.key);
+            if (act === 'cancel') return this.jobAction('cancel', k);
+            if (act === 'delete') {
+                if (!confirm('Delete job #' + k + ' and its files?')) return;
+                return this.jobAction('delete', k);
+            }
+        }));
+    }
+    async jobAction(action, key) {
+        try {
+            const body = JSON.stringify({ action, [this.keyField]: key });
+            const r = await fetch(this.api, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            toast(action + ' ok');
+            this.refreshJobs();
+        } catch (e) {
+            toast(action + ' failed: ' + e.message, 'err');
+        }
+    }
+}
+
+const Picker = {
+    targetTab: null,
+    async open(tab) {
+        this.targetTab = tab;
+        const body = $('picker-body');
+        body.innerHTML = '<div class="empty">Loading…</div>';
+        $('picker-modal').classList.remove('hidden');
+        try {
+            const r = await fetch('/api/admin-ai-image.php?action=list_recent_outputs&limit=24');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const d = await r.json();
+            this.render(d);
+        } catch (e) {
+            body.innerHTML = '<div class="empty">Failed: ' + esc(e.message) + '</div>';
+        }
+    },
+    close() { $('picker-modal').classList.add('hidden'); this.targetTab = null; },
+    render(d) {
+        const body = $('picker-body');
+        const blocks = [];
+        if ((d.images || []).length) {
+            blocks.push('<div class="picker-section"><h4>Recent images</h4><div class="picker-grid">' +
+                d.images.map(it => this.cell(it, 'image')).join('') + '</div></div>');
+        }
+        if ((d.videos || []).length) {
+            blocks.push('<div class="picker-section"><h4>Recent videos (first frame is used)</h4><div class="picker-grid">' +
+                d.videos.map(it => this.cell(it, 'video')).join('') + '</div></div>');
+        }
+        if (!blocks.length) blocks.push('<div class="empty">No previous outputs yet.</div>');
+        body.innerHTML = blocks.join('');
+        body.querySelectorAll('.picker-cell[data-key]').forEach(el => {
+            el.addEventListener('click', () => this.pick({
+                kind:  el.dataset.kind,
+                key:   Number(el.dataset.key),
+                index: Number(el.dataset.index || 0),
+                path:  el.dataset.path,
+            }));
+        });
+    },
+    cell(it, kind) {
+        const path = esc(it.path);
+        const tag  = kind === 'video' ? 'video' : 'image';
+        const thumb = kind === 'video'
+            ? '<video class="pthumb" src="' + path + '" preload="metadata" muted></video>'
+            : '<img class="pthumb" src="' + path + '" alt="">';
+        const idx = kind === 'image' ? (it.index || 0) : 0;
+        return '<div class="picker-cell" data-kind="' + kind + '" data-key="' + it.key + '" data-index="' + idx + '" data-path="' + path + '">' +
+            thumb +
+            '<div class="pinfo"><span class="ptag">' + tag + ' #' + it.key + '</span>' +
+            esc(it.model_id || '') + '<br>' +
+            esc((it.prompt || '').slice(0, 70)) + '</div></div>';
+    },
+    async pick(ref) {
+        try {
+            const r = await fetch(ref.path);
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const blob = await r.blob();
+            const filename = ref.kind + '_' + ref.key + (ref.kind === 'image' ? ('_' + ref.index + '.' + (ref.path.split('.').pop() || 'png')) : '.first.png');
+            const tab = this.targetTab;
+            tab.addPrev({ kind: ref.kind, key: ref.key, index: ref.index }, blob, filename);
+            toast('Added ' + ref.kind + ' #' + ref.key + ' as input.');
+            this.close();
+        } catch (e) {
+            toast('Pick failed: ' + e.message, 'err');
+        }
+    },
+};
+
+const MaskPainter = {
+    tab: null, entry: null,
+    brush: 40, drawing: false,
+    open(tab, entry) {
+        this.tab = tab; this.entry = entry;
+        const wrap = $('mask-painter-wrap');
+        const base = $('mask-base'), over = $('mask-overlay');
+        const img = new Image();
+        img.onload = () => {
+            const maxW = 760, maxH = 520;
+            let w = img.naturalWidth, h = img.naturalHeight;
+            const sc = Math.min(1, maxW / w, maxH / h);
+            w = Math.round(w * sc); h = Math.round(h * sc);
+            base.width = over.width = w;
+            base.height = over.height = h;
+            wrap.style.width = w + 'px'; wrap.style.height = h + 'px';
+            base.getContext('2d').drawImage(img, 0, 0, w, h);
+            over.getContext('2d').clearRect(0, 0, w, h);
+        };
+        img.src = URL.createObjectURL(entry.file);
+        $('mask-modal').classList.remove('hidden');
+        this.bind();
+    },
+    close() { $('mask-modal').classList.add('hidden'); this.tab = null; this.entry = null; },
+    bind() {
+        const over = $('mask-overlay');
+        const brush = $('mask-brush');
+        $('mask-brush-val').textContent = this.brush;
+        brush.value = this.brush;
+        brush.oninput = () => { this.brush = +brush.value; $('mask-brush-val').textContent = brush.value; };
+        $('mask-clear').onclick = () => over.getContext('2d').clearRect(0, 0, over.width, over.height);
+        $('mask-invert').onclick = () => {
+            const ctx = over.getContext('2d');
+            const d = ctx.getImageData(0, 0, over.width, over.height);
+            for (let i = 0; i < d.data.length; i += 4) {
+                if (d.data[i + 3] === 0) { d.data[i] = 255; d.data[i+1] = 255; d.data[i+2] = 255; d.data[i+3] = 200; }
+                else d.data[i + 3] = 0;
+            }
+            ctx.putImageData(d, 0, 0);
+        };
+        $('mask-save').onclick = () => this.save();
+        over.onmousedown = (e) => { this.drawing = true; this.paint(e); };
+        over.onmouseup   = () => { this.drawing = false; };
+        over.onmouseleave= () => { this.drawing = false; };
+        over.onmousemove = (e) => { if (this.drawing) this.paint(e); };
+    },
+    paint(e) {
+        const over = $('mask-overlay');
+        const rect = over.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (over.width / rect.width);
+        const y = (e.clientY - rect.top)  * (over.height / rect.height);
+        const ctx = over.getContext('2d');
+        ctx.fillStyle = 'rgba(255,255,255,0.78)';
+        ctx.beginPath();
+        ctx.arc(x, y, this.brush / 2, 0, Math.PI * 2);
+        ctx.fill();
+    },
+    save() {
+        const over = $('mask-overlay');
+        const out = document.createElement('canvas');
+        out.width = over.width; out.height = over.height;
+        const oc = out.getContext('2d');
+        oc.fillStyle = '#000'; oc.fillRect(0, 0, out.width, out.height);
+        const src = over.getContext('2d').getImageData(0, 0, over.width, over.height);
+        const dst = oc.getImageData(0, 0, over.width, over.height);
+        for (let i = 0; i < src.data.length; i += 4) {
+            if (src.data[i + 3] > 40) { dst.data[i] = dst.data[i+1] = dst.data[i+2] = 255; dst.data[i+3] = 255; }
+        }
+        oc.putImageData(dst, 0, 0);
+        out.toBlob((blob) => {
+            this.tab.addMask(blob);
+            toast('Mask saved');
+            this.close();
+        }, 'image/png');
+    },
+};
+
+const TABS = { video: null, image: null };
+function activateTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
+}
+document.addEventListener('DOMContentLoaded', () => {
+    TABS.video = new TabController('video');
+    TABS.image = new TabController('image');
+    TABS.video.init();
+    TABS.image.init();
+    document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => activateTab(t.dataset.tab)));
+    document.querySelectorAll('[data-act="picker-close"], #picker-modal').forEach(el => {
+        el.addEventListener('click', e => { if (e.target === el || e.target.dataset.act === 'picker-close') Picker.close(); });
+    });
+    document.querySelectorAll('[data-act="mask-close"], #mask-modal').forEach(el => {
+        el.addEventListener('click', e => { if (e.target === el || e.target.dataset.act === 'mask-close') MaskPainter.close(); });
+    });
+});
+</script>
+</body>
+</html>

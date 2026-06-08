@@ -32,14 +32,16 @@ services:
     mem_limit: 128m
     cpus: 0.5
     pids_limit: 64
-    ports:
-      - "80:80"
-      - "443:443"
+    # Host port mappings moved to /opt/front/ — that stack owns 80/443
+    # and SNI-routes to this caddy via the shared web-front network.
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./certs:/certs:ro
       - caddy_data:/data
       - caddy_config:/config
+    networks:
+      - default
+      - web-front
     depends_on:
       - web
       - itcoge-web
@@ -146,3 +148,7 @@ volumes:
   onlyoffice_log:
   onlyoffice_lib:
   onlyoffice_db:
+
+networks:
+  web-front:
+    external: true

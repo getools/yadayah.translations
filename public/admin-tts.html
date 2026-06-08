@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780888066">
+    <meta name="page-version" content="1780941969">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -1848,13 +1848,17 @@ function vcFmtDtFull(s) {
 
 function populateVoiceFilterOptions() {
     // Collect distinct values once after a load. Sort alphabetically.
+    // For Provider, prefer yy_provider.provider_main (Azure / ElevenLabs /
+    // Kokoro / etc.) so a single TTS system that fans out to multiple
+    // engines still gets a per-engine filter. Falls back to tts_name on
+    // legacy rows with no provider_key.
     var langs = new Set(), regions = new Set(), types = new Set(), providers = new Set();
     VC_STATE.voices.forEach(function (v) {
         if (v.tts_voice_language) langs.add(v.tts_voice_language);
         if (v.tts_voice_region)   regions.add(v.tts_voice_region);
         if (v.tts_voice_type)     types.add(v.tts_voice_type);
-        if (v.tts_name)          providers.add(v.tts_name);
-        else if (v.tts_code)      providers.add(v.tts_code);
+        var providerLabel = v.provider_main || v.tts_name || v.tts_code || '';
+        if (providerLabel) providers.add(providerLabel);
     });
     fillSelect('vc-f-provider', Array.from(providers).sort());
     fillSelect('vc-f-lang',   Array.from(langs).sort());
@@ -1900,7 +1904,9 @@ function filterVoices() {
 
     var rows = VC_STATE.voices.filter(function (v) {
         if (fActive !== '' && (v.tts_voice_active_flag ? 1 : 0) !== Number(fActive)) return false;
-        if (fProvider && (v.tts_name || v.tts_code || '') !== fProvider) return false;
+        // Match the same field populateVoiceFilterOptions() inserted into
+        // the dropdown so the user's selection actually filters something.
+        if (fProvider && (v.provider_main || v.tts_name || v.tts_code || '') !== fProvider) return false;
         if (fName && (v.tts_voice_label || '').toLowerCase().indexOf(fName) === -1
                  && (v.tts_voice_code  || '').toLowerCase().indexOf(fName) === -1) return false;
         if (fLang   && v.tts_voice_language !== fLang)   return false;
@@ -1916,7 +1922,7 @@ function filterVoices() {
 
     var col = VC_STATE.sort.col, dir = VC_STATE.sort.dir === 'asc' ? 1 : -1;
     var keyFns = {
-        provider:   function (v) { return (v.tts_name || v.tts_code || '').toLowerCase(); },
+        provider:   function (v) { return (v.provider_main || v.tts_name || v.tts_code || '').toLowerCase(); },
         label:      function (v) { return (v.tts_voice_label || '').toLowerCase(); },
         language:   function (v) { return (v.tts_voice_language || '') + '|' + (v.tts_voice_region || '') + '|' + (v.tts_voice_label || ''); },
         region:     function (v) { return (v.tts_voice_region || '') + '|' + (v.tts_voice_language || ''); },
@@ -2194,11 +2200,76 @@ async function saveVoiceActive(tr, v) {
         });
         v.tts_voice_active_flag = newActive;
         tr.classList.toggle('inactive', !newActive);
+        // Update the shared cache + every voice <select> on the page so the
+        // Defaults / Books / Build picker dropdowns pick this change up
+        // without needing a tab reload. We mutate the cache in place rather
+        // than re-fetching to keep the active row's selection stable.
+        syncVoiceCacheAfterActiveToggle(v, newActive);
+        rebuildAllVoiceDropdowns();
         var s = $('vc-status'); if (s) { s.textContent = (newActive ? 'Activated ' : 'Deactivated ') + (v.tts_voice_label || v.tts_voice_code); s.className = 'status-msg success'; }
     } catch (e) {
         cb.checked = !newActive;       // revert toggle
         var s = $('vc-status'); if (s) { s.textContent = 'Save failed: ' + e.message; s.className = 'status-msg error'; }
     }
+}
+
+// Mutate the shared active-voices cache to reflect a toggle without a
+// network round trip. Add the row when activated, remove it when not.
+function syncVoiceCacheAfterActiveToggle(v, newActive) {
+    if (typeof PRONS_VOICES_CACHE === 'undefined' || !PRONS_VOICES_CACHE) return;
+    var list = PRONS_VOICES_CACHE.voices || [];
+    var i = list.findIndex(function (x) { return x.tts_voice_key === v.tts_voice_key; });
+    if (newActive) {
+        if (i === -1) list.push(v);
+    } else {
+        if (i !== -1) list.splice(i, 1);
+    }
+}
+
+// Rebuild every <select data-field="voice"> currently in the DOM from the
+// (now-fresh) PRONS_VOICES_CACHE. Preserves each select's current value
+// when the chosen voice is still active; otherwise resets to the blank
+// "inherit" option. The Voice Catalog table itself is updated separately
+// by saveVoiceActive's classList toggle.
+function rebuildAllVoiceDropdowns() {
+    if (typeof PRONS_VOICES_CACHE === 'undefined' || !PRONS_VOICES_CACHE) return;
+    var activeVoices = PRONS_VOICES_CACHE.voices || [];
+    document.querySelectorAll('select[data-field="voice"]').forEach(function (voiceSel) {
+        // The voice <select> is paired with a sibling provider <select> in
+        // the same row (Defaults + Books category rows). Find it; if there's
+        // no provider sibling (legacy build modal etc.) leave the dropdown
+        // alone — the build modal rebuilds on open anyway.
+        var row = voiceSel.closest('.voice-row');
+        if (!row) return;
+        var provSel = row.querySelector('select[data-field="provider"]');
+        var pk = provSel ? (parseInt(provSel.value, 10) || 0) : 0;
+        if (!pk) return;
+        var prev = voiceSel.value;
+        // Preserve the leading blank option if there was one; rebuild the
+        // rest with the freshly-filtered active list for this provider.
+        var firstOpt = voiceSel.options[0];
+        var blankHtml = (firstOpt && firstOpt.value === '') ? firstOpt.outerHTML : '';
+        voiceSel.innerHTML = blankHtml;
+        activeVoices
+            .filter(function (v) { return v.provider_key === pk; })
+            .sort(function (a, b) {
+                var la = (a.tts_voice_label || a.tts_voice_code || '').toLowerCase();
+                var lb = (b.tts_voice_label || b.tts_voice_code || '').toLowerCase();
+                return la < lb ? -1 : la > lb ? 1 : 0;
+            })
+            .forEach(function (v) {
+                var o = document.createElement('option');
+                o.value = v.tts_voice_code;
+                o.textContent = v.tts_voice_label || v.tts_voice_code;
+                o.dataset.styles = (v.tts_voice_styles || []).join(',');
+                voiceSel.appendChild(o);
+            });
+        if (prev && Array.prototype.some.call(voiceSel.options, function (o) { return o.value === prev; })) {
+            voiceSel.value = prev;
+        } else {
+            voiceSel.value = '';
+        }
+    });
 }
 
 async function playVoiceTest(tr, v) {
@@ -2286,6 +2357,12 @@ async function loadTunes() {
             ml.value = TUNES_MAX_LEN ? String(TUNES_MAX_LEN) : '';
             ml.style.color = TUNES_MAX_LEN ? '#222' : '#888';
         }
+        // Restore the last sort column + direction so a refresh keeps the
+        // user's chosen order (e.g. by Voice or by # — desc).
+        var savedSortCol = sessionState.load('tunesSortCol', '');
+        var savedSortDir = sessionState.load('tunesSortDir', '');
+        if (savedSortCol) TUNES_SORT.col = savedSortCol;
+        if (savedSortDir === 'asc' || savedSortDir === 'desc') TUNES_SORT.dir = savedSortDir;
     }
     renderTunes();
 }
@@ -2433,6 +2510,11 @@ function sortTunesBy(col) {
         TUNES_SORT.dir = col === 'book_count' ? 'desc' : 'asc';
     }
     TUNES_PAGE_IDX = 0; // re-sort always returns to first page
+    if (window.sessionState) {
+        sessionState.save('tunesSortCol', TUNES_SORT.col);
+        sessionState.save('tunesSortDir', TUNES_SORT.dir);
+        sessionState.save('tunesPageIdx', TUNES_PAGE_IDX);
+    }
     renderTunes();
 }
 function setTunesPageSize(v) {
@@ -3941,42 +4023,7 @@ async function _loadParagraphRowsImpl(ak, container) {
     }
 
     // ── First-time render. Only path that ever calls container.innerHTML. ──
-    container.innerHTML =
-          '<div class="paragraph-mini-header" style="margin-bottom:6px;display:flex;align-items:center;gap:10px;font-size:0.8rem;color:#666;">'
-        +   '<span>' + doneCount + ' of ' + rows.length + ' synthesised</span>'
-        +   '<a href="#" onclick="event.preventDefault();loadParagraphRows(' + ak + ',this.closest(\'.paragraph-grid\'));" '
-        +      'style="color:#31345A;text-decoration:none;font-weight:600;">↻ Refresh list</a>'
-        + '</div>'
-        + '<table class="paragraph-mini-table" style="width:100%;border-collapse:collapse;font-size:0.83rem;">'
-        + '<thead><tr style="border-bottom:1px solid #ccd;">'
-        +   '<th style="width:42px;text-align:right;padding:2px 6px;" title="Position in this chapter (1-based)">#</th>'
-        +   '<th style="width:46px;padding:2px 6px;" title="paragraph_number column on yy_paragraph (unique per volume)">p#</th>'
-        +   '<th style="width:46px;padding:2px 6px;">page</th>'
-        +   '<th style="padding:2px 6px;">text</th>'
-        +   '<th style="width:235px;padding:2px 6px;">audio</th>'
-        +   '<th style="width:130px;padding:2px 6px;"></th>'
-        + '</tr></thead><tbody></tbody></table>';
-    var freshTbody = container.querySelector('table.paragraph-mini-table tbody');
-    var rowHtmls = [];
-    var skipped  = 0;
-    rows.forEach(function (p, posInChapter) {
-        try { rowHtmls.push(_paraRowHtml(p, posInChapter, ak)); }
-        catch (e) { skipped++; console.error('row-render error at idx=' + (p && p.idx) + ':', e); }
-    });
-    freshTbody.innerHTML = rowHtmls.join('');
-    if (rowHtmls.length > 0 && freshTbody.children.length === 0) {
-        console.error('first-time render produced 0 children from ' + rowHtmls.length + ' row HTMLs; first row: ' + rowHtmls[0].slice(0, 200));
-        container.insertAdjacentHTML('beforeend',
-            '<div style="color:#b73d3d;padding:8px;">Rows failed to render (' + rowHtmls.length + ' built, 0 visible) — see browser console.</div>');
-        return;  // don't mark as rendered; let next call retry
-    }
-    if (skipped > 0) {
-        container.insertAdjacentHTML('beforeend',
-            '<div style="color:#888;font-size:0.78rem;padding:4px 8px;">' + skipped + ' row(s) failed to render — check console.</div>');
-    }
-    // Mark rendered LAST, only after the table has real rows. Once set,
-    // no code path is allowed to wipe `container` again.
-    container.dataset.rendered = '1';
+    _paraInitialRender(container, rows, doneCount, ak);
 
     // Forensic observer: if ANYTHING mutates this container's child list
     // after we mark it rendered (i.e. wipes it or replaces the table),
@@ -4004,16 +4051,80 @@ async function _loadParagraphRowsImpl(ak, container) {
     } catch (e) { /* MutationObserver not available */ }
 }
 
+// Extracted from _loadParagraphRowsImpl so the surgical update path can
+// fall back to a full rebuild when the table shell is missing. Only path
+// that ever calls container.innerHTML.
+function _paraInitialRender(container, rows, doneCount, ak) {
+    container.innerHTML =
+          '<div class="paragraph-mini-header" style="margin-bottom:6px;display:flex;align-items:center;gap:10px;font-size:0.8rem;color:#666;">'
+        +   '<span>' + doneCount + ' of ' + rows.length + ' synthesised</span>'
+        +   '<a href="#" onclick="event.preventDefault();loadParagraphRows(' + ak + ',this.closest(\'.paragraph-grid\'));" '
+        +      'style="color:#31345A;text-decoration:none;font-weight:600;">↻ Refresh list</a>'
+        + '</div>'
+        + '<table class="paragraph-mini-table" style="width:100%;border-collapse:collapse;font-size:0.83rem;">'
+        + '<thead><tr style="border-bottom:1px solid #ccd;">'
+        +   '<th style="width:42px;text-align:right;padding:2px 6px;" title="Position in this chapter (1-based)">#</th>'
+        +   '<th style="width:46px;padding:2px 6px;" title="paragraph_number column on yy_paragraph (unique per volume)">p#</th>'
+        +   '<th style="width:46px;padding:2px 6px;">page</th>'
+        +   '<th style="padding:2px 6px;">text</th>'
+        +   '<th style="width:235px;padding:2px 6px;">audio</th>'
+        +   '<th style="width:130px;padding:2px 6px;"></th>'
+        + '</tr></thead><tbody></tbody></table>';
+    var freshTbody = container.querySelector('table.paragraph-mini-table tbody');
+    var rowHtmls = [];
+    var skipped  = 0;
+    rows.forEach(function (p, posInChapter) {
+        try { rowHtmls.push(_paraRowHtml(p, posInChapter, ak)); }
+        catch (e) { skipped++; console.error('row-render error at idx=' + (p && p.idx) + ':', e); }
+    });
+    freshTbody.innerHTML = rowHtmls.join('');
+    if (rowHtmls.length > 0 && freshTbody.children.length === 0) {
+        console.error('first-time render produced 0 children from ' + rowHtmls.length + ' row HTMLs; first row: ' + rowHtmls[0].slice(0, 200));
+        container.insertAdjacentHTML('beforeend',
+            '<div style="color:#b73d3d;padding:8px;">Rows failed to render (' + rowHtmls.length + ' built, 0 visible) — see browser console.</div>');
+        return;
+    }
+    if (skipped > 0) {
+        container.insertAdjacentHTML('beforeend',
+            '<div style="color:#888;font-size:0.78rem;padding:4px 8px;">' + skipped + ' row(s) failed to render — check console.</div>');
+    }
+    container.dataset.rendered = '1';
+}
+
 // Apply only the per-row deltas. Never touch rows whose sig hasn't changed.
+// Self-heals on tbody-empty-but-rows-non-empty: rebuilds the rows in place
+// rather than leaving the panel a header-only skeleton. This is the failure
+// mode the operator sees as "paragraph showed up and then disappeared" —
+// some external mutation (forensic observer logs it as 🚨 PANEL MUTATION)
+// wiped the rows but left the table shell, so every poll after found no
+// <tr> to update and the panel stayed empty forever.
 function _paraSurgicalUpdate(container, rows, doneCount) {
+    var ak = container && container.closest && container.closest('tr.paragraph-expand-row')
+        ? container.closest('tr.paragraph-expand-row').getAttribute('data-ak') : '?';
     var tbody = container.querySelector('table.paragraph-mini-table tbody');
     if (!tbody) {
-        // Should be unreachable when rendered=1, but guard anyway.
-        console.warn('_paraSurgicalUpdate: tbody missing despite rendered=1; ignoring this poll');
+        // Table shell was lost outright — fall back to the initial render
+        // so the user gets rows back rather than an empty panel.
+        console.warn('_paraSurgicalUpdate ak=' + ak + ': table shell missing — re-running initial render');
+        container.dataset.rendered = '';
+        _paraInitialRender(container, rows, doneCount, parseInt(ak, 10) || 0);
         return;
     }
     var headerSpan = container.querySelector('.paragraph-mini-header span');
     if (headerSpan) headerSpan.textContent = doneCount + ' of ' + rows.length + ' synthesised';
+    // Self-heal: if the body is empty but we have data, rebuild the row
+    // bodies in place (without touching the table shell or header). Keeps
+    // the rendered=1 contract and avoids another full re-render flicker.
+    if (tbody.children.length === 0 && rows.length > 0) {
+        console.warn('_paraSurgicalUpdate ak=' + ak + ': tbody was empty despite ' + rows.length + ' rows in data — rebuilding row bodies');
+        var rowHtmls = [];
+        rows.forEach(function (p, posInChapter) {
+            try { rowHtmls.push(_paraRowHtml(p, posInChapter, parseInt(ak, 10) || 0)); }
+            catch (e) { console.error('row-render error during self-heal at idx=' + (p && p.idx) + ':', e); }
+        });
+        tbody.innerHTML = rowHtmls.join('');
+        return;
+    }
     rows.forEach(function (p) {
         var tr = tbody.querySelector('tr[data-idx="' + p.idx + '"]');
         if (!tr) return;
@@ -4373,8 +4484,18 @@ async function pauseBuild(audioKey) {
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ action:'pause', tts_audio_key: audioKey }),
         });
-    } catch (e) { alert('Pause failed: ' + (e.message || e)); }
-    loadChapters(ACTIVE_VOLUME);
+    } catch (e) { alert('Pause failed: ' + (e.message || e)); return; }
+    // Local update + surgical diff only — never call loadChapters() here.
+    // loadChapters re-fetches every chapter AND re-runs loadParagraphRows
+    // on any open expand panel. Both are unnecessary for a status flip
+    // and they were collapsing the expanded paragraph view the user was
+    // looking at when they hit Pause. The status-poll will refresh
+    // ground-truth shortly when the worker exits; meanwhile the row's
+    // Pause→Resume button swap is immediate and the expand panel stays
+    // exactly as it was.
+    var c = (CHAPTERS || []).find(function (x) { return x.tts_audio_key === audioKey; });
+    if (c) c.tts_audio_status = 'paused';
+    if (typeof renderChapters === 'function') renderChapters();
 }
 
 // Resume a paused build. The worker scans the parts cache on startup and
@@ -4386,7 +4507,16 @@ async function resumeBuild(audioKey) {
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ action:'resume', tts_audio_key: audioKey }),
         });
-    } catch (e) { alert('Resume failed: ' + (e.message || e)); }
+    } catch (e) { alert('Resume failed: ' + (e.message || e)); return; }
+    // Same rationale as pauseBuild — surgical local update keeps the open
+    // paragraph panel intact. The status poll in loadChapters resumes
+    // naturally because the chapter row's status flips back to 'running'
+    // and the polling guard at the bottom of loadChapters fires again.
+    var c = (CHAPTERS || []).find(function (x) { return x.tts_audio_key === audioKey; });
+    if (c) { c.tts_audio_status = 'running'; c.tts_audio_progress = c.tts_audio_progress || 0; }
+    if (typeof renderChapters === 'function') renderChapters();
+    // Kick the polling loop back on so the operator sees progress without
+    // waiting for the next manual reload.
     loadChapters(ACTIVE_VOLUME);
 }
 

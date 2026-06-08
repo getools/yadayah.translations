@@ -117,19 +117,30 @@ if ($overrideVoice) {
     if (!isset($cfg['categories']['main'])) $cfg['categories']['main'] = $overrideRow;
 }
 
-// Dispatch by provider. ttsResolveProviderKey looks up the voice's engine via
-// yy_provider.provider_settings.engine; SSML-flagged engines (Azure) take the
-// existing SSML path verbatim, local engines (Chatterbox/CosyVoice/Qwen3/Kokoro)
-// route through buildLocalSegment + gpu-client.gpuSynthesize.
+// Dispatch by provider. ttsProviderTransport returns one of:
+//   'azure-ssml'        → existing SSML path verbatim
+//   'elevenlabs-cloud'  → ElevenLabs HTTP API (eleven_v3 / eleven_turbo_v2_5)
+//   'gpu-tailnet'       → local engines (Chatterbox/CosyVoice/Qwen3/Kokoro) via gpu-client
 $primaryCat  = $hasFormat ? null : $category;
 $resolvedCat = $primaryCat ?? 'main';
 $providerKey = ttsResolveProviderKey($cfg, $resolvedCat);
-$usesSsml    = ttsProviderUsesSsml($cfg, $providerKey);
+$transport   = ttsProviderTransport($cfg, $providerKey);
+$usesSsml    = ($transport === 'azure-ssml');
 $err = '';
 $mp3 = '';
 
 try {
-    if ($usesSsml) {
+    if ($transport === 'elevenlabs-cloud') {
+        // ElevenLabs cloud API. Same per-segment payload shape as the local
+        // GPU path; the synth helper handles the HTTP call. We carry the
+        // provider_key on the segment so the synth picks model/voice off
+        // the matching yy_provider / yy_tts_voice row.
+        $elSeg = buildLocalSegment($text, $cfg, $resolvedCat);
+        $elSeg['provider_key'] = $providerKey;
+        if ($overrideVoice !== null) $elSeg['voice'] = $overrideVoice;
+        $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
+        $mp3 = elevenlabsTtsSynthesize($cfg, $elSeg, $outputFormat, $err);
+    } elseif ($usesSsml) {
         if ($hasFormat) {
             $segs = segmentParagraph($text);
             if (!$segs) errorResponse('no audible content after segmentation');
@@ -180,7 +191,11 @@ try {
 }
 if ($mp3 === '') {
     error_log('admin-tts-preview empty audio: provider_key=' . $providerKey . ' usesSsml=' . ($usesSsml ? '1' : '0') . ' voice=' . ($overrideVoice ?? '(category default)') . ' err=' . $err);
-    errorResponse('TTS failed: ' . ($err ?: 'engine returned no audio'), 502);
+    // 500, not 502: Cloudflare intercepts 5xx >= 502 from the origin and
+    // replaces the response body with its own branded "Bad gateway" page,
+    // hiding our actual error message ("ELEVENLABS_API_KEY not set" etc.)
+    // from the operator. 500 passes through with the JSON intact.
+    errorResponse('TTS failed: ' . ($err ?: 'engine returned no audio'), 500);
 }
 
 header('Content-Type: audio/mpeg');

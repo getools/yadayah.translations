@@ -47,12 +47,17 @@ if ($method === 'GET' && $action === 'list') {
         $q = '%' . $_GET['q'] . '%';
         $params[] = $q; $params[] = $q; $params[] = $q;
     }
-    // JOIN yy_tts so each row carries its provider code/label — the Voices
-    // catalog table renders that in the Provider column (in front of Voice).
+    // JOIN yy_tts for the system label AND yy_provider for the engine
+    // vendor — the Voices catalog "Provider" filter wants the engine
+    // (Azure / ElevenLabs / Kokoro / etc.), not the system name. Falls
+    // back to tts_name in the frontend when a voice row has no
+    // provider_key (legacy rows).
     $whereSql = $where ? (' WHERE ' . implode(' AND ', $where)) : '';
-    $sql = "SELECT v.*, t.tts_code, t.tts_name
+    $sql = "SELECT v.*, t.tts_code, t.tts_name,
+                   p.provider_label, p.provider_main, p.provider_engine
               FROM yy_tts_voice v
-         LEFT JOIN yy_tts t USING (tts_key)"
+         LEFT JOIN yy_tts t USING (tts_key)
+         LEFT JOIN yy_provider p USING (provider_key)"
          . $whereSql
          . " ORDER BY tts_voice_locale, tts_voice_gender, tts_voice_label, tts_voice_code";
     $stmt = $db->prepare($sql);
@@ -156,6 +161,145 @@ if ($action === 'refresh') {
     foreach ($systems as $sys) {
         $provKey  = (int)$sys['tts_key'];
         $provCode = $sys['tts_code'];
+
+        // ── ElevenLabs adapter ───────────────────────────────────────────
+        if ($provCode === 'elevenlabs') {
+            $apiKey = readEnv('ELEVENLABS_API_KEY');
+            if (!$apiKey) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'ELEVENLABS_API_KEY not set'];
+                continue;
+            }
+            // The catalog row needs to point at the engine vendor (yy_provider)
+            // so the Voice Catalog's Provider filter labels these as "ElevenLabs",
+            // not "Azure" (which is the default on tts_voice.provider_key).
+            $elProviderKey = (int)$db->query("SELECT provider_key FROM yy_provider
+                                               WHERE provider_main='ElevenLabs' AND provider_engine='Multilingual TTS'
+                                               ORDER BY provider_key LIMIT 1")->fetchColumn();
+            if ($elProviderKey <= 0) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'no ElevenLabs provider row found'];
+                continue;
+            }
+            // /v2/voices is paginated; loop until has_more=false.
+            $allVoices = [];
+            $nextToken = '';
+            $pageGuard = 0;
+            do {
+                $url = 'https://api.elevenlabs.io/v2/voices?page_size=100'
+                     . ($nextToken !== '' ? ('&next_page_token=' . urlencode($nextToken)) : '');
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_HTTPHEADER     => ['xi-api-key: ' . $apiKey, 'Accept: application/json'],
+                    CURLOPT_TIMEOUT        => 30,
+                ]);
+                $resp = curl_exec($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $cerr = curl_error($ch);
+                curl_close($ch);
+                if ($resp === false || $httpCode >= 400) {
+                    errorResponse('ElevenLabs /v2/voices failed: HTTP ' . $httpCode . ' ' . ($cerr ?: substr((string)$resp, 0, 300)));
+                }
+                $body = json_decode($resp, true);
+                if (!is_array($body) || !isset($body['voices'])) break;
+                foreach ($body['voices'] as $v) $allVoices[] = $v;
+                $nextToken = (string)($body['next_page_token'] ?? '');
+                $hasMore   = !empty($body['has_more']) && $nextToken !== '';
+            } while ($hasMore && ++$pageGuard < 50);
+
+            // Upsert. Note we INCLUDE provider_key here (the Azure block omits
+            // it because the column default 1 = Azure happens to be correct).
+            $upsert = $db->prepare("
+                INSERT INTO yy_tts_voice
+                    (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
+                     tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_type,
+                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_note,
+                     tts_voice_download_dtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, NOW())
+                ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
+                    tts_voice_label             = EXCLUDED.tts_voice_label,
+                    tts_voice_locale            = EXCLUDED.tts_voice_locale,
+                    tts_voice_locale_name       = EXCLUDED.tts_voice_locale_name,
+                    tts_voice_language          = EXCLUDED.tts_voice_language,
+                    tts_voice_region            = EXCLUDED.tts_voice_region,
+                    tts_voice_gender            = EXCLUDED.tts_voice_gender,
+                    tts_voice_type              = EXCLUDED.tts_voice_type,
+                    tts_voice_styles            = EXCLUDED.tts_voice_styles,
+                    tts_voice_status            = EXCLUDED.tts_voice_status,
+                    provider_key                = EXCLUDED.provider_key,
+                    tts_voice_note              = EXCLUDED.tts_voice_note,
+                    tts_voice_download_dtime    = NOW()
+                RETURNING (xmax = 0) AS is_insert
+            ");
+
+            $added = 0; $updated = 0;
+            $db->beginTransaction();
+            try {
+                foreach ($allVoices as $v) {
+                    $code = $v['voice_id'] ?? '';
+                    if ($code === '') continue;
+                    $name = (string)($v['name'] ?? $code);
+                    $labels = is_array($v['labels'] ?? null) ? $v['labels'] : [];
+                    $category = (string)($v['category'] ?? 'premade'); // premade | cloned | generated | professional
+                    $accent = (string)($labels['accent'] ?? '');
+                    $description = (string)($labels['description'] ?? '');
+                    $useCase = (string)($labels['use_case'] ?? '');
+                    $age = (string)($labels['age'] ?? '');
+                    $gender = $labels['gender'] ?? null;
+                    if ($gender !== null && $gender !== '') $gender = ucfirst(strtolower((string)$gender));
+                    else $gender = null;
+                    // Map accent → locale. ElevenLabs models are multilingual; the
+                    // accent label is just a hint for English voices.
+                    $locale = 'en-US'; $localeName = 'English (United States)';
+                    if (stripos($accent, 'british') !== false)        { $locale = 'en-GB'; $localeName = 'English (United Kingdom)'; }
+                    elseif (stripos($accent, 'australian') !== false) { $locale = 'en-AU'; $localeName = 'English (Australia)'; }
+                    elseif (stripos($accent, 'irish') !== false)      { $locale = 'en-IE'; $localeName = 'English (Ireland)'; }
+                    elseif (stripos($accent, 'indian') !== false)     { $locale = 'en-IN'; $localeName = 'English (India)'; }
+                    elseif (stripos($accent, 'transatlantic') !== false) { $locale = 'en-US'; $localeName = 'English (Transatlantic)'; }
+                    $language = substr($locale, 0, 2);
+                    $region   = substr($locale, 3);
+                    $voiceType = match($category) {
+                        'cloned'       => 'Cloned',
+                        'professional' => 'Professional',
+                        'generated'    => 'Generated',
+                        default        => 'Neural',
+                    };
+                    $noteParts = array_filter([
+                        $description,
+                        $age ? "age:$age" : '',
+                        $useCase ? "use:$useCase" : '',
+                        "cat:$category",
+                    ]);
+                    $note = implode(' · ', $noteParts);
+                    $upsert->execute([
+                        $provKey, $code, $name,
+                        $locale, $localeName,
+                        $language, $region,
+                        $gender, $voiceType,
+                        json_encode([], JSON_UNESCAPED_UNICODE),
+                        $category,
+                        $elProviderKey,
+                        $note,
+                    ]);
+                    $row = $upsert->fetch();
+                    if ($row && $row['is_insert']) $added++; else $updated++;
+                }
+                $db->commit();
+            } catch (Throwable $e) {
+                if ($db->inTransaction()) $db->rollBack();
+                errorResponse('refresh failed for ' . $provCode . ': ' . $e->getMessage());
+            }
+            $totStmt = $db->prepare("SELECT COUNT(*) FROM yy_tts_voice WHERE tts_key = ?");
+            $totStmt->execute([$provKey]);
+            $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                              'added' => $added, 'updated' => $updated,
+                              'total' => (int)$totStmt->fetchColumn()];
+            $totalAdded   += $added;
+            $totalUpdated += $updated;
+            continue;
+        }
+
         if ($provCode !== 'azure') {
             $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
                               'skipped' => 'refresh not yet wired for this provider'];

@@ -6,6 +6,10 @@ window.CommunityDM = {};
 
 var _activeThreadKey = null;
 var _audioCtx = null;
+// message_key → raw plain-text body, populated during render. The edit UI
+// reads from this instead of round-tripping through a `data-body` HTML
+// attribute, which silently truncates / re-encodes long or unusual content.
+var _msgBodies = {};
 
 // ── Pitch-shifted notification chime ──
 // pitch 0-7 maps to different frequency pairs, giving each thread a unique sound
@@ -491,11 +495,14 @@ CommunityDM.loadThread = function(threadKey) {
                     + '<div class="dm-system-text">' + Community.esc(m.message_body) + '</div>'
                     + '</div>';
             } else {
+                if (isMine) _msgBodies[m.message_key] = m.message_body || '';
                 var senderLabel = isGroup && !isMine ? '<div class="dm-sender-name">' + Community.esc(m.user_name_display || '') + '</div>' : '';
-                html += '<div class="dm-message' + (isMine ? ' mine' : '') + '">'
+                var editedTag = ((m.message_revision_num || 1) > 1) ? ' <span class="dm-edited-tag" title="' + Community.esc(m.message_revision_dtime || '') + '">(edited)</span>' : '';
+                var editBtn = isMine ? '<button type="button" class="dm-edit-btn" onclick="CommunityDM.beginEdit(' + threadKey + ',' + m.message_key + ')" title="Edit message">&#9998;</button>' : '';
+                html += '<div class="dm-message' + (isMine ? ' mine' : '') + '" id="dm-msg-' + m.message_key + '">'
                     + senderLabel
                     + '<div class="dm-message-bubble">' + (m.message_body_html || Community.formatBody(m.message_body)) + '</div>'
-                    + '<div class="dm-message-time">' + Community.timeAgo(m.message_dtime) + '</div>'
+                    + '<div class="dm-message-time">' + Community.timeAgo(m.message_dtime) + editedTag + editBtn + '</div>'
                     + '</div>';
             }
         });
@@ -549,6 +556,93 @@ CommunityDM.sendMessage = function(threadKey) {
     }).then(function(data) {
         if (data.error) { alert(data.error); return; }
         CommunityDM.loadThread(threadKey);
+    });
+};
+
+// ── Edit own message: swap bubble for inline textarea ──
+// `isPop` indicates the popover view (different element id prefix and a
+// non-reload save path so we don't blow away the popover state).
+CommunityDM.beginEdit = function(threadKey, messageKey, isPop) {
+    var idPrefix = isPop ? 'dm-pop-msg-' : 'dm-msg-';
+    var wrap = document.getElementById(idPrefix + messageKey);
+    if (!wrap) return;
+    if (wrap.classList.contains('editing')) return;
+    var original = _msgBodies[messageKey] || '';
+    var bubble = wrap.querySelector('.dm-message-bubble');
+    var time = wrap.querySelector('.dm-message-time');
+    if (!bubble || !time) return;
+    wrap.classList.add('editing');
+    // Stash original markup so Cancel restores it without a server round-trip.
+    wrap._dmOrigBubble = bubble.innerHTML;
+    wrap._dmOrigTime = time.innerHTML;
+    bubble.innerHTML = '<textarea class="dm-edit-textarea" rows="' + Math.max(2, Math.min(10, (original.match(/\n/g) || []).length + 2)) + '"></textarea>';
+    var ta = bubble.querySelector('.dm-edit-textarea');
+    ta.value = original;
+    ta.focus();
+    var endPos = ta.value.length;
+    ta.setSelectionRange(endPos, endPos);
+    time.innerHTML = '<button type="button" class="dm-edit-save" onclick="CommunityDM.saveEdit(' + threadKey + ',' + messageKey + ',' + (isPop ? 'true' : 'false') + ')">Save</button>'
+        + ' <button type="button" class="dm-edit-cancel" onclick="CommunityDM.cancelEdit(' + messageKey + ',' + (isPop ? 'true' : 'false') + ')">Cancel</button>';
+    // Enter saves, Shift+Enter inserts newline, Escape cancels.
+    ta.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            CommunityDM.saveEdit(threadKey, messageKey, !!isPop);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            CommunityDM.cancelEdit(messageKey, !!isPop);
+        }
+    });
+};
+
+CommunityDM.cancelEdit = function(messageKey, isPop) {
+    var idPrefix = isPop ? 'dm-pop-msg-' : 'dm-msg-';
+    var wrap = document.getElementById(idPrefix + messageKey);
+    if (!wrap) return;
+    var bubble = wrap.querySelector('.dm-message-bubble');
+    var time = wrap.querySelector('.dm-message-time');
+    if (bubble && wrap._dmOrigBubble != null) bubble.innerHTML = wrap._dmOrigBubble;
+    if (time   && wrap._dmOrigTime   != null) time.innerHTML   = wrap._dmOrigTime;
+    wrap.classList.remove('editing');
+};
+
+CommunityDM.saveEdit = function(threadKey, messageKey, isPop) {
+    var idPrefix = isPop ? 'dm-pop-msg-' : 'dm-msg-';
+    var wrap = document.getElementById(idPrefix + messageKey);
+    if (!wrap) return;
+    var ta = wrap.querySelector('.dm-edit-textarea');
+    if (!ta) return;
+    var body = ta.value.trim();
+    if (!body) { alert('Message cannot be empty'); return; }
+    var saveBtn = wrap.querySelector('.dm-edit-save');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving...'; }
+    Community.api('/api/community-dm.php', {
+        method: 'POST',
+        body: { action: 'edit_message', message_key: messageKey, body: body }
+    }).then(function(data) {
+        if (data.error) {
+            alert(data.error);
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+            return;
+        }
+        // Full-page view: simplest correct path is to reload the thread so
+        // sender labels / scroll position / image embeds are re-rendered
+        // through the same code path as the initial load.
+        if (!isPop) {
+            CommunityDM.loadThread(threadKey);
+            return;
+        }
+        // Popover: patch in place to preserve scroll + popover state.
+        _msgBodies[messageKey] = data.message_body || body;
+        var bubble = wrap.querySelector('.dm-message-bubble');
+        var time = wrap.querySelector('.dm-message-time');
+        if (bubble) bubble.innerHTML = data.message_body_html || Community.formatBody(data.message_body || body);
+        if (time) {
+            time.innerHTML = Community.timeAgo(data.message_revision_dtime || new Date().toISOString())
+                + ' <span class="dm-edited-tag" title="' + Community.esc(data.message_revision_dtime || '') + '">(edited)</span>'
+                + ' <button type="button" class="dm-edit-btn" onclick="CommunityDM.beginEdit(' + threadKey + ',' + messageKey + ',true)" title="Edit message">&#9998;</button>';
+        }
+        wrap.classList.remove('editing');
     });
 };
 
@@ -957,9 +1051,12 @@ CommunityDM.popThread = function(threadKey) {
         var html = '<div class="chat-pop-msgs" id="chat-pop-msgs">';
         messages.forEach(function(m) {
             var isMine = m.user_key === Community.currentUser.user_key;
-            html += '<div class="dm-message' + (isMine ? ' mine' : '') + '">'
+            if (isMine) _msgBodies[m.message_key] = m.message_body || '';
+            var editedTag = ((m.message_revision_num || 1) > 1) ? ' <span class="dm-edited-tag" title="' + Community.esc(m.message_revision_dtime || '') + '">(edited)</span>' : '';
+            var editBtn = isMine ? '<button type="button" class="dm-edit-btn" onclick="CommunityDM.beginEdit(' + threadKey + ',' + m.message_key + ',true)" title="Edit message">&#9998;</button>' : '';
+            html += '<div class="dm-message' + (isMine ? ' mine' : '') + '" id="dm-pop-msg-' + m.message_key + '">'
                 + '<div class="dm-message-bubble">' + (m.message_body_html || Community.formatBody(m.message_body)) + '</div>'
-                + '<div class="dm-message-time">' + Community.timeAgo(m.message_dtime) + '</div>'
+                + '<div class="dm-message-time">' + Community.timeAgo(m.message_dtime) + editedTag + editBtn + '</div>'
                 + '</div>';
         });
         html += '</div>';

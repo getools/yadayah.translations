@@ -41,6 +41,7 @@ if ($method === 'GET') {
         // Get messages
         $stmt = $db->prepare("
             SELECT m.message_key, m.user_key, m.message_body, m.message_body_html, m.message_dtime,
+                   m.message_revision_num, m.message_revision_dtime,
                    u.user_name_display, u.user_avatar
             FROM yy_community_dm_message m
             LEFT JOIN yy_user u ON m.user_key = u.user_key
@@ -536,6 +537,50 @@ if ($method === 'POST') {
         $db->prepare("UPDATE yy_community_dm_thread SET last_message_dtime = NOW() WHERE thread_key = ?")->execute([$threadKey]);
 
         jsonResponse(['success' => true]);
+    }
+
+    // ── Edit own message ──
+    if ($action === 'edit_message') {
+        $messageKey = (int)($data['message_key'] ?? 0);
+        $body       = trim($data['body'] ?? '');
+        $bodyHtml   = trim($data['message_body_html'] ?? '');
+        if (!$messageKey) errorResponse('message_key is required');
+        if ($body === '') errorResponse('Message cannot be empty');
+
+        // Verify ownership + active. System messages (user_key = 0/null) cannot be edited.
+        $stmt = $db->prepare("SELECT user_key, thread_key FROM yy_community_dm_message WHERE message_key = ? AND message_active_flag = TRUE");
+        $stmt->execute([$messageKey]);
+        $row = $stmt->fetch();
+        if (!$row) errorResponse('Message not found', 404);
+        if ((int)$row['user_key'] !== $userKey) errorResponse('You can only edit your own messages', 403);
+
+        // Confirm the user is still a participant of the thread (defends against
+        // an edit attempt after being removed from a group).
+        $threadKey = (int)$row['thread_key'];
+        $partStmt = $db->prepare("SELECT 1 FROM yy_community_dm_participant WHERE thread_key = ? AND user_key = ?");
+        $partStmt->execute([$threadKey, $userKey]);
+        if (!$partStmt->fetchColumn()) errorResponse('Thread not found', 404);
+
+        // Update. trg_yy_community_dm_message_rev bumps message_revision_num and
+        // message_revision_dtime, and snapshots the row into the *_rev history
+        // table, but does not touch message_revision_user_key — so we set it
+        // explicitly so the audit row records the editor.
+        $upd = $db->prepare("UPDATE yy_community_dm_message SET message_body = ?, message_body_html = ?, message_revision_user_key = ? WHERE message_key = ?");
+        $upd->execute([$body, $bodyHtml ?: null, $userKey, $messageKey]);
+
+        // Return the new revision metadata so the UI can paint the "edited" tag
+        // without an extra round-trip.
+        $back = $db->prepare("SELECT message_body, message_body_html, message_revision_num, message_revision_dtime FROM yy_community_dm_message WHERE message_key = ?");
+        $back->execute([$messageKey]);
+        $after = $back->fetch();
+        jsonResponse([
+            'success'                => true,
+            'message_key'            => $messageKey,
+            'message_body'           => $after['message_body'],
+            'message_body_html'      => $after['message_body_html'],
+            'message_revision_num'   => (int)$after['message_revision_num'],
+            'message_revision_dtime' => $after['message_revision_dtime'],
+        ]);
     }
 
     if ($action === 'set_chime') {
