@@ -274,9 +274,19 @@ if ($mode === 'all') {
 
 $ftsWhere = 'WHERE ' . implode(' AND ', $allConditions);
 
-$countStmt = $pdo->prepare("SELECT COUNT(*) FROM yy_paragraph p JOIN yy_volume v ON v.volume_key = p.volume_key $ftsWhere");
-$countStmt->execute($allParams);
-$total = (int)$countStmt->fetchColumn();
+// Short timeout on the Tier 1 count — consonant-skeleton OR + multi-word
+// ~* conditions can scan the entire table for common terms and take minutes.
+// If it times out, fall through to Tier 2 rather than blocking the request.
+try {
+    $pdo->exec("SET statement_timeout = '8s'");
+    $countStmt = $pdo->prepare("SELECT COUNT(*) FROM yy_paragraph p JOIN yy_volume v ON v.volume_key = p.volume_key $ftsWhere");
+    $countStmt->execute($allParams);
+    $total = (int)$countStmt->fetchColumn();
+} catch (PDOException $e) {
+    $total = 0; // Count too slow; fall through to Tier 2
+} finally {
+    try { $pdo->exec("SET statement_timeout = '0'"); } catch (PDOException $_) {}
+}
 
 // ── Search-log + auto-alias learning ─────────────────────────────────
 // Log every query (anonymous-safe fingerprint by IP+UA) so we can
@@ -407,9 +417,18 @@ if ($total > 0) {
     $fuzzyConditions = array_merge(["normalize_search_text(p.paragraph_text_plain) ILIKE ?"], $filterConditions);
     $fuzzyWhere = 'WHERE ' . implode(' AND ', $fuzzyConditions);
 
-    $countStmt = $pdo->prepare("SELECT COUNT(*) FROM yy_paragraph p JOIN yy_volume v ON v.volume_key = p.volume_key $fuzzyWhere");
-    $countStmt->execute(array_merge([$likePattern], $filterParams));
-    $total = (int)$countStmt->fetchColumn();
+    // Short timeout on Tier 2 count — full-string ILIKE on large tables can
+    // be slow for broad patterns. On timeout fall through to Tier 3.
+    try {
+        $pdo->exec("SET statement_timeout = '8s'");
+        $countStmt = $pdo->prepare("SELECT COUNT(*) FROM yy_paragraph p JOIN yy_volume v ON v.volume_key = p.volume_key $fuzzyWhere");
+        $countStmt->execute(array_merge([$likePattern], $filterParams));
+        $total = (int)$countStmt->fetchColumn();
+    } catch (PDOException $e) {
+        $total = 0; // Count too slow; fall through to Tier 3
+    } finally {
+        try { $pdo->exec("SET statement_timeout = '0'"); } catch (PDOException $_) {}
+    }
 
     if ($total > 0) {
         $stmt = $pdo->prepare("
@@ -506,15 +525,20 @@ if ($total > 0) {
                 ORDER BY rank DESC, v.volume_sort, p.paragraph_page, p.paragraph_number
                 LIMIT ? OFFSET ?
             ");
-            $stmt->execute(array_merge(
-                $simParams,             // CASE WHEN rank conditions
-                [count($tier3Words)],   // divisor for rank normalization
-                [$firstWord],           // snippet anchor word
-                $simParams,             // WHERE conditions
-                $filterParams,
-                [$limit + 1, $offset]   // fetch one extra to detect more pages
-            ));
-            $results = $stmt->fetchAll();
+            try {
+                $stmt->execute(array_merge(
+                    $simParams,             // CASE WHEN rank conditions
+                    [count($tier3Words)],   // divisor for rank normalization
+                    [$firstWord],           // snippet anchor word
+                    $simParams,             // WHERE conditions
+                    $filterParams,
+                    [$limit + 1, $offset]   // fetch one extra to detect more pages
+                ));
+                $results = $stmt->fetchAll();
+            } catch (PDOException $e) {
+                $results = [];
+                $total = 0;
+            }
 
             // Derive total from the +1 sentinel row.
             if (count($results) > $limit) {

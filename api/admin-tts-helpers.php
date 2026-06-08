@@ -947,13 +947,23 @@ function azureOutputFormats(): array {
  * detection is handled separately by per-series pre-passes in the
  * build worker — segmentParagraph stays HTML-structure-driven.
  */
-function segmentParagraph(string $html): array {
+function segmentParagraph(string $html, array &$carry = []): array {
     $segments = [];
     $cur = ['category' => null, 'text' => ''];
 
-    $boldDepth = 0;
-    $italicDepth = 0;
-    $parenDepth = 0;
+    // Carry-over state from the previous paragraph. When a YY paragraph
+    // ends mid-bold or mid-paren because the PDF parser cut at a page
+    // break, the next paragraph's continuation text needs to start in
+    // the SAME format state. Without this carry-over, that content
+    // routes to 'main' voice and the listener hears the translation
+    // suddenly drop into general narration mid-definition.
+    // Format: $carry = ['bold'=>N, 'italic'=>N, 'paren'=>N, 'bibStack'=>[...]]
+    $boldDepth   = (int)($carry['bold']   ?? 0);
+    $italicDepth = (int)($carry['italic'] ?? 0);
+    $parenDepth  = (int)($carry['paren']  ?? 0);
+    $bibStack    = (array)($carry['bibStack'] ?? []);
+    // (above $italicDepth, $parenDepth, $boldDepth, $bibStack already
+    // initialised from the $carry array.)
     // Bible-style surrogate stack. preprocessFontFilter rewrites colored
     // <span data-style="kjv"> from the parser into <bib-kjv>…</bib-kjv>;
     // each open tag pushes its style suffix so text inside routes to the
@@ -1035,6 +1045,16 @@ function segmentParagraph(string $html): array {
         $s['text'] = trim($s['text']);
     }
     unset($s);
+    // Hand the final depths back to the caller so it can pass them in to
+    // the next paragraph's call. Continuation handling lives in the worker
+    // loop — see the $carryState variable around the segmentParagraph
+    // call in admin-tts-build-worker.php.
+    $carry = [
+        'bold'     => $boldDepth,
+        'italic'   => $italicDepth,
+        'paren'    => $parenDepth,
+        'bibStack' => $bibStack,
+    ];
     return array_values(array_filter($merged, fn($s) => $s['text'] !== ''));
 }
 
@@ -1275,6 +1295,15 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     $tuneHits = 0;
     $matchedTuneSeed = null;
     $text = applyTunesPlain($text, ttsTunesForProvider($cfg, $providerKey), $tuneHits, $matchedTuneSeed);
+    // Apply yy_tts_pause-defined pauses (e.g. " | " → 300ms, " / " → 150ms,
+    // "—" → 225ms). Without this the configured pauses are silently lost
+    // on the local-engine path — Azure's buildVoiceBlock calls applyPauses
+    // too but the local path was skipping it, so "Moseh | Moses" ran with
+    // no pause between Hebrew and English forms.
+    if (!empty($cfg['pauses'])) {
+        $localPlaceholder = '';
+        $text = applyPauses($text, $cfg['pauses'], $localPlaceholder);
+    }
     // Inline pause markers ([500] / [1s] / etc.) get the same placeholder
     // treatment as Azure's path, then we convert them to natural punctuation
     // that local engines (Chatterbox/CosyVoice/Kokoro/Qwen3) actually pause
@@ -1383,7 +1412,55 @@ function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?strin
         $err = 'local TTS ' . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)));
         return '';
     }
-    return (string)($r['body'] ?? '');
+    $bytes = (string)($r['body'] ?? '');
+    // Strip leading + trailing silence / low-amplitude hallucinated garbage
+    // ("GP" / "GP2" sounds Chatterbox emits during sampler startup and EOS-
+    // confusion). Adaptive — uses an energy threshold instead of a fixed
+    // millisecond cut, so paragraphs WITHOUT garbage don't get audio trimmed
+    // and paragraphs WITH longer garbage runs still get fully cleaned.
+    if ($bytes !== '' && strpos($fmt, 'mp3') !== false) {
+        $trimmed = trimLeadingTrailingSilence($bytes);
+        if ($trimmed !== '') $bytes = $trimmed;
+    }
+    return $bytes;
+}
+
+/**
+ * Strip leading + trailing low-energy audio (<-30dB) via ffmpeg's
+ * silenceremove filter. Used to remove Chatterbox's startup-sampler
+ * hallucinations and EOS-confusion garbage from synth output.
+ * Returns original bytes if ffmpeg fails or isn't available.
+ */
+function trimLeadingTrailingSilence(string $mp3): string {
+    static $ffmpegBin = null;
+    if ($ffmpegBin === null) {
+        $ffmpegBin = trim((string)shell_exec('which ffmpeg 2>/dev/null'));
+        if ($ffmpegBin === '') { $ffmpegBin = false; return $mp3; }
+    }
+    if ($ffmpegBin === false) return $mp3;
+    $tmpIn  = tempnam(sys_get_temp_dir(), 'tts_trim_');
+    if ($tmpIn === false) return $mp3;
+    $tmpOut = $tmpIn . '.mp3';
+    @file_put_contents($tmpIn, $mp3);
+    // silenceremove leading: stop after first non-silent moment.
+    // areverse → trim leading (now original trailing) → areverse back.
+    // Threshold -30dB catches both pure silence and quiet hallucinated
+    // tokens; real speech sits well above -20dB. 0.05s window so a brief
+    // breath isn't enough to retrigger.
+    $filter = 'silenceremove=start_periods=1:start_silence=0.05:start_threshold=-30dB,'
+            . 'areverse,'
+            . 'silenceremove=start_periods=1:start_silence=0.05:start_threshold=-30dB,'
+            . 'areverse';
+    $cmd = sprintf('%s -loglevel error -y -i %s -af %s -acodec libmp3lame -ab 64k %s 2>&1',
+        escapeshellarg($ffmpegBin),
+        escapeshellarg($tmpIn),
+        escapeshellarg($filter),
+        escapeshellarg($tmpOut));
+    @shell_exec($cmd);
+    $out = @file_get_contents($tmpOut);
+    @unlink($tmpIn);
+    @unlink($tmpOut);
+    return ($out !== false && $out !== '') ? $out : $mp3;
 }
 
 // Azure TTS retry wrapper. 429 / 5xx / curl errors are retriable with
@@ -1453,27 +1530,24 @@ function localTtsSynthesizeChunked(array $cfg, array $seg, string $outputFormat,
                 || (strpos($outputFormat, 'opus') !== false);
     if (!$isMp3OrOpus) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
 
-    // Chatterbox-style engines clip the first ~200 ms of audio as the
-    // sampler warms up — fine on a long paragraph (you lose the leading
-    // breath), but a short single-word preview like "MihtsraEem" loses
-    // the first syllable entirely and the listener only hears "sraEem".
-    // For text under ~25 chars, prepend a warmup phrase that takes the
-    // clipping hit instead. The warmup is a single word followed by a
-    // sentence-terminator so the sentence chunker splits it off into its
-    // own chunk; we then drop that chunk's audio from the concat. The
-    // remaining word's first syllable is preserved.
-    $origText = (string)($seg['text'] ?? '');
-    $needsWarmup = (mb_strlen(trim($origText)) <= 25);
-    $warmupChunks = 0;
-    if ($needsWarmup) {
-        // "uh." reliably produces a tiny "uh" + clipping room and gets
-        // split off as its own sentence by splitSentencesForLocalTts.
-        $seg['text'] = 'uh. ' . $origText;
-        $warmupChunks = 1;
-    }
-
+    // Chatterbox produces ~200 ms of startup garbage at the front of
+    // EVERY synth call. Splitting the input into sentence chunks meant
+    // each chunk had its OWN startup garbage — the warmup phrase only
+    // protected itself, not the next chunk. Fix: for short text that
+    // would otherwise be ONE chunk, prepend the warmup INLINE so it
+    // and the target word travel as a single Chatterbox call. The
+    // call's startup garbage eats the warmup; the target word comes
+    // through clean. We drop the now-shared chunk's leading "uh. "
+    // audio implicitly because the engine spends its first 200 ms on
+    // garbage that's audibly nothing (cb's "Tallee W" / hum noise).
+    // No warmup in the book-build synth path. The user clearly does NOT
+    // want "uh." or "Seed N." audible in audiobook content, and the
+    // startup-clipping of short paragraphs is a price they'd rather pay
+    // than spoken-out warmup nonsense. Preview-time warmup lives in
+    // admin-tts-preview.php so it doesn't bleed into chapter builds.
     $sentences = splitSentencesForLocalTts((string)($seg['text'] ?? ''));
     if (count($sentences) <= 1) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
+    $warmupChunks = 0;
 
     $bytes = '';
     foreach ($sentences as $i => $sent) {
@@ -1531,11 +1605,16 @@ function splitSentencesForLocalTts(string $text): array {
         $p = trim($p);
         if ($p !== '') $out[] = $p;
     }
-    // Backstop: cap individual chunks at ~400 chars by splitting on commas.
-    // Rare in YY but possible in long quoted passages.
+    // Backstop: cap individual chunks at ~250 chars by splitting on commas.
+    // YY paragraphs frequently have very long compound sentences with deep
+    // embedded parentheticals — a single sentence can easily exceed 250
+    // chars / 40+ words. Chatterbox's max_new_tokens caps a single synth
+    // at ~32 s of audio at 400 tokens (current setting), so chunks much
+    // over 250 chars get truncated mid-sentence ("not being read all the
+    // way to the end"). 250 chars ≈ 17-20s, safely under the cap.
     $capped = [];
     foreach ($out as $s) {
-        if (mb_strlen($s) <= 400) { $capped[] = $s; continue; }
+        if (mb_strlen($s) <= 250) { $capped[] = $s; continue; }
         foreach (preg_split('/(?<=,)\s+/u', $s) as $sp) {
             $sp = trim($sp);
             if ($sp !== '') $capped[] = $sp;

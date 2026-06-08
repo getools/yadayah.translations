@@ -152,10 +152,22 @@ try {
         // routing is a build-worker concern).
         $localSeg     = buildLocalSegment($text, $cfg, $resolvedCat);
         $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
-        // Seed comes from the matched tune now (see buildLocalSegment) —
-        // the tune_override synthetic rule carries the row's tts_tune_seed,
-        // so the preview produces the exact same audio the book build will
-        // when this tune fires. No hardcoded override here.
+        // Preview-only warmup. For short single-word respelling previews
+        // the Chatterbox engine's first ~200 ms is startup garbage and
+        // would clip "Yadah" → "adah" etc. Prepend a warmup phrase that
+        // travels in the same synth call so the garbage lands on the
+        // warmup audio. The book-build path explicitly does NOT add this
+        // warmup — see localTtsSynthesizeChunked in admin-tts-helpers.php
+        // — because chapter audio can't have spoken "uh." / "Seed N."
+        // mixed in. Previews announce the seed number when a seed is set
+        // (tune_override carries one) so the audition tells the listener
+        // which variant they're hearing.
+        if (mb_strlen(trim((string)($localSeg['text'] ?? ''))) <= 120) {
+            $warmup = (isset($localSeg['seed']) && $localSeg['seed'] !== null)
+                ? (((int)$localSeg['seed']) . '. ')
+                : 'uh. ';
+            $localSeg['text'] = $warmup . $localSeg['text'];
+        }
         if (function_exists('localTtsSynthesizeRetry')) {
             $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
         } else {

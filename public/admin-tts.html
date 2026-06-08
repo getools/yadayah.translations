@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780645985">
+    <meta name="page-version" content="1780888066">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -612,6 +612,12 @@
 <div id="build-modal" class="modal-overlay">
     <div class="modal-box">
         <h3 id="build-modal-title">Build audio</h3>
+        <!-- Action buttons at the top so they're reachable without scrolling
+             past the per-category override rows on long lists. -->
+        <div class="modal-buttons" style="margin-top:0;border-top:0;padding-top:0;margin-bottom:10px;">
+            <button class="btn-primary" id="build-start-btn" onclick="startBuild()">Start build</button>
+            <button class="btn-cancel" onclick="closeBuildModal()">Cancel</button>
+        </div>
         <p style="font-size:0.85rem;color:#666;margin:0 0 14px">Defaults shown come from the Voices tab. Override per-build if you want.</p>
         <div class="voice-row" style="grid-template-columns:160px 1fr">
             <label>Output format</label>
@@ -619,10 +625,6 @@
         </div>
         <div id="build-category-rows" style="margin-top:10px"></div>
         <div id="build-status" class="status-msg"></div>
-        <div class="modal-buttons">
-            <button class="btn-cancel" onclick="closeBuildModal()">Cancel</button>
-            <button class="btn-primary" id="build-start-btn" onclick="startBuild()">Start build</button>
-        </div>
     </div>
 </div>
 
@@ -2334,6 +2336,28 @@ function populateTunesTestVoiceSelect() {
     var voiceSel = $('tunes-test-voice');
     if (!provSel || !voiceSel || !PRONS_VOICES_CACHE) return;
     var savedVoice = (window.sessionState && sessionState.load) ? sessionState.load('pronsVoice', '') : '';
+    // Crucial: if a voice was saved but the current provider filter
+    // wouldn't include it, switch the provider to the voice's actual
+    // provider FIRST. Otherwise the populate-then-fall-to-first-voice
+    // path silently changes the selected voice on every page reload (or
+    // on every loadTunes call triggered by an unrelated row save).
+    if (savedVoice) {
+        var voiceObj = (PRONS_VOICES_CACHE.voices || []).filter(function (v) {
+            return v.tts_voice_code === savedVoice;
+        })[0];
+        if (voiceObj) {
+            var savedProvKey = String(voiceObj.provider_key);
+            if (provSel.value !== savedProvKey) {
+                var hasOption = Array.prototype.some.call(provSel.options, function (o) {
+                    return o.value === savedProvKey;
+                });
+                if (hasOption) {
+                    provSel.value = savedProvKey;
+                    if (window.sessionState && sessionState.save) sessionState.save('pronsProvider', savedProvKey);
+                }
+            }
+        }
+    }
     var providerKey = parseInt(provSel.value, 10) || 0;
     var voices = PRONS_VOICES_CACHE.voices.filter(function (v) { return v.provider_key === providerKey; });
     var prev = voiceSel.value || savedVoice;
@@ -2341,8 +2365,6 @@ function populateTunesTestVoiceSelect() {
     voices.forEach(function (v) {
         var o = document.createElement('option');
         o.value = v.tts_voice_code;
-        // Short, scannable label: "HilaNeural (he-IL)" or just the label
-        // when no locale info is available.
         var label = v.tts_voice_label || v.tts_voice_code;
         var loc   = v.tts_voice_locale || v.tts_voice_language || '';
         o.textContent = label + (loc ? ' (' + loc + ')' : '');
@@ -2358,8 +2380,17 @@ function populateTunesTestVoiceSelect() {
 function onTunesTestProviderChange() {
     var v = $('tunes-test-provider').value;
     if (window.sessionState && sessionState.save) sessionState.save('pronsProvider', v);
+    // CRUCIAL: clear the saved voice BEFORE re-populating, otherwise
+    // populateTunesTestVoiceSelect's "voice's provider wins" reconcile
+    // logic (intended for initial load) will silently flip the provider
+    // back to the saved voice's provider — making the user's choice
+    // appear to revert. By clearing first, populate falls into the plain
+    // first-voice-of-new-provider path.
+    if (window.sessionState && sessionState.save) sessionState.save('pronsVoice', '');
+    var voiceSel = $('tunes-test-voice');
+    if (voiceSel) voiceSel.value = '';
     populateTunesTestVoiceSelect();
-    // Save the freshly-defaulted voice too so reloads land on it.
+    // Save the freshly-defaulted voice (now from the new provider's list).
     if (window.sessionState && sessionState.save) sessionState.save('pronsVoice', $('tunes-test-voice').value);
 }
 
@@ -2933,22 +2964,37 @@ function buildTuneRow(t) {
     });
     var savedProviderKey = (t.provider_key !== undefined && t.provider_key !== null) ? String(t.provider_key) : '0';
     provSelEl.value = savedProviderKey;
-    // Populate the per-tune voice dropdown from the global catalog,
-    // shortening "Brian (Multilingual, authoritative male, US)" down to
-    // "Brian" so the cell stays narrow. Inactive voices are excluded.
+    // Populate the per-tune voice dropdown — filtered to the selected
+    // provider so changing Provider above swaps the voice list to that
+    // engine's voices. Provider=0 ("apply to all engines") shows the
+    // full voice catalog.
     var voiceSelEl = tr.querySelector('.f-voice');
-    var voices = (CATALOG && CATALOG.voices) ? CATALOG.voices : [];
-    voices.forEach(function (v) {
-        var o = document.createElement('option');
-        o.value = v.code;
-        // Strip everything after the first space so labels read as a
-        // single first name: "Brian (Multilingual...)" → "Brian",
-        // "Shimmer Turbo Multilingual" → "Shimmer", etc.
-        var shortLabel = (v.label || v.code).split(/[\s(]/, 1)[0].trim();
-        o.textContent = shortLabel;
-        voiceSelEl.appendChild(o);
+    function rebuildTuneVoiceOptions(preserveCode) {
+        var voices = (CATALOG && CATALOG.voices) ? CATALOG.voices : [];
+        var pk = parseInt(provSelEl.value, 10) || 0;
+        var prev = preserveCode !== undefined ? preserveCode : voiceSelEl.value;
+        voiceSelEl.innerHTML = '<option value=""></option>';
+        voices
+            .filter(function (v) { return pk === 0 || v.provider_key === pk; })
+            .forEach(function (v) {
+                var o = document.createElement('option');
+                o.value = v.code;
+                // "Brian (Multilingual, authoritative male, US)" → "Brian"
+                var shortLabel = (v.label || v.code).split(/[\s(]/, 1)[0].trim();
+                o.textContent = shortLabel;
+                voiceSelEl.appendChild(o);
+            });
+        if (prev && Array.prototype.some.call(voiceSelEl.options, function (o) { return o.value === prev; })) {
+            voiceSelEl.value = prev;
+        } else {
+            voiceSelEl.value = '';
+        }
+    }
+    rebuildTuneVoiceOptions(voiceCode || '');
+    provSelEl.addEventListener('change', function () {
+        rebuildTuneVoiceOptions();
+        scheduleAutoSave(provSelEl, function () { return saveTuneRow(tr); }, 100);
     });
-    if (voiceCode) voiceSelEl.value = voiceCode;
     tr.querySelectorAll('button').forEach(b => b.addEventListener('click', () => handleTuneAction(tr, b.dataset.act)));
     tr.querySelectorAll('input[type=text]').forEach(function(el) {
         el.addEventListener('input',  function() { scheduleAutoSave(el, function() { return saveTuneRow(tr); }, 600); });
@@ -3555,6 +3601,20 @@ async function loadChapters(volumeKey) {
       })
       .catch(function () {});
     renderChapters();
+    // Auto-refresh any open paragraph panels so users see new audio
+    // appear as the worker writes parts. The per-row diff in
+    // loadParagraphRows means only the rows whose has_part flipped get
+    // replaced; audio elements on other rows stay untouched and don't
+    // restart their preload. Each refresh fetches ~80-100 KB so we cap
+    // to the panels actually open (usually 1).
+    if (window._expandedAudioKeys && window._expandedAudioKeys.size) {
+        window._expandedAudioKeys.forEach(function (ak) {
+            var row = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"]');
+            if (!row || row.style.display === 'none') return;
+            var grid = row.querySelector('.paragraph-grid');
+            if (grid) loadParagraphRows(ak, grid);
+        });
+    }
     // Poll while anything is running.
     // Poll while anything is in motion. 'paused' is a settled state — no
     // worker is running — so we don't poll for it (the user will trigger
@@ -3605,154 +3665,174 @@ function closeTtsError() {
 
 var _CHAPTER_ROWS_SIG = '';   // last-rendered full-table fingerprint; skip render if unchanged
 var _PREV_VOLUME_KEY = 0;     // last volume_key passed to loadChapters; used to detect actual switches vs same-volume polls
+// Build the HTML for ONE chapter's two rows (data row + paragraph-expand row).
+// Pulled out so we can render either the whole table or a single row.
+function _chapterRowsHtml(c) {
+    var st = c.tts_audio_status || 'none';
+    var badge;
+    if (st === 'failed') {
+        var fullErr = (c.tts_audio_error || c.tts_audio_message || 'No error message recorded.').toString();
+        var shortErr = (c.tts_audio_message || c.tts_audio_error || '').toString().split('\n')[0].substring(0, 200);
+        window._ttsErrors = window._ttsErrors || {};
+        window._ttsErrors[c.tts_audio_key] = fullErr;
+        badge = '<span class="badge badge-failed clickable" '
+              + 'onclick="showTtsError(' + c.tts_audio_key + ')" '
+              + 'title="' + escapeHtml(shortErr || 'Click to view error') + '">failed</span>';
+    } else {
+        badge = '<span class="badge badge-' + st + '">' + st + '</span>';
+    }
+    var progress = '';
+    if (st === 'running' || st === 'pending' || st === 'paused') {
+        progress = '<div class="progress"><span class="fill" style="width:' + (c.tts_audio_progress || 0) + '%"></span></div>';
+    }
+    var audio = '';
+    if (st === 'complete' && c.tts_audio_path) {
+        audio = '<audio controls preload="none" style="width:305px;height:28px" src="' + escapeHtml(c.tts_audio_path) + '"></audio>';
+    }
+    var actions = '';
+    if (st !== 'running' && st !== 'pending') {
+        var primaryLabel = (st === 'complete') ? 'Rebuild'
+                         : (st === 'none')     ? 'Build'
+                         :                       'Settings';
+        actions = '<button class="btn-sm" onclick="openBuildModal(' + c.chapter_key + ',' + (c.tts_audio_key || 'null') + ')">' + primaryLabel + '</button>';
+    }
+    if (st === 'paused' && c.tts_audio_key) {
+        actions += ' <button class="btn-sm" style="background:#2e7d32;color:#fff;" title="Continue from the next paragraph using the cached audio for completed paragraphs" onclick="resumeBuild(' + c.tts_audio_key + ')">▶ Resume</button>';
+        actions += ' <button class="btn-sm" style="background:#b85c00;color:#fff;" title="Discard cached paragraphs and rebuild this chapter from scratch" onclick="restartBuild(' + c.tts_audio_key + ',' + c.chapter_number + ')">↻ Restart</button>';
+    }
+    if (st === 'complete' && c.tts_audio_failed_paragraphs) {
+        var failedList = String(c.tts_audio_failed_paragraphs).replace(/^\{|\}$/g, '').split(',').filter(function(s){ return s.length > 0; });
+        if (failedList.length > 0) {
+            actions += ' <button class="btn-sm" style="background:#b85c00;color:#fff;" title="Re-synthesize only paragraphs: ' + failedList.join(', ') + '" onclick="retryFailed(' + c.tts_audio_key + ',' + failedList.length + ')">Retry ' + failedList.length + ' failed</button>';
+        }
+    }
+    if (st === 'running' || st === 'pending') {
+        actions += ' <button class="btn-sm" style="background:#5c4a8a;color:#fff;" title="Stop after the current paragraph; cached paragraphs are kept for later Resume" onclick="pauseBuild(' + c.tts_audio_key + ')">⏸ Pause</button>';
+        actions += '<button class="btn-sm btn-del" onclick="cancelBuild(' + c.tts_audio_key + ')">Cancel</button>';
+    } else if (c.tts_audio_key) {
+        actions += ' <button class="btn-sm btn-del" title="Delete this chapter\'s MP3, markers, and parts cache" onclick="deleteAudio(' + c.tts_audio_key + ',' + c.chapter_number + ')">Delete</button>';
+    }
+    var readCell;
+    if (ACTIVE_VOLUME_CODE && c.chapter_page) {
+        var href = '/' + ACTIVE_VOLUME_CODE + '/#page=' + c.chapter_page;
+        readCell = '<a href="' + escapeHtml(href) + '" target="_blank" title="Open chapter ' + escapeHtml(c.chapter_number) + ' on page ' + escapeHtml(c.chapter_page) + ' in the flipbook" style="color:#31345A;text-decoration:none;font-weight:600;white-space:nowrap;">p.' + escapeHtml(c.chapter_page) + ' →</a>';
+    } else {
+        readCell = '<span style="color:#bbb;" title="No flipbook page configured for this chapter">—</span>';
+    }
+    var caret = c.tts_audio_key
+        ? '<span class="expand-caret" data-ak="' + c.tts_audio_key + '" data-ck="' + c.chapter_key + '" onclick="toggleChapterParas(this)" style="cursor:pointer;color:#31345A;font-weight:700;user-select:none;display:inline-block;width:14px;">▸</span> '
+        : '';
+    var html = '<tr data-ck="' + c.chapter_key + '">'
+        + '<td>' + caret + escapeHtml(c.chapter_number) + '</td>'
+        + '<td>' + escapeHtml(c.chapter_label || '') + (c.tts_audio_message ? '<div style="font-size:0.78rem;color:#888">' + escapeHtml(c.tts_audio_message) + '</div>' : '') + '</td>'
+        + '<td>' + (c.paragraph_count != null ? escapeHtml(c.paragraph_count) : '<span style="color:#bbb;">—</span>') + '</td>'
+        + '<td style="white-space:nowrap;">' + readCell + '</td>'
+        + '<td>' + badge + progress + '</td>'
+        + '<td>' + audio + '</td>'
+        + '<td class="col-actions">' + actions + '</td>'
+        + '</tr>';
+    if (c.tts_audio_key) {
+        html += '<tr class="paragraph-expand-row" data-ck="' + c.chapter_key + '" data-ak="' + c.tts_audio_key + '" style="display:none;">'
+              + '<td colspan="7" style="background:#f7f7fa;padding:8px 14px;">'
+              +    '<div class="paragraph-grid">Loading paragraphs…</div>'
+              + '</td></tr>';
+    }
+    return html;
+}
+function _chapterRowSig(c) {
+    return [c.tts_audio_status || 'none', c.tts_audio_progress || 0,
+            c.tts_audio_message || '', c.tts_audio_error || '', c.tts_audio_path || '',
+            c.tts_audio_failed_paragraphs || '', c.paragraph_count || 0,
+            c.tts_audio_key || 0, c.chapter_number, c.chapter_label || '',
+            c.chapter_page || 0].join('\x1f');
+}
 function renderChapters() {
     var tb = $('chapters-tbody');
-    // Reverted to a simple "build all rows then one innerHTML swap" path.
-    // The earlier per-row diff was over-engineered; it introduced subtle
-    // bugs that left the table blank under some conditions. We preserve
-    // expand-panel HTML across the swap so the audio elements don't get
-    // recreated, which was the original motivation for the diff. Diff
-    // can be re-introduced later with proper testing.
-    var panelSnapshots = {};
-    tb.querySelectorAll('tr.paragraph-expand-row').forEach(function (row) {
-        if (row.style.display !== 'none') {
-            var grid = row.querySelector('.paragraph-grid');
-            if (grid) panelSnapshots[row.dataset.ak] = grid.innerHTML;
-        }
+    // Per-chapter-row diff. Only touches rows whose state actually
+    // changed; the paragraph-expand row beside an unchanged chapter row
+    // is NEVER replaced, so the audio elements inside it keep their
+    // playback state and don't visibly "refresh" on every poll.
+    var seenKeys = {};
+    var existing = {};
+    tb.querySelectorAll('tr[data-ck]:not(.paragraph-expand-row)').forEach(function (tr) {
+        existing[tr.dataset.ck] = tr;
     });
-    var fullSig = JSON.stringify(CHAPTERS.map(function (c) {
-        return [c.chapter_key, c.tts_audio_status || 'none', c.tts_audio_progress || 0,
-                c.tts_audio_message || '', c.tts_audio_error || '', c.tts_audio_path || '',
-                c.tts_audio_failed_paragraphs || '', c.paragraph_count || 0];
-    }));
-    if (fullSig === _CHAPTER_ROWS_SIG) return;
-    _CHAPTER_ROWS_SIG = fullSig;
-    var buf = '';
+    var lastNode = null;
     CHAPTERS.forEach(c => {
-        var st = c.tts_audio_status || 'none';
-        var badge;
-        if (st === 'failed') {
-            // Build a clickable badge that shows the full error in a
-            // popover and the short message as a hover tooltip. The
-            // tts_audio_error column holds the long error; tts_audio_message
-            // is usually the short last-known status line.
-            var fullErr = (c.tts_audio_error || c.tts_audio_message || 'No error message recorded.').toString();
-            var shortErr = (c.tts_audio_message || c.tts_audio_error || '').toString().split('\n')[0].substring(0, 200);
-            // Stash the full error on a window-keyed map so the popover
-            // can look it up by audio key (avoids escaping HTML in the
-            // onclick attribute).
-            window._ttsErrors = window._ttsErrors || {};
-            window._ttsErrors[c.tts_audio_key] = fullErr;
-            badge = '<span class="badge badge-failed clickable" '
-                  + 'onclick="showTtsError(' + c.tts_audio_key + ')" '
-                  + 'title="' + escapeHtml(shortErr || 'Click to view error') + '">failed</span>';
+        seenKeys[c.chapter_key] = true;
+        var sig = _chapterRowSig(c);
+        var prevTr = existing[c.chapter_key];
+        if (prevTr && prevTr.dataset.sig === sig) {
+            // Unchanged — leave row + expand row exactly as they are.
+            // Audio elements (chapter MP3 player AND any paragraph audio
+            // inside the expand panel) stay completely untouched.
+            lastNode = prevTr.nextElementSibling && prevTr.nextElementSibling.classList.contains('paragraph-expand-row')
+                ? prevTr.nextElementSibling : prevTr;
+            delete existing[c.chapter_key];
+            return;
+        }
+        // Build the new row HTML and either replace the existing row
+        // pair (data row + expand row) or insert fresh.
+        var html = _chapterRowsHtml(c);
+        var tmp = document.createElement('tbody');
+        tmp.innerHTML = html;
+        var newDataRow   = tmp.children[0];
+        var newExpandRow = tmp.children[1] || null;
+        newDataRow.dataset.sig = sig;
+        if (prevTr) {
+            // Update the existing data row IN PLACE — don't replace the
+            // <tr> element at all. We just rewrite its innerHTML from the
+            // new row template. The expand row sibling is never touched
+            // by this code, so its DOM children (audio elements, the
+            // paragraph table the user expanded) survive untouched across
+            // every poll.
+            var prevExpandRow = prevTr.nextElementSibling && prevTr.nextElementSibling.classList.contains('paragraph-expand-row')
+                ? prevTr.nextElementSibling : null;
+            var prevPanelOpen = !!(prevExpandRow && prevExpandRow.style.display !== 'none');
+            prevTr.innerHTML = newDataRow.innerHTML;
+            prevTr.dataset.sig = sig;
+            // newExpandRow only matters if we don't have one already.
+            if (newExpandRow && !prevExpandRow) {
+                prevTr.parentNode.insertBefore(newExpandRow, prevTr.nextSibling);
+                prevExpandRow = newExpandRow;
+            } else if (!newExpandRow && prevExpandRow) {
+                prevExpandRow.parentNode.removeChild(prevExpandRow);
+                prevExpandRow = null;
+            }
+            // Restore caret state to match the actual panel visibility.
+            if (prevPanelOpen) {
+                var newCaret = prevTr.querySelector('.expand-caret');
+                if (newCaret) newCaret.textContent = '▾';
+            }
+            lastNode = prevExpandRow || prevTr;
+            delete existing[c.chapter_key];
         } else {
-            badge = '<span class="badge badge-' + st + '">' + st + '</span>';
-        }
-        var progress = '';
-        if (st === 'running' || st === 'pending' || st === 'paused') {
-            progress = '<div class="progress"><span class="fill" style="width:' + (c.tts_audio_progress || 0) + '%"></span></div>';
-        }
-        var audio = '';
-        if (st === 'complete' && c.tts_audio_path) {
-            audio = '<audio controls preload="none" style="width:305px;height:28px" src="' + escapeHtml(c.tts_audio_path) + '"></audio>';
-        }
-        // 'running' / 'pending' rows hide the primary button entirely —
-        // openBuildModal → startBuild → start action wipes the parts cache
-        // and re-queues, which isn't what an in-flight chapter wants. The
-        // dedicated Pause / Cancel buttons below cover the in-flight cases.
-        // 'failed' and 'paused' keep Settings because the admin may legitimately
-        // want to tweak voice config before retrying / restarting.
-        var actions = '';
-        if (st !== 'running' && st !== 'pending') {
-            var primaryLabel = (st === 'complete') ? 'Rebuild'
-                             : (st === 'none')     ? 'Build'
-                             :                       'Settings';
-            actions = '<button class="btn-sm" onclick="openBuildModal(' + c.chapter_key + ',' + (c.tts_audio_key || 'null') + ')">' + primaryLabel + '</button>';
-        }
-        // Paused: offer Resume (continue from next paragraph) + Restart
-        // (wipe parts and start from the beginning). The Settings button
-        // above still opens the build modal for voice tweaks before resume.
-        if (st === 'paused' && c.tts_audio_key) {
-            actions += ' <button class="btn-sm" style="background:#2e7d32;color:#fff;" '
-                     + 'title="Continue from the next paragraph using the cached audio for completed paragraphs" '
-                     + 'onclick="resumeBuild(' + c.tts_audio_key + ')">▶ Resume</button>';
-            actions += ' <button class="btn-sm" style="background:#b85c00;color:#fff;" '
-                     + 'title="Discard cached paragraphs and rebuild this chapter from scratch" '
-                     + 'onclick="restartBuild(' + c.tts_audio_key + ',' + c.chapter_number + ')">↻ Restart</button>';
-        }
-        // Retry-failed button — visible only when a completed build has
-        // outstanding paragraph failures cached for re-synth. Postgres
-        // ships int[] as '{44,45}' over PDO; parse to count for the label.
-        if (st === 'complete' && c.tts_audio_failed_paragraphs) {
-            var failedList = String(c.tts_audio_failed_paragraphs)
-                .replace(/^\{|\}$/g, '')
-                .split(',').filter(function(s){ return s.length > 0; });
-            if (failedList.length > 0) {
-                actions += ' <button class="btn-sm" style="background:#b85c00;color:#fff;" '
-                         + 'title="Re-synthesize only paragraphs: ' + failedList.join(', ') + '" '
-                         + 'onclick="retryFailed(' + c.tts_audio_key + ',' + failedList.length + ')">'
-                         + 'Retry ' + failedList.length + ' failed</button>';
+            if (lastNode && lastNode.parentNode) {
+                lastNode.parentNode.insertBefore(newDataRow, lastNode.nextSibling);
+                lastNode = newDataRow;
+                if (newExpandRow) {
+                    lastNode.parentNode.insertBefore(newExpandRow, lastNode.nextSibling);
+                    lastNode = newExpandRow;
+                }
+            } else {
+                tb.appendChild(newDataRow);
+                lastNode = newDataRow;
+                if (newExpandRow) { tb.appendChild(newExpandRow); lastNode = newExpandRow; }
             }
         }
-        if (st === 'running' || st === 'pending') {
-            actions += ' <button class="btn-sm" style="background:#5c4a8a;color:#fff;" '
-                     + 'title="Stop after the current paragraph; cached paragraphs are kept for later Resume" '
-                     + 'onclick="pauseBuild(' + c.tts_audio_key + ')">⏸ Pause</button>';
-            actions += '<button class="btn-sm btn-del" onclick="cancelBuild(' + c.tts_audio_key + ')">Cancel</button>';
-        } else if (c.tts_audio_key) {
-            // Delete button — wipes the row, markers, MP3, parts cache.
-            // Disallowed while a build is in-flight (Cancel covers that).
-            actions += ' <button class="btn-sm btn-del" '
-                     + 'title="Delete this chapter\'s MP3, markers, and parts cache" '
-                     + 'onclick="deleteAudio(' + c.tts_audio_key + ',' + c.chapter_number + ')">Delete</button>';
-        }
-        // Flipbook deep-link cell: opens the chapter at its starting page.
-        // Requires the volume's flip code AND a chapter_page value in the
-        // DB. Missing either → render a dimmed placeholder.
-        var readCell;
-        if (ACTIVE_VOLUME_CODE && c.chapter_page) {
-            var href = '/' + ACTIVE_VOLUME_CODE + '/#page=' + c.chapter_page;
-            readCell = '<a href="' + escapeHtml(href) + '" target="_blank" '
-                     + 'title="Open chapter ' + escapeHtml(c.chapter_number) + ' on page ' + escapeHtml(c.chapter_page) + ' in the flipbook" '
-                     + 'style="color:#31345A;text-decoration:none;font-weight:600;white-space:nowrap;">p.' + escapeHtml(c.chapter_page) + ' →</a>';
-        } else {
-            readCell = '<span style="color:#bbb;" title="No flipbook page configured for this chapter">—</span>';
-        }
-        // Expand caret — only meaningful when there's an audio row
-        // (existing tts_audio_key). Click toggles a sub-<tr> that fetches
-        // /admin-tts-build.php?action=list_paragraphs and renders the
-        // per-paragraph mini-table inline.
-        var caret = c.tts_audio_key
-            ? '<span class="expand-caret" data-ak="' + c.tts_audio_key + '" data-ck="' + c.chapter_key + '" onclick="toggleChapterParas(this)" style="cursor:pointer;color:#31345A;font-weight:700;user-select:none;display:inline-block;width:14px;">▸</span> '
-            : '';
-        buf += '<tr data-ck="' + c.chapter_key + '">'
-            + '<td>' + caret + escapeHtml(c.chapter_number) + '</td>'
-            + '<td>' + escapeHtml(c.chapter_label || '') + (c.tts_audio_message ? '<div style="font-size:0.78rem;color:#888">' + escapeHtml(c.tts_audio_message) + '</div>' : '') + '</td>'
-            + '<td>' + (c.paragraph_count != null ? escapeHtml(c.paragraph_count) : '<span style="color:#bbb;">—</span>') + '</td>'
-            + '<td style="white-space:nowrap;">' + readCell + '</td>'
-            + '<td>' + badge + progress + '</td>'
-            + '<td>' + audio + '</td>'
-            + '<td class="col-actions">' + actions + '</td>'
-            + '</tr>';
-        if (c.tts_audio_key) {
-            buf += '<tr class="paragraph-expand-row" data-ck="' + c.chapter_key + '" data-ak="' + c.tts_audio_key + '" style="display:none;">'
-                 + '<td colspan="7" style="background:#f7f7fa;padding:8px 14px;">'
-                 +    '<div class="paragraph-grid">Loading paragraphs…</div>'
-                 + '</td></tr>';
-        }
     });
-    // Single DOM swap. Then restore expanded panel contents so audio
-    // elements that were already playing keep their state.
-    tb.innerHTML = buf;
-    Object.keys(panelSnapshots).forEach(function (ak) {
-        var row = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"]');
-        if (!row) return;
-        row.style.display = '';
-        var grid = row.querySelector('.paragraph-grid');
-        if (grid) grid.innerHTML = panelSnapshots[ak];
-        var caret = document.querySelector('.expand-caret[data-ak="' + ak + '"]');
-        if (caret) caret.textContent = '▾';
+    // Drop rows for chapters no longer in CHAPTERS (volume switch may
+    // leave stragglers if loadChapters' wipe didn't fire).
+    Object.keys(existing).forEach(function (ck) {
+        var tr = existing[ck];
+        var ex = tr.nextElementSibling && tr.nextElementSibling.classList.contains('paragraph-expand-row') ? tr.nextElementSibling : null;
+        if (ex && ex.parentNode) ex.parentNode.removeChild(ex);
+        if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
+    });
+    // Sweep any stray rows without a data-ck (the "Loading chapters…"
+    // placeholder before fetch arrives).
+    Array.prototype.slice.call(tb.querySelectorAll('tr:not([data-ck])')).forEach(function (r) {
+        if (r.parentNode) r.parentNode.removeChild(r);
     });
 }
 
@@ -3773,56 +3853,205 @@ async function toggleChapterParas(el, forceOpen) {
     }
 }
 
+function _paraRowHtml(p, posInChapter, ak) {
+    var rowStyle = p.is_skipped ? 'opacity:0.55;background:#fdf2f2;' :
+                   p.is_failed  ? 'background:#fff5e6;' : '';
+    return '<tr data-idx="' + p.idx + '" data-sig="' + _paraRowSig(p) + '" style="border-bottom:1px solid #eee;' + rowStyle + '">'
+         +   '<td style="text-align:right;padding:3px 6px;color:#222;font-weight:600;" title="Position in chapter (= part-file index)">' + (posInChapter + 1) + '</td>'
+         +   '<td style="text-align:right;padding:3px 6px;color:#888;font-size:0.78rem;" title="paragraph_number — unique per volume">' + p.paragraph_number + '</td>'
+         +   '<td style="padding:3px 6px;color:#666;">' + (p.paragraph_page == null ? '—' : p.paragraph_page) + '</td>'
+         +   '<td style="padding:3px 6px;">'
+         +     (p.is_table ? '<span title="parser flagged as table; auto-skipped" style="color:#888;font-style:italic;font-size:0.78rem;">[table] </span>' : '')
+         +     (p.is_skipped ? '<span title="excluded by Delete" style="color:#c0392b;font-weight:600;font-size:0.78rem;">[skipped] </span>' : '')
+         +     escapeHtml(p.preview || '')
+         +   '</td>'
+         +   '<td style="padding:3px 6px;">'
+         +     (p.has_part
+                  ? '<audio controls preload="none" style="width:225px;height:24px;vertical-align:middle;" src="' + escapeHtml(p.part_url) + '"></audio>'
+                  : '<span style="color:#bbb;font-size:0.78rem;">— not yet synthesised —</span>')
+         +   '</td>'
+         +   '<td style="padding:3px 6px;text-align:right;white-space:nowrap;">'
+         +     '<button class="btn-sm" title="Delete the cached audio so the worker re-synths this paragraph" onclick="redoParagraph(' + ak + ',' + p.idx + ')">↻ Redo</button>'
+         +     ' <button class="btn-sm btn-del" title="Skip this paragraph in all future builds of this chapter" onclick="deleteParagraph(' + ak + ',' + p.idx + ',' + p.paragraph_number + ')">×</button>'
+         +   '</td>'
+         + '</tr>';
+}
+function _paraRowSig(p) {
+    // What makes a paragraph row visually different? has_part flips
+    // when a worker writes its mp3; the other flags rarely change.
+    return [p.has_part ? 1 : 0, p.is_failed ? 1 : 0, p.is_skipped ? 1 : 0,
+            p.is_table ? 1 : 0, p.part_bytes || 0].join(',');
+}
+
+// ── Paragraph panel: hard contract ────────────────────────────────────
+// 1. The user clicks expand → we fetch + render the table ONCE.
+// 2. After that, the container is NEVER replaced again. Every subsequent
+//    call (poll auto-refresh, manual ↻ click) ONLY touches cells whose
+//    data actually changed for one specific row. Errors NEVER wipe the
+//    panel. Empty responses NEVER wipe the panel. Concurrent calls are
+//    serialised so the table can't be half-rebuilt while another call
+//    is reading it.
+// 3. The container is marked rendered=1 on its dataset so future callers
+//    can prove the first-time render path is OFF-LIMITS.
+// ───────────────────────────────────────────────────────────────────────
+window._paragraphLoadInFlight = window._paragraphLoadInFlight || {};
 async function loadParagraphRows(ak, container) {
     if (!container) return;
-    container.innerHTML = 'Loading paragraphs…';
+    // Serialise: any concurrent caller for the same ak waits on the
+    // in-flight promise and then returns without firing its own fetch.
+    if (window._paragraphLoadInFlight[ak]) {
+        try { await window._paragraphLoadInFlight[ak]; } catch (e) {}
+        return;
+    }
+    var promise = _loadParagraphRowsImpl(ak, container);
+    window._paragraphLoadInFlight[ak] = promise;
+    try { await promise; }
+    finally { delete window._paragraphLoadInFlight[ak]; }
+}
+
+async function _loadParagraphRowsImpl(ak, container) {
+    var isRendered = container.dataset.rendered === '1';
+    // Only show the "Loading…" placeholder when the panel has NEVER been
+    // rendered. Subsequent calls (polls/refreshes) must not touch container
+    // contents until they have new data to apply surgically.
+    if (!isRendered) container.innerHTML = 'Loading paragraphs…';
+    var rows;
     try {
         var r = await api('/admin-tts-build.php?action=list_paragraphs&tts_audio_key=' + ak);
-        var rows = (r && r.paragraphs) || [];
-        if (!rows.length) { container.textContent = 'No paragraphs found.'; return; }
-        var doneCount = rows.filter(function (p) { return p.has_part; }).length;
-        var html = '<div style="margin-bottom:6px;display:flex;align-items:center;gap:10px;font-size:0.8rem;color:#666;">'
-                 +   '<span>' + doneCount + ' of ' + rows.length + ' synthesised</span>'
-                 +   '<a href="#" onclick="event.preventDefault();loadParagraphRows(' + ak + ',this.closest(\'.paragraph-grid\'));" '
-                 +      'style="color:#31345A;text-decoration:none;font-weight:600;">↻ Refresh list</a>'
-                 + '</div>'
-                 + '<table class="paragraph-mini-table" style="width:100%;border-collapse:collapse;font-size:0.83rem;">'
-                 + '<thead><tr style="border-bottom:1px solid #ccd;">'
-                 +   '<th style="width:42px;text-align:right;padding:2px 6px;" title="Position in this chapter (1-based)">#</th>'
-                 +   '<th style="width:46px;padding:2px 6px;" title="paragraph_number column on yy_paragraph (unique per volume)">p#</th>'
-                 +   '<th style="width:46px;padding:2px 6px;">page</th>'
-                 +   '<th style="padding:2px 6px;">text</th>'
-                 +   '<th style="width:235px;padding:2px 6px;">audio</th>'
-                 +   '<th style="width:130px;padding:2px 6px;"></th>'
-                 + '</tr></thead><tbody>';
-        rows.forEach(function (p, posInChapter) {
-            var rowStyle = p.is_skipped ? 'opacity:0.55;background:#fdf2f2;' :
-                           p.is_failed  ? 'background:#fff5e6;' : '';
-            html += '<tr style="border-bottom:1px solid #eee;' + rowStyle + '">'
-                 +   '<td style="text-align:right;padding:3px 6px;color:#222;font-weight:600;" title="Position in chapter (= part-file index)">' + (posInChapter + 1) + '</td>'
-                 +   '<td style="text-align:right;padding:3px 6px;color:#888;font-size:0.78rem;" title="paragraph_number — unique per volume">' + p.paragraph_number + '</td>'
-                 +   '<td style="padding:3px 6px;color:#666;">' + (p.paragraph_page == null ? '—' : p.paragraph_page) + '</td>'
-                 +   '<td style="padding:3px 6px;">'
-                 +     (p.is_table ? '<span title="parser flagged as table; auto-skipped" style="color:#888;font-style:italic;font-size:0.78rem;">[table] </span>' : '')
-                 +     (p.is_skipped ? '<span title="excluded by Delete" style="color:#c0392b;font-weight:600;font-size:0.78rem;">[skipped] </span>' : '')
-                 +     escapeHtml(p.preview || '')
-                 +   '</td>'
-                 +   '<td style="padding:3px 6px;">'
-                 +     (p.has_part
-                          ? '<audio controls preload="none" style="width:225px;height:24px;vertical-align:middle;" src="' + escapeHtml(p.part_url) + '"></audio>'
-                          : '<span style="color:#bbb;font-size:0.78rem;">— not yet synthesised —</span>')
-                 +   '</td>'
-                 +   '<td style="padding:3px 6px;text-align:right;white-space:nowrap;">'
-                 +     '<button class="btn-sm" title="Delete the cached audio so the worker re-synths this paragraph" onclick="redoParagraph(' + ak + ',' + p.idx + ')">↻ Redo</button>'
-                 +     ' <button class="btn-sm btn-del" title="Skip this paragraph in all future builds of this chapter" onclick="deleteParagraph(' + ak + ',' + p.idx + ',' + p.paragraph_number + ')">×</button>'
-                 +   '</td>'
-                 + '</tr>';
-        });
-        html += '</tbody></table>';
-        container.innerHTML = html;
+        rows = (r && r.paragraphs) || [];
     } catch (e) {
-        container.textContent = 'Failed to load: ' + (e.message || e);
+        _paraShowRefreshBanner(container, '⚠ Auto-refresh failed: ' + (e.message || e), isRendered);
+        return;
     }
+    if (!rows.length) {
+        if (isRendered) {
+            console.warn('list_paragraphs returned 0 rows for ak=' + ak + ' — preserving existing panel');
+            return;
+        }
+        container.textContent = 'No paragraphs found.';
+        return;
+    }
+    var doneCount = rows.filter(function (p) { return p.has_part; }).length;
+
+    if (isRendered) {
+        // ── Surgical-only path. Container is NEVER replaced here. ──
+        _paraSurgicalUpdate(container, rows, doneCount);
+        _paraClearRefreshBanner(container);
+        return;
+    }
+
+    // ── First-time render. Only path that ever calls container.innerHTML. ──
+    container.innerHTML =
+          '<div class="paragraph-mini-header" style="margin-bottom:6px;display:flex;align-items:center;gap:10px;font-size:0.8rem;color:#666;">'
+        +   '<span>' + doneCount + ' of ' + rows.length + ' synthesised</span>'
+        +   '<a href="#" onclick="event.preventDefault();loadParagraphRows(' + ak + ',this.closest(\'.paragraph-grid\'));" '
+        +      'style="color:#31345A;text-decoration:none;font-weight:600;">↻ Refresh list</a>'
+        + '</div>'
+        + '<table class="paragraph-mini-table" style="width:100%;border-collapse:collapse;font-size:0.83rem;">'
+        + '<thead><tr style="border-bottom:1px solid #ccd;">'
+        +   '<th style="width:42px;text-align:right;padding:2px 6px;" title="Position in this chapter (1-based)">#</th>'
+        +   '<th style="width:46px;padding:2px 6px;" title="paragraph_number column on yy_paragraph (unique per volume)">p#</th>'
+        +   '<th style="width:46px;padding:2px 6px;">page</th>'
+        +   '<th style="padding:2px 6px;">text</th>'
+        +   '<th style="width:235px;padding:2px 6px;">audio</th>'
+        +   '<th style="width:130px;padding:2px 6px;"></th>'
+        + '</tr></thead><tbody></tbody></table>';
+    var freshTbody = container.querySelector('table.paragraph-mini-table tbody');
+    var rowHtmls = [];
+    var skipped  = 0;
+    rows.forEach(function (p, posInChapter) {
+        try { rowHtmls.push(_paraRowHtml(p, posInChapter, ak)); }
+        catch (e) { skipped++; console.error('row-render error at idx=' + (p && p.idx) + ':', e); }
+    });
+    freshTbody.innerHTML = rowHtmls.join('');
+    if (rowHtmls.length > 0 && freshTbody.children.length === 0) {
+        console.error('first-time render produced 0 children from ' + rowHtmls.length + ' row HTMLs; first row: ' + rowHtmls[0].slice(0, 200));
+        container.insertAdjacentHTML('beforeend',
+            '<div style="color:#b73d3d;padding:8px;">Rows failed to render (' + rowHtmls.length + ' built, 0 visible) — see browser console.</div>');
+        return;  // don't mark as rendered; let next call retry
+    }
+    if (skipped > 0) {
+        container.insertAdjacentHTML('beforeend',
+            '<div style="color:#888;font-size:0.78rem;padding:4px 8px;">' + skipped + ' row(s) failed to render — check console.</div>');
+    }
+    // Mark rendered LAST, only after the table has real rows. Once set,
+    // no code path is allowed to wipe `container` again.
+    container.dataset.rendered = '1';
+
+    // Forensic observer: if ANYTHING mutates this container's child list
+    // after we mark it rendered (i.e. wipes it or replaces the table),
+    // log a loud warning with a stack trace so we can find the culprit.
+    // Self-mutation from our surgical update path doesn't touch the
+    // container's direct children — only inner cells — so this observer
+    // never fires for legitimate updates. Skips the refresh-banner add/
+    // remove which IS expected.
+    try {
+        var mo = new MutationObserver(function (records) {
+            records.forEach(function (rec) {
+                if (rec.type !== 'childList') return;
+                var addedNonBanner = [].slice.call(rec.addedNodes).some(function (n) {
+                    return !(n.nodeType === 1 && n.getAttribute && n.getAttribute('data-refresh-banner') === '1');
+                });
+                var removedNonBanner = [].slice.call(rec.removedNodes).some(function (n) {
+                    return !(n.nodeType === 1 && n.getAttribute && n.getAttribute('data-refresh-banner') === '1');
+                });
+                if (addedNonBanner || removedNonBanner) {
+                    console.error('🚨 PANEL MUTATION ak=' + ak + ' added=' + rec.addedNodes.length + ' removed=' + rec.removedNodes.length, rec, new Error('stack').stack);
+                }
+            });
+        });
+        mo.observe(container, { childList: true });
+    } catch (e) { /* MutationObserver not available */ }
+}
+
+// Apply only the per-row deltas. Never touch rows whose sig hasn't changed.
+function _paraSurgicalUpdate(container, rows, doneCount) {
+    var tbody = container.querySelector('table.paragraph-mini-table tbody');
+    if (!tbody) {
+        // Should be unreachable when rendered=1, but guard anyway.
+        console.warn('_paraSurgicalUpdate: tbody missing despite rendered=1; ignoring this poll');
+        return;
+    }
+    var headerSpan = container.querySelector('.paragraph-mini-header span');
+    if (headerSpan) headerSpan.textContent = doneCount + ' of ' + rows.length + ' synthesised';
+    rows.forEach(function (p) {
+        var tr = tbody.querySelector('tr[data-idx="' + p.idx + '"]');
+        if (!tr) return;
+        var sig = _paraRowSig(p);
+        if (tr.dataset.sig === sig) return;   // unchanged — skip entirely
+        var audioCell = tr.children[4];
+        if (audioCell) {
+            audioCell.innerHTML = p.has_part
+                ? '<audio controls preload="none" style="width:225px;height:24px;vertical-align:middle;" src="' + escapeHtml(p.part_url) + '"></audio>'
+                : '<span style="color:#bbb;font-size:0.78rem;">— not yet synthesised —</span>';
+        }
+        var textCell = tr.children[3];
+        if (textCell) {
+            textCell.innerHTML =
+                  (p.is_table ? '<span title="parser flagged as table; auto-skipped" style="color:#888;font-style:italic;font-size:0.78rem;">[table] </span>' : '')
+                + (p.is_skipped ? '<span title="excluded by Delete" style="color:#c0392b;font-weight:600;font-size:0.78rem;">[skipped] </span>' : '')
+                + escapeHtml(p.preview || '');
+        }
+        tr.style.opacity     = p.is_skipped ? '0.55' : '';
+        tr.style.background  = p.is_skipped ? '#fdf2f2' : (p.is_failed ? '#fff5e6' : '');
+        tr.dataset.sig = sig;
+    });
+}
+
+function _paraShowRefreshBanner(container, msg, panelHasContent) {
+    if (!panelHasContent) { container.textContent = msg; return; }
+    var banner = container.querySelector('[data-refresh-banner]');
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.setAttribute('data-refresh-banner', '1');
+        banner.style.cssText = 'color:#b85c00;background:#fff5e6;font-size:0.78rem;padding:4px 8px;margin-top:4px;border:1px solid #f0d0a0;border-radius:3px;';
+        container.appendChild(banner);
+    }
+    banner.textContent = msg + '. Showing last good list.';
+}
+function _paraClearRefreshBanner(container) {
+    var banner = container.querySelector('[data-refresh-banner]');
+    if (banner && banner.parentNode) banner.parentNode.removeChild(banner);
 }
 
 async function redoParagraph(ak, idx) {
@@ -3834,18 +4063,35 @@ async function redoParagraph(ak, idx) {
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ action:'redo_paragraph', tts_audio_key: ak, idx: idx }),
         });
-        // Brief flash so the user sees the action took. The auto-refresh of
-        // the panel below will then show the part file gone + the worker's
-        // updated state in the chapter row.
         if (btn) { btn.textContent = res.requeued ? '✓ queued' : '✓'; }
     } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = origText || '↻ Redo'; }
         alert('Redo failed: ' + (e.message || e));
         return;
     }
-    var container = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"] .paragraph-grid');
-    if (container) await loadParagraphRows(ak, container);
-    loadChapters(ACTIVE_VOLUME);
+    // SURGICAL update: just flip THIS row's audio cell to the placeholder
+    // text and update its data-sig so a later refresh doesn't fight us.
+    // We deliberately avoid re-running loadParagraphRows here — the full
+    // re-fetch + per-row diff was destabilising the panel after redo and
+    // making paragraphs vanish. The chapter-list poll (loadChapters
+    // below) is also avoided since the chapter row's polling-driven
+    // diff doesn't touch the expand row contents and the user can hit
+    // "↻ Refresh list" when they want to see the new audio appear.
+    var row = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"] tr[data-idx="' + idx + '"]');
+    if (row && row.children.length >= 5) {
+        var audioCell = row.children[4];   // # | p# | page | text | audio | actions
+        if (audioCell) {
+            audioCell.innerHTML = '<span style="color:#bbb;font-size:0.78rem;">— not yet synthesised —</span>';
+        }
+        // Reset has_part component of sig to 0 so any future diff won't
+        // think this row hasn't changed.
+        var oldSig = (row.dataset.sig || '').split(',');
+        if (oldSig.length >= 5) {
+            oldSig[0] = '0';   // has_part
+            oldSig[4] = '0';   // part_bytes
+            row.dataset.sig = oldSig.join(',');
+        }
+    }
     if (btn) setTimeout(function () { btn.disabled = false; btn.textContent = origText || '↻ Redo'; }, 1500);
 }
 
@@ -3876,15 +4122,32 @@ function populateBuildFormat(selectEl) {
 }
 
 // Build the per-category voice/style/prosody grid into `root`. Shared by
-// the single-chapter and build-all modals. Returns nothing — callers
-// later read overrides back out via collectBuildOverrides(root).
-function renderBuildCategoryRows(root) {
+// the single-chapter and build-all modals. Cascading Provider → Voice
+// dropdowns mirror the Defaults tab (renderCategoryRows): switching the
+// Provider refilters the Voice list to that engine's active voices, and
+// the initial Provider selection is derived from the saved voice's
+// provider_key so the row reads as "the engine that supplies this voice."
+async function renderBuildCategoryRows(root) {
+    root.innerHTML = '<div class="status-msg" style="padding:8px;">Loading voices…</div>';
+    var cache;
+    try {
+        cache = await ensureVoicesCache();
+    } catch (e) {
+        root.innerHTML = '<div class="status-msg error" style="padding:10px;">Failed to load providers / voices: ' + escapeHtml(String((e && e.message) || e)) + '</div>';
+        return;
+    }
+    var providers = cache.providers;
+    var activeVoices = cache.voices;
+    var voiceByCode = {};
+    activeVoices.forEach(function (v) { voiceByCode[v.tts_voice_code] = v; });
+
     root.innerHTML = '';
-    CATALOG.categories.forEach(cat => {
+    CATALOG.categories.forEach(function (cat) {
         var saved = STATE.categories[cat.code] || {};
         var row = document.createElement('div');
         row.className = 'voice-row';
-        row.style.gridTemplateColumns = '260px 1fr 160px auto';
+        // 5 columns: label | provider | voice | style | prosody  (matches Defaults tab minus the ▶)
+        row.style.gridTemplateColumns = '240px 130px 1fr 160px auto';
         var isParent = !cat.parent;
         if (isParent) row.style.cssText += 'border-top:1px solid #ccd;margin-top:8px;padding-top:6px;';
         var labelStyle = isParent
@@ -3895,6 +4158,7 @@ function renderBuildCategoryRows(root) {
             : 'Voice for ' + cat.code + ' (inherits ' + cat.parent + ' if unset)';
         row.innerHTML =
             '<label style="' + labelStyle + '">' + escapeHtml(cat.label) + '</label>' +
+            '<select data-cat="' + cat.code + '" data-field="provider" title="TTS provider — filters the Voice dropdown to its active voices."></select>' +
             '<select data-cat="' + cat.code + '" data-field="voice" title="' + escapeHtml(voiceTitle) + '"></select>' +
             '<select data-field="style" title="Speaking style — defaults to the Voices-tab setting"></select>' +
             '<div class="prosody">' +
@@ -3903,23 +4167,63 @@ function renderBuildCategoryRows(root) {
                 '<span style="display:inline-flex;align-items:center;gap:4px;">vol <input type="number" data-field="volume" min="0" max="100" step="5" value="' + (saved.tts_voice_volume || 100) + '" style="width:60px"></span>' +
             '</div>';
         root.appendChild(row);
+
+        var provSel = row.querySelector('select[data-field="provider"]');
         var voiceSel = row.querySelector('select[data-field="voice"]');
-        var blankOpt = document.createElement('option');
-        blankOpt.value = '';
-        blankOpt.textContent = cat.parent
-            ? '— inherit from ' + cat.parent + ' —'
-            : '— (use saved default) —';
-        voiceSel.appendChild(blankOpt);
-        CATALOG.voices.forEach(v => {
-            var o = document.createElement('option');
-            o.value = v.code; o.textContent = v.label;
-            o.dataset.styles = (v.styles || []).join(',');
-            voiceSel.appendChild(o);
-        });
-        voiceSel.value = saved.tts_voice_code || '';
         var styleSel = row.querySelector('select[data-field="style"]');
+
+        providers.forEach(function (p) {
+            var o = document.createElement('option');
+            o.value = String(p.provider_key);
+            o.textContent = p.provider_label || ('#' + p.provider_key);
+            provSel.appendChild(o);
+        });
+        var savedVoiceCode = saved.tts_voice_code || '';
+        var savedProviderKey = savedVoiceCode && voiceByCode[savedVoiceCode]
+            ? voiceByCode[savedVoiceCode].provider_key
+            : (providers[0] ? providers[0].provider_key : 0);
+        provSel.value = String(savedProviderKey);
+
+        function rebuildVoiceSelect(preserveValue) {
+            var pk = parseInt(provSel.value, 10) || 0;
+            var prev = preserveValue !== undefined ? preserveValue : voiceSel.value;
+            voiceSel.innerHTML = '';
+            var blankOpt = document.createElement('option');
+            blankOpt.value = '';
+            blankOpt.textContent = cat.parent
+                ? '— inherit from ' + cat.parent + ' —'
+                : '— (use saved default) —';
+            voiceSel.appendChild(blankOpt);
+            activeVoices
+                .filter(function (v) { return v.provider_key === pk; })
+                .sort(function (a, b) {
+                    var la = (a.tts_voice_label || a.tts_voice_code || '').toLowerCase();
+                    var lb = (b.tts_voice_label || b.tts_voice_code || '').toLowerCase();
+                    return la < lb ? -1 : la > lb ? 1 : 0;
+                })
+                .forEach(function (v) {
+                    var o = document.createElement('option');
+                    o.value = v.tts_voice_code;
+                    o.textContent = v.tts_voice_label || v.tts_voice_code;
+                    o.dataset.styles = (v.tts_voice_styles || []).join(',');
+                    voiceSel.appendChild(o);
+                });
+            if (prev && Array.prototype.some.call(voiceSel.options, function (o) { return o.value === prev; })) {
+                voiceSel.value = prev;
+            } else {
+                voiceSel.value = '';
+            }
+        }
+        rebuildVoiceSelect(savedVoiceCode);
         populateStyleOptions(voiceSel, styleSel, saved.tts_voice_style || '');
-        voiceSel.addEventListener('change', function() { populateStyleOptions(voiceSel, styleSel, ''); });
+
+        provSel.addEventListener('change', function () {
+            rebuildVoiceSelect();
+            populateStyleOptions(voiceSel, styleSel, '');
+        });
+        voiceSel.addEventListener('change', function () {
+            populateStyleOptions(voiceSel, styleSel, '');
+        });
     });
 }
 
@@ -3952,57 +4256,9 @@ function openBuildModal(chapterKey, audioKey) {
     if (!ch) return;
     $('build-modal-title').textContent = 'Build audio — chapter ' + ch.chapter_number;
     populateBuildFormat($('build-format'));
-
-    var root = $('build-category-rows');
-    root.innerHTML = '';
-    CATALOG.categories.forEach(cat => {
-        var saved = STATE.categories[cat.code] || {};
-        var row = document.createElement('div');
-        row.className = 'voice-row';
-        // Match the Voices-tab layout so admins can tweak voice/style/
-        // rate/pitch/vol for a one-off build without leaving the chapter's row.
-        row.style.gridTemplateColumns = '260px 1fr 160px auto';
-        var isParent = !cat.parent;
-        // Same parent-children visual treatment as the Defaults tab so
-        // both popovers read consistently.
-        if (isParent) row.style.cssText += 'border-top:1px solid #ccd;margin-top:8px;padding-top:6px;';
-        var labelStyle = isParent
-            ? 'font-weight:700;color:#31345A;'
-            : 'padding-left:22px;color:#555;';
-        var voiceTitle = isParent
-            ? 'Voice for ' + cat.code
-            : 'Voice for ' + cat.code + ' (inherits ' + cat.parent + ' if unset)';
-        row.innerHTML =
-            '<label style="' + labelStyle + '">' + escapeHtml(cat.label) + '</label>' +
-            '<select data-cat="' + cat.code + '" data-field="voice" title="' + escapeHtml(voiceTitle) + '"></select>' +
-            '<select data-field="style" title="Speaking style — defaults to the Voices-tab setting"></select>' +
-            '<div class="prosody">' +
-                '<span style="display:inline-flex;align-items:center;gap:4px;">rate <input type="number" data-field="rate" min="-50" max="200" step="5" value="' + (saved.tts_voice_rate_pct || 0) + '"><span title="Percent — positive speeds the voice up, negative slows it down" style="margin-left:2px;cursor:help;">%</span></span>' +
-                '<span style="display:inline-flex;align-items:center;gap:4px;">pitch <input type="number" data-field="pitch" min="-12" max="12" step="0.1" value="' + (saved.tts_voice_pitch_st || 0) + '" style="width:73px"><span title="Semitones — 12 = one octave" style="margin-left:2px;cursor:help;">st</span></span>' +
-                '<span style="display:inline-flex;align-items:center;gap:4px;">vol <input type="number" data-field="volume" min="0" max="100" step="5" value="' + (saved.tts_voice_volume || 100) + '" style="width:60px"></span>' +
-            '</div>';
-        root.appendChild(row);
-        var voiceSel = row.querySelector('select[data-field="voice"]');
-        // Blank option = inherit from parent in this build run (the
-        // worker walks the same parent chain when no voice is supplied
-        // for a category in voice_overrides).
-        var blankOpt = document.createElement('option');
-        blankOpt.value = '';
-        blankOpt.textContent = cat.parent
-            ? '— inherit from ' + cat.parent + ' —'
-            : '— (use saved default) —';
-        voiceSel.appendChild(blankOpt);
-        CATALOG.voices.forEach(v => {
-            var o = document.createElement('option');
-            o.value = v.code; o.textContent = v.label;
-            o.dataset.styles = (v.styles || []).join(',');
-            voiceSel.appendChild(o);
-        });
-        voiceSel.value = saved.tts_voice_code || '';
-        var styleSel = row.querySelector('select[data-field="style"]');
-        populateStyleOptions(voiceSel, styleSel, saved.tts_voice_style || '');
-        voiceSel.addEventListener('change', function() { populateStyleOptions(voiceSel, styleSel, ''); });
-    });
+    // Same cascading Provider → Voice rows as the Build All modal — kicks
+    // off async; the Loading… status is replaced when voices arrive.
+    renderBuildCategoryRows($('build-category-rows'));
     $('build-status').textContent = '';
     $('build-modal').classList.add('visible');
     $('build-modal').dataset.chapter = chapterKey;

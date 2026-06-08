@@ -573,6 +573,13 @@ $failures = [];
 // tts_audio_settings.skip_paragraphs and we honour them here.
 $skipParaNums = array_flip(array_map('intval', $settings['skip_paragraphs'] ?? []));
 
+// Carry the open bold/italic/paren state across paragraphs so a
+// translation block that the PDF parser cut at a page break keeps its
+// translation voice when it resumes in the next paragraph. Reset whenever
+// the next paragraph is a chapter heading or an introOverride (those
+// don't continue the prior format context).
+$carryState = ['bold' => 0, 'italic' => 0, 'paren' => 0, 'bibStack' => []];
+
 foreach ($paragraphs as $idx => $p) {
     // Honour admin's per-paragraph skip list.
     if (isset($skipParaNums[(int)$p['paragraph_number']])) {
@@ -586,10 +593,16 @@ foreach ($paragraphs as $idx => $p) {
     // startIdx and cumulative state for the contiguous-cached prefix; this
     // check covers the gap-fill case where parts exist NON-contiguously
     // (e.g. parts 0,2,3,4 cached but 1 was deleted by Redo).
+    // Track reused-vs-synthed so the UI message shows "synthed 3 / reused 47"
+    // rather than just "Paragraph 50 / 326" — which made a worker rapidly
+    // walking through cached parts look like it was re-synthing each one.
+    if (!isset($reusedCount)) $reusedCount = 0;
+    if (!isset($synthCount))  $synthCount  = 0;
     $partFile = $partPath($idx);
     if (is_file($partFile) && filesize($partFile) > 0) {
         $paraBytes = file_get_contents($partFile);
         if ($paraBytes !== false && $paraBytes !== '') {
+            $reusedCount++;
             $paraStartMs    = $cumulativeMs;
             $paraStartBytes = $cumulativeBytes;
             $paraStartPage  = $p['paragraph_page'] !== null ? (int)$p['paragraph_page'] : null;
@@ -609,7 +622,7 @@ foreach ($paragraphs as $idx => $p) {
             $pct = (int)floor(($idx + 1) / max(1, $nPara) * 95) + 2;
             updateAudio($db, $audioKey, [
                 'tts_audio_progress' => min(99, $pct),
-                'tts_audio_message'  => sprintf('Paragraph %d / %d (%d fails, cached)', $idx + 1, $nPara, $failureCount),
+                'tts_audio_message'  => sprintf('Paragraph %d / %d (synthed %d, reused %d, %d fails)', $idx + 1, $nPara, $synthCount, $reusedCount, $failureCount),
             ]);
             continue;
         }
@@ -661,15 +674,15 @@ foreach ($paragraphs as $idx => $p) {
     // chapter number announced. The configured __chapter_before__,
     // __chapter_between__, and __chapter_after__ pauses wrap the line.
     if ($idx === 0 && $chNum > 0) {
-        $titleText = $chName !== '' ? $chName : (string)$p['paragraph_text_plain'];
-        // Strip a leading "N " (chapter number) from the title text if it's there,
-        // since we're announcing it explicitly via "Chapter $chNum".
-        $titleText = preg_replace('/^\s*\d+\s+/', '', $titleText);
+        // Chapter opener: announce just the chapter number. The chapter
+        // title is repeated as paragraph idx=1 (the italic "Title ~ Subtitle"
+        // line that opens every YY chapter), so reading the title here too
+        // would have it spoken twice. The idx=1 italic-subhead handler
+        // below wraps the title paragraph with the right between/after
+        // pauses on its own.
         $headingText =
               "\x01PAUSE_0_{$pauseChapBefore}\x01"
             . "Chapter $chNum"
-            . "\x01PAUSE_0_{$pauseChapBetween}\x01"
-            . $titleText
             . "\x01PAUSE_0_{$pauseChapAfter}\x01";
         $segs = [['category' => 'main', 'text' => $headingText]];
     } else if (isset($introOverrides[(int)$p['paragraph_number']])) {
@@ -683,7 +696,7 @@ foreach ($paragraphs as $idx => $p) {
         if ($plainText === '') continue;
         $segs = [['category' => $introOverrides[(int)$p['paragraph_number']], 'text' => $plainText]];
     } else {
-        $segs = segmentParagraph($rawHtml);
+        $segs = segmentParagraph($rawHtml, $carryState);
         if (!$segs) continue;
 
         // Subhead (italic paragraph right after the chapter heading).
@@ -791,6 +804,7 @@ foreach ($paragraphs as $idx => $p) {
     $pp = $partPath($idx);
     @file_put_contents($pp, $paraBytes);
     @chmod($pp, 0664);   // belt-and-suspenders alongside the umask above
+    $synthCount = ($synthCount ?? 0) + 1;
     $cumulativeBytes += strlen($paraBytes);
     $paragraphMs      = probeDurationMs($ffprobeBin, $paraBytes, $tmpDir);
     $cumulativeMs    += $paragraphMs;
@@ -833,7 +847,7 @@ foreach ($paragraphs as $idx => $p) {
     $pct = (int)floor(($idx + 1) / max(1, $nPara) * 95) + 2;
     updateAudio($db, $audioKey, [
         'tts_audio_progress'      => min(99, $pct),
-        'tts_audio_message'       => sprintf('Paragraph %d / %d (%d fails)', $idx + 1, $nPara, $failureCount),
+        'tts_audio_message'       => sprintf('Paragraph %d / %d (synthed %d, reused %d, %d fails)', $idx + 1, $nPara, $synthCount, $reusedCount, $failureCount),
         'tts_audio_chars_billed'  => $charsBilled,
     ]);
 }
