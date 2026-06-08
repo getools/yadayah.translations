@@ -16,6 +16,12 @@ $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
 if (!$ip) { http_response_code(403); exit; }
 
+// Never ban private/loopback/Docker IPs — banning a reverse-proxy IP blocks all traffic through it
+$isPrivate = $ip === '::1' || str_starts_with($ip, '127.') || str_starts_with($ip, '10.') ||
+             str_starts_with($ip, '192.168.') ||
+             (str_starts_with($ip, '172.') && (int)explode('.', $ip)[1] >= 16 && (int)explode('.', $ip)[1] <= 31);
+if ($isPrivate) { http_response_code(403); exit; }
+
 // Never ban Cloudflare proxy IPs — these are shared across all users
 $cfPrefixes = ['104.16.', '104.17.', '104.18.', '104.19.', '104.20.', '104.21.', '104.22.', '104.23.', '104.24.', '104.25.', '104.26.', '104.27.', '172.64.', '172.65.', '172.66.', '172.67.', '172.68.', '172.69.', '172.70.', '172.71.', '141.101.', '162.158.', '190.93.', '188.114.', '197.234.', '198.41.', '173.245.'];
 $isCfIp = false;
