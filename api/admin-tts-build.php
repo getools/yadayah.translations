@@ -447,6 +447,24 @@ if ($action === 'retry_failed') {
 // Delete a chapter's audio entirely — the row, the markers, the live MP3
 // file on disk, and the per-paragraph parts cache. Disallowed while a
 // build is in-flight; admin should hit Cancel first.
+if ($action === 'set_active') {
+    // Toggle the tts_audio_active_flag without touching the MP3 file. When
+    // FALSE, the public tts-audio.php endpoint pretends the audio doesn't
+    // exist (no Play button in the flipbook for that chapter). Flipping
+    // back to TRUE re-exposes the same file with no rebuild needed.
+    $audioKey = (int)($data['tts_audio_key'] ?? 0);
+    if (!$audioKey) errorResponse('tts_audio_key required');
+    // Cast bool to int per the project's PDO+Postgres convention (see
+    // feedback_pdo_bool_to_int): PHP `false` binds as "" which Postgres
+    // boolean columns reject; default-true columns mask the bug until
+    // someone explicitly sets FALSE.
+    $newActive = (int)!empty($data['active_flag']);
+    $upd = $db->prepare("UPDATE yy_tts_audio SET tts_audio_active_flag = ? WHERE tts_audio_key = ?");
+    $upd->execute([$newActive, $audioKey]);
+    if ($upd->rowCount() === 0) errorResponse('audio row not found', 404);
+    jsonResponse(['ok' => true, 'tts_audio_key' => $audioKey, 'active_flag' => (bool)$newActive]);
+}
+
 if ($action === 'delete') {
     $audioKey = (int)($data['tts_audio_key'] ?? 0);
     if (!$audioKey) errorResponse('tts_audio_key required');

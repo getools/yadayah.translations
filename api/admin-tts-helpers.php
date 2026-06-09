@@ -842,6 +842,13 @@ function elevenlabsTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?
         'voice_settings' => $voiceSettings,
     ];
     if ($payload['text'] === '') { $err = 'empty text'; return ''; }
+    // Per-occurrence seed for determinism. ElevenLabs accepts uint32
+    // [0..4294967295] and makes "best effort" deterministic sampling.
+    // Caller passes null for stochastic; an int pins the synth so a tune
+    // word with a hand-tuned seed sounds the same on every encounter.
+    if (array_key_exists('seed', $seg) && $seg['seed'] !== null) {
+        $payload['seed'] = (int)$seg['seed'];
+    }
 
     $url = 'https://api.elevenlabs.io/v1/text-to-speech/'
          . rawurlencode($voiceId) . '?output_format=' . rawurlencode($elFmt);
@@ -1468,6 +1475,79 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
         'volume'       => (int)($cat['tts_voice_volume']     ?? 100),
         'style'        => $style,
         'seed'         => $seedHint,
+    ];
+}
+
+/**
+ * Build a segment payload for ElevenLabs — same preprocessing chain as
+ * buildVoiceBlock() up through phoneme/break tag emission, but WITHOUT the
+ * Azure-specific outer markup (<voice>, <prosody>, <mstts:express-as>,
+ * <lang>). ElevenLabs v3 + flash_v2 + turbo_v2 honor inline <phoneme
+ * alphabet="ipa" ph="..."> and <break time="Nms"/> tags directly; the
+ * outer Azure wrapper tags would be ignored at best and cause 400s at
+ * worst. We deliberately keep the <phoneme>/<break>/<sub> tokens that
+ * tokensToSsml + placeholdersToBreaks produce — those are exactly what
+ * ElevenLabs accepts as pronunciation + pacing controls.
+ *
+ * Returns the same shape as buildLocalSegment so the build worker can
+ * pass it straight through, but the 'text' field carries SSML-style
+ * inline tags instead of flat-punctuation text.
+ */
+function buildElevenLabsSegment(string $text, array $cfg, string $category): array {
+    $providerKey = ttsResolveProviderKey($cfg, $category);
+    $voiceCode   = ttsResolveVoiceCode($cfg, $category) ?? '';
+    if (!empty($cfg['bible_books'])) {
+        $text = rewriteBibleCitations($text, $cfg['bible_books']);
+    }
+    // Same applyTunes path Azure uses — IPA columns produce <phoneme> tags,
+    // SUB columns produce <sub alias="..."> tags. Both render correctly on
+    // ElevenLabs v3 / flash_v2 / turbo_v2.
+    $tokenMap = [];
+    $text = applyTunes($text, ttsTunesForProvider($cfg, $providerKey), $tokenMap);
+    // Inline [500] / [1s] markers + yy_tts_pause-defined pauses both become
+    // placeholder tokens that placeholdersToBreaks() resolves to <break>.
+    $text = applyInlinePauses($text);
+    $placeholder = '';
+    $text = applyPauses($text, $cfg['pauses'], $placeholder);
+    $escaped = htmlspecialchars($text, ENT_QUOTES | ENT_XML1, 'UTF-8');
+    $escaped = placeholdersToBreaks($escaped);
+    $escaped = tokensToSsml($escaped, $tokenMap);
+    // Strip half-rings (ʿ ʾ) like the local path does — they have no
+    // meaningful pronunciation; the surrounding yy_tts_pause rules
+    // already handled their timing.
+    $escaped = preg_replace('/[\x{02BF}\x{02BE}]/u', '', $escaped);
+    // Drop ~ separator (Hebrew word ~ English meaning) — ElevenLabs
+    // would read it as "tilde". The pause is already captured upstream.
+    $escaped = str_replace('~', ' ', $escaped);
+    // Strip raw <b>/<i>/<em>/<strong> markup that admin-tts-preview leaves
+    // in for the SSML voice-routing path — ElevenLabs would speak them
+    // as literal letters.
+    $escaped = preg_replace('/<\/?(?:b|i|em|strong)\b[^>]*>/i', '', $escaped);
+    // Collapse whitespace — multiple spaces around stripped chars look
+    // sloppy in the request body and can confuse the tokenizer.
+    $escaped = trim((string)preg_replace('/[ \t]+/', ' ', $escaped));
+
+    // Category prosody — ElevenLabs has no <prosody> tag but exposes a
+    // `speed` knob on voice_settings for flash/turbo models (v3 ignores
+    // it for now). We pass rate through; pitch and volume have no
+    // ElevenLabs equivalent and are dropped (warned in the docs).
+    $cat = $cfg['categories'][$category] ?? null;
+    $cur = $category;
+    while ($cat === null && $cur !== null) { $cur = ttsCategoryParent($cur); if ($cur !== null) $cat = $cfg['categories'][$cur] ?? null; }
+    if ($cat === null && !empty($cfg['categories'])) $cat = reset($cfg['categories']);
+    return [
+        'provider_key' => $providerKey,
+        'voice'        => $voiceCode,
+        'text'         => $escaped,
+        'phonemes'     => null,
+        'rate'         => (int)($cat['tts_voice_rate_pct']  ?? 0),
+        'pitch'        => (float)($cat['tts_voice_pitch_st'] ?? 0),
+        'volume'       => (int)($cat['tts_voice_volume']     ?? 100),
+        'style'        => '',
+        // Caller supplies seed range from per-tune seed_min/max; pinning to
+        // null here means stochastic. The build worker passes a per-occurrence
+        // random int in [seed_min..seed_max] when one is configured.
+        'seed'         => null,
     ];
 }
 

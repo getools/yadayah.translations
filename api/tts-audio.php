@@ -87,6 +87,10 @@ if (!$chapterKey) {
 // CLEAN build (zero failures) into the live MP3 path — so its presence
 // is our durable signal that whatever's at tts_audio_path is safe to
 // play, regardless of whether a more recent rebuild attempt failed.
+// tts_audio_active_flag = FALSE hides the chapter audio from the flipbook
+// without deleting the file — admin can flip it back to TRUE to re-expose
+// the same MP3. The Play button on the chapter simply doesn't appear when
+// the row falls out of this join.
 $aStmt = $db->prepare("
     SELECT c.chapter_key, c.chapter_number, c.chapter_name,
            a.tts_audio_key, a.tts_audio_path, a.tts_audio_duration_secs, a.tts_audio_status,
@@ -97,6 +101,7 @@ $aStmt = $db->prepare("
        AND a.volume_key  = ?
        AND a.tts_audio_path IS NOT NULL
        AND a.tts_audio_live_dtime IS NOT NULL
+       AND a.tts_audio_active_flag = TRUE
      WHERE c.chapter_key = ?
      LIMIT 1
 ");
@@ -137,6 +142,7 @@ if ($nextChapterKey) {
          WHERE volume_key = ? AND chapter_key = ?
            AND tts_audio_path IS NOT NULL
            AND tts_audio_live_dtime IS NOT NULL
+           AND tts_audio_active_flag = TRUE
          LIMIT 1
     ");
     $checkStmt->execute([$volumeKey, $nextChapterKey]);

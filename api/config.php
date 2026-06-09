@@ -27,6 +27,21 @@ if (!$IS_CLI) {
     }
 }
 
+if (!function_exists('readEnv')) {
+    function readEnv(string $name): string {
+        $val = getenv($name);
+        if ($val) return $val;
+        $envFile = dirname(__DIR__) . '/.env';
+        if (file_exists($envFile)) {
+            foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+                if (strpos($line, '#') === 0) continue;
+                if (strpos($line, $name . '=') === 0) return trim(substr($line, strlen($name) + 1));
+            }
+        }
+        return '';
+    }
+}
+
 function getDb(): PDO {
     static $pdo = null;
     if ($pdo === null) {

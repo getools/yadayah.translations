@@ -788,7 +788,12 @@ foreach ($paragraphs as $idx => $p) {
             $err = '';
             $transport = ttsProviderTransport($cfg, $pk);
             if ($transport === 'elevenlabs-cloud') {
-                $elSeg = buildLocalSegment($seg['text'], $cfg, $seg['category']);
+                // buildElevenLabsSegment preserves <phoneme alphabet="ipa">
+                // and <break time="..."/> tags inline (which ElevenLabs v3 /
+                // flash_v2 / turbo_v2 all honor), unlike buildLocalSegment
+                // which flattens phoneme tags to ASCII fallback for the
+                // local engines (Chatterbox / CosyVoice) that don't speak SSML.
+                $elSeg = buildElevenLabsSegment($seg['text'], $cfg, $seg['category']);
                 $elSeg['provider_key'] = $pk;
                 $b = elevenlabsTtsSynthesize($cfg, $elSeg, $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3', $err);
             } elseif ($transport === 'azure-ssml') {

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780941969">
+    <meta name="page-version" content="1780898431">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -3794,6 +3794,25 @@ function _chapterRowsHtml(c) {
     } else if (c.tts_audio_key) {
         actions += ' <button class="btn-sm btn-del" title="Delete this chapter\'s MP3, markers, and parts cache" onclick="deleteAudio(' + c.tts_audio_key + ',' + c.chapter_number + ')">Delete</button>';
     }
+    // Hide-in-flipbook toggle. Only meaningful when the chapter has an
+    // audio row at all (built or paused). Toggling does NOT delete the
+    // file — it just controls whether the public tts-audio.php endpoint
+    // surfaces the MP3 to the flipbook. Flip back on to re-expose.
+    if (c.tts_audio_key) {
+        var ttsAudioActive = (c.tts_audio_active_flag === false || c.tts_audio_active_flag === 'f') ? false : true;
+        var toggleTitle = ttsAudioActive
+            ? 'Hide this chapter\'s audio from the public flipbook. The MP3 is kept; the Play button just disappears for readers until you Show it again.'
+            : 'Currently HIDDEN from the flipbook. Click to expose it again — uses the same MP3, no rebuild needed.';
+        var toggleLabel = ttsAudioActive ? '👁 Hide' : '👁‍🗨 Show';
+        var toggleBg    = ttsAudioActive ? '#fff' : '#fff3a8';
+        var toggleColor = ttsAudioActive ? '#888' : '#8a6d00';
+        var toggleBorder = ttsAudioActive ? '1px solid #ccc' : '1px solid #e0c000';
+        actions += ' <button class="btn-sm" data-tts-active-toggle="' + c.tts_audio_key + '" '
+                 + 'style="background:' + toggleBg + ';color:' + toggleColor + ';border:' + toggleBorder + ';" '
+                 + 'title="' + escapeHtml(toggleTitle) + '" '
+                 + 'onclick="toggleAudioActive(' + c.tts_audio_key + ',' + (ttsAudioActive ? 'false' : 'true') + ')">'
+                 + toggleLabel + '</button>';
+    }
     var readCell;
     if (ACTIVE_VOLUME_CODE && c.chapter_page) {
         var href = '/' + ACTIVE_VOLUME_CODE + '/#page=' + c.chapter_page;
@@ -3826,7 +3845,10 @@ function _chapterRowSig(c) {
             c.tts_audio_message || '', c.tts_audio_error || '', c.tts_audio_path || '',
             c.tts_audio_failed_paragraphs || '', c.paragraph_count || 0,
             c.tts_audio_key || 0, c.chapter_number, c.chapter_label || '',
-            c.chapter_page || 0].join('\x1f');
+            c.chapter_page || 0,
+            // Including the active flag so the Hide/Show button label +
+            // colour flip is picked up by the diff and re-rendered in place.
+            (c.tts_audio_active_flag === false || c.tts_audio_active_flag === 'f') ? '0' : '1'].join('\x1f');
 }
 function renderChapters() {
     var tb = $('chapters-tbody');
@@ -4478,6 +4500,26 @@ async function cancelBuild(audioKey) {
 // at the start of each iteration; flipping to 'paused' here lets the
 // in-flight Azure synth complete and persist to the parts cache before
 // the worker exits cleanly. Resume picks up from the first missing part.
+// Toggle the tts_audio_active_flag on the chapter audio row. When FALSE,
+// the public /api/tts-audio.php endpoint hides the chapter from the
+// flipbook (no Play button) without touching the MP3 file on disk.
+async function toggleAudioActive(audioKey, makeActive) {
+    try {
+        var r = await api('/admin-tts-build.php?action=set_active', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ action:'set_active', tts_audio_key: audioKey, active_flag: !!makeActive }),
+        });
+        // Local update + surgical render so the button label/colour flips
+        // immediately without a full chapter reload (same rationale as
+        // pauseBuild — don't collapse expanded paragraph panels).
+        var c = (CHAPTERS || []).find(function (x) { return x.tts_audio_key === audioKey; });
+        if (c) c.tts_audio_active_flag = !!(r && r.active_flag);
+        if (typeof renderChapters === 'function') renderChapters();
+    } catch (e) {
+        alert('Toggle failed: ' + (e.message || e));
+    }
+}
+
 async function pauseBuild(audioKey) {
     try {
         await api('/admin-tts-build.php?action=pause', {
