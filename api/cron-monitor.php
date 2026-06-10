@@ -275,6 +275,7 @@ try {
         SELECT pid, state, EXTRACT(EPOCH FROM (NOW() - query_start))::int AS seconds, LEFT(query, 200) AS query
         FROM pg_stat_activity
         WHERE state = 'active' AND query NOT LIKE '%pg_stat_activity%'
+          AND application_name != 'pg_dump'
           AND EXTRACT(EPOCH FROM (NOW() - query_start)) > 60
     ")->fetchAll();
     foreach ($longQ as $q) {

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1780898431">
+    <meta name="page-version" content="1781051210">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -3683,20 +3683,20 @@ async function loadChapters(volumeKey) {
       })
       .catch(function () {});
     renderChapters();
-    // Auto-refresh any open paragraph panels so users see new audio
-    // appear as the worker writes parts. The per-row diff in
-    // loadParagraphRows means only the rows whose has_part flipped get
-    // replaced; audio elements on other rows stay untouched and don't
-    // restart their preload. Each refresh fetches ~80-100 KB so we cap
-    // to the panels actually open (usually 1).
-    if (window._expandedAudioKeys && window._expandedAudioKeys.size) {
-        window._expandedAudioKeys.forEach(function (ak) {
-            var row = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"]');
-            if (!row || row.style.display === 'none') return;
-            var grid = row.querySelector('.paragraph-grid');
-            if (grid) loadParagraphRows(ak, grid);
-        });
-    }
+    // CRITICAL — DO NOT REINTRODUCE A FETCH HERE. The polling auto-refresh
+    // of the paragraph panel MUST NOT call list_paragraphs. Calling
+    // loadParagraphRows from polling caused the entire panel to wholesale
+    // re-render every 5 seconds (visible to the user as "the whole list
+    // refreshes"). The correct behavior — surgical per-row cell updates
+    // driven entirely from the chapter row's poll data ("synthed K /
+    // reused L / M fails" in tts_audio_message) — lives in
+    // _paraSurgicalFromChapters(). It only touches the ONE audio cell
+    // whose part just became available. To force a full re-fetch, the
+    // user clicks ↻ Refresh list inside the panel. See
+    // feedback_panel_refresh_regression in memory for context — this
+    // exact fetch has been re-added by 3 prior code changes; do not be
+    // the 4th.
+    _paraSurgicalFromChapters();
     // Poll while anything is running.
     // Poll while anything is in motion. 'paused' is a settled state — no
     // worker is running — so we don't poll for it (the user will trigger
@@ -3769,7 +3769,17 @@ function _chapterRowsHtml(c) {
     }
     var audio = '';
     if (st === 'complete' && c.tts_audio_path) {
-        audio = '<audio controls preload="none" style="width:305px;height:28px" src="' + escapeHtml(c.tts_audio_path) + '"></audio>';
+        // Cache-bust on the completion timestamp so a Rebuild / Redo →
+        // resume cycle that overwrites the same chapter MP3 file is heard
+        // by the browser. Without this, the URL is identical to the prior
+        // build and Chrome serves the old file from disk cache — the user
+        // hears yesterday's audio even though the bytes on the server are
+        // fresh. Epoch seconds of tts_audio_completed_dtime changes every
+        // time the worker re-emits the chapter, so the URL changes too.
+        var cacheBust = c.tts_audio_completed_dtime
+            ? '?v=' + Math.floor(Date.parse(c.tts_audio_completed_dtime) / 1000)
+            : '';
+        audio = '<audio controls preload="none" style="width:305px;height:28px" src="' + escapeHtml(c.tts_audio_path + cacheBust) + '"></audio>';
     }
     var actions = '';
     if (st !== 'running' && st !== 'pending') {
@@ -3985,6 +3995,74 @@ function _paraRowSig(p) {
     // when a worker writes its mp3; the other flags rarely change.
     return [p.has_part ? 1 : 0, p.is_failed ? 1 : 0, p.is_skipped ? 1 : 0,
             p.is_table ? 1 : 0, p.part_bytes || 0].join(',');
+}
+
+// ⚠ DO NOT REMOVE — this function is what keeps the paragraph panel
+// from wholesale-refreshing on every 5s chapter poll. The poll calls
+// this instead of list_paragraphs, so the panel header counter ticks
+// up live while individual rows flip their audio cell as parts become
+// available. NEVER REPLACE THIS CALL WITH A loadParagraphRows() FETCH.
+// Driven entirely by the chapter row's tts_audio_message field
+// ("synthed K, reused L, M fails") — no network round-trip. Touches at
+// most ONE row per call (the audio cell of the newly-available part).
+// User clicks ↻ Refresh list to force a full re-fetch when they want
+// is_failed / is_skipped state to refresh.
+function _paraSurgicalFromChapters() {
+    if (!window._expandedAudioKeys || !window._expandedAudioKeys.size) return;
+    window._expandedAudioKeys.forEach(function (ak) {
+        var chapter = (CHAPTERS || []).find(function (c) { return c.tts_audio_key === ak; });
+        if (!chapter) return;
+        var row = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"]');
+        if (!row || row.style.display === 'none') return;
+        var grid = row.querySelector('.paragraph-grid');
+        if (!grid || grid.dataset.rendered !== '1') return;  // never touch pre-render
+        var tbody = grid.querySelector('table.paragraph-mini-table tbody');
+        if (!tbody) return;
+        // Parse "synthed K" and "reused L" and "M fails" — that's the count
+        // of paragraphs the worker has processed (synthed succeeded +
+        // reused from cache + fails skipped on). The worker emits parts
+        // sequentially by idx, so idx 0..(synthed+reused+fails-1) covers
+        // the workspace. We update audio cells whose row hasn't been
+        // flipped yet. The "reused" cases are cells whose part file
+        // already existed before this build started — the audio src works.
+        var msg = String(chapter.tts_audio_message || '');
+        var synthed = 0, reused = 0, fails = 0;
+        var m = msg.match(/synthed\s+(\d+)/);
+        if (m) synthed = parseInt(m[1], 10) || 0;
+        var rm = msg.match(/reused\s+(\d+)/);
+        if (rm) reused = parseInt(rm[1], 10) || 0;
+        var f = msg.match(/(\d+)\s+fails?/);
+        if (f) fails = parseInt(f[1], 10) || 0;
+        // Header counter — single text-node update, no innerHTML on
+        // anything but a single cell.
+        var headerSpan = grid.querySelector('.paragraph-mini-header span');
+        if (headerSpan) {
+            var totalRows = tbody.children.length;
+            var doneCount = synthed + reused;
+            headerSpan.textContent = doneCount + ' of ' + totalRows + ' synthesised';
+        }
+        // Flip audio cells for indices 0..(synthed + reused + fails - 1)
+        // whose cell is still in the "— not yet synthesised —" state.
+        // Detected via tr.dataset.sig — sig starts with '0' (no has_part)
+        // until we flip it to '1'.
+        var maxIdx = synthed + reused + fails;
+        for (var i = 0; i < maxIdx; i++) {
+            var tr = tbody.children[i];
+            if (!tr) continue;
+            var sig = tr.dataset.sig || '';
+            if (sig.charAt(0) === '1') continue;  // already has part rendered
+            var idx = tr.dataset.idx;
+            if (idx == null) continue;
+            var audioCell = tr.children[4];
+            if (!audioCell) continue;
+            var idxPad = String(idx);
+            while (idxPad.length < 5) idxPad = '0' + idxPad;
+            var partUrl = '/u/tts-parts/' + ak + '/p' + idxPad + '.mp3';
+            audioCell.innerHTML = '<audio controls preload="none" style="width:225px;height:24px;vertical-align:middle;" src="' + partUrl + '"></audio>';
+            // Mark the row as has-part so we don't keep re-flipping it.
+            tr.dataset.sig = '1,0,0,0,0';
+        }
+    });
 }
 
 // ── Paragraph panel: hard contract ────────────────────────────────────
