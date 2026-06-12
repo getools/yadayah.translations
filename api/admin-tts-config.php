@@ -145,9 +145,15 @@ if ($method === 'GET' && $action === 'category_voices') {
     jsonResponse(['rows' => $stmt->fetchAll()]);
 }
 
-// Providers list — TTS-scoped (only providers that have voices in the
-// catalog). Must live above the POST-only gate below. See the matching
-// save_provider POST handler near the bottom.
+// Providers list — TTS-scoped. Includes any active provider that EITHER
+// has voices in the catalog OR is mapped to the 'tts' functionality
+// (with the mapping active). The union ensures newly-added cloud
+// providers like Inworld show up immediately — before the operator has
+// run "Check for new voices" — and that locally-defined engines that
+// already have voices (CosyVoice) remain visible even if their tts
+// mapping was never explicitly recorded. Must live above the POST-only
+// gate below. See the matching save_provider POST handler near the
+// bottom.
 if ($method === 'GET' && $action === 'list_providers') {
     $rows = $db->query("
         SELECT p.provider_key, p.provider_label, p.provider_main,
@@ -155,7 +161,17 @@ if ($method === 'GET' && $action === 'list_providers') {
                (SELECT COUNT(*) FROM yy_tts_voice v
                  WHERE v.provider_key = p.provider_key) AS voice_count
           FROM yy_provider p
-         WHERE p.provider_key IN (SELECT DISTINCT provider_key FROM yy_tts_voice)
+         WHERE p.provider_active_flag = TRUE
+           AND (
+                p.provider_key IN (SELECT DISTINCT provider_key FROM yy_tts_voice)
+             OR p.provider_key IN (
+                    SELECT fp.provider_key
+                      FROM yy_functionality_provider fp
+                      JOIN yy_functionality f USING (functionality_key)
+                     WHERE f.functionality_code = 'tts'
+                       AND fp.functionality_provider_active_flag = TRUE
+                )
+           )
          ORDER BY p.provider_sort, p.provider_label
     ")->fetchAll();
     jsonResponse(['providers' => $rows]);

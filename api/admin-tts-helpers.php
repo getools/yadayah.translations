@@ -435,7 +435,15 @@ function applyTunes(string $text, array $tunes, array &$tokenMap): string {
             $phon = strtr($phon, ["'" => "\u{02C8}", '`' => "\u{02C8}"]);
             $phon = str_replace('-', '.', $phon);
             $ph = htmlspecialchars($phon, ENT_QUOTES | ENT_XML1);
-            $printEsc = htmlspecialchars($print, ENT_QUOTES | ENT_XML1);
+            // Strip half-rings (ʾ U+02BE, ʿ U+02BF) from the *surface text*
+            // of the phoneme tag. The `ph=` attribute already encodes the
+            // correct pronunciation in IPA; the surface text is only a visual
+            // / accessibility fallback. Azure ignores it entirely (so output
+            // stays byte-identical) but stricter engines like Inworld TTS try
+            // to articulate the U+02BF and produce an audible delay / glottal
+            // stop. Stripping keeps the SSML clean for everyone.
+            $printSurface = preg_replace('/[\x{02BE}\x{02BF}]/u', '', $print);
+            $printEsc = htmlspecialchars($printSurface, ENT_QUOTES | ENT_XML1);
             $repl  = "<phoneme alphabet=\"ipa\" ph=\"$ph\">$printEsc</phoneme>";
             // Possessive variant: append /z/ to the IPA, append "'s" to
             // the surface print so lipsync / display stays sensible.
@@ -803,6 +811,127 @@ function wrapSsml(string $voiceBlocks): string {
  * `voice_settings.speed` (Turbo accepts it; v3 ignores it gracefully) and
  * we leave stability/similarity at the provider's saner defaults.
  */
+/**
+ * Synthesize one segment via the Inworld TTS cloud API. Same return
+ * contract as azureTtsSynthesize() / elevenlabsTtsSynthesize() /
+ * localTtsSynthesize(): mp3 bytes on success, '' with $err set on
+ * failure.
+ *
+ * Inworld API quirks vs ElevenLabs:
+ *   - Auth header is `Basic <base64(apiKey:)>` not Bearer or xi-api-key.
+ *   - Response is JSON with `audioContent` base64-encoded, NOT raw bytes.
+ *   - 2,000-char per-request cap — strictly enforced server-side.
+ *   - speakingRate range is 0.5..1.5 (narrower than ElevenLabs's 0.5..2).
+ *   - No pitch knob; we drop the pitch field same as ElevenLabs.
+ *
+ * Voice + model come from the provider row: tts_voice_code = Inworld
+ * voiceId (e.g. "Dennis"), provider_model_id = "inworld-tts-1.5-max"
+ * (or another Inworld model when we eventually have multiple rows).
+ */
+function inworldTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?string &$err = null): string {
+    $key = readEnv('INWORLD_API_KEY');
+    if (!$key) { $err = 'INWORLD_API_KEY not set in .env'; return ''; }
+
+    $prov = $cfg['providers'][$seg['provider_key']] ?? null;
+    if (!$prov) { $err = 'unknown provider_key ' . ($seg['provider_key'] ?? '?'); return ''; }
+    $modelId = (string)($prov['provider_model_id'] ?? 'inworld-tts-1.5-max');
+    $voiceId = (string)($seg['voice'] ?? '');
+    if ($voiceId === '') { $err = 'no voiceId on segment'; return ''; }
+
+    $text = (string)($seg['text'] ?? '');
+    if ($text === '') { $err = 'empty text'; return ''; }
+    // Inworld interprets a mid-word uppercase letter as a stress / emphasis
+    // marker and inserts an audible pause around it. The shared local-engine
+    // sub respellings ('shahBueah', 'YahHOHwah') deliberately use mid-word
+    // capitals as stress hints for Chatterbox / CosyVoice / Qwen3, which
+    // benefit from them. Inworld doesn't — so right before posting we
+    // lowercase any uppercase letter that follows another letter, leaving
+    // word-initial capitalisation of proper nouns ("Joshua", "Israel")
+    // intact. This is the fix for the audible delay around transliterated
+    // words like "Shabuwʿah" where the ʿ has already been substituted out
+    // by applyTunesPlain but the stress capital remains.
+    $text = preg_replace_callback('/(?<=\p{L})\p{Lu}/u', function ($m) {
+        return mb_strtolower($m[0], 'UTF-8');
+    }, $text);
+    // Per-call cap. We don't chunk here — the build worker already chunks
+    // at paragraph boundaries and the preview limit is 8,000 chars, so a
+    // single >2k segment is a misuse; surface it as a clear error.
+    if (mb_strlen($text) > 2000) {
+        $err = 'Inworld TTS-1.5 Max caps at 2000 chars; got ' . mb_strlen($text);
+        return '';
+    }
+
+    // Output format. Inworld supports MP3 / OGG_OPUS / WAV / LINEAR16 etc.
+    // The internal $outputFormat hint maps to a family; default MP3.
+    $encoding = (strpos($outputFormat, 'opus') !== false) ? 'OGG_OPUS'
+              : ((strpos($outputFormat, 'pcm') !== false || strpos($outputFormat, 'wav') !== false) ? 'WAV' : 'MP3');
+
+    // Rate from category settings → 0.5..1.5 multiplier. Clamp tight per
+    // Inworld's accepted range.
+    $ratePct = (int)($seg['rate'] ?? 0);
+    $speakingRate = max(0.5, min(1.5, 1.0 + ($ratePct / 100.0)));
+
+    $payload = [
+        'text'        => $text,
+        'voiceId'     => $voiceId,
+        'modelId'     => $modelId,
+        'audioConfig' => [
+            'audioEncoding'   => $encoding,
+            'sampleRateHertz' => 48000,
+            'speakingRate'    => $speakingRate,
+        ],
+    ];
+    // We still SEND the seed (and a low temperature) when one is supplied
+    // even though Inworld TTS-1.5 Max + TTS-2 currently ignore both fields
+    // (verified empirically — same payload returns different audio). Two
+    // reasons to keep sending: (a) if Inworld ever wires up determinism we
+    // get it for free, (b) lower temperature does still nudge their sampler
+    // toward less expressive output on average even when not bit-exact.
+    if (isset($seg['seed']) && $seg['seed'] !== null) {
+        $payload['seed']        = (int)$seg['seed'];
+        $payload['temperature'] = 0.3;
+    }
+    // Inworld's dashboard issues the API key as a pre-base64-encoded
+    // "<keyId>:<secret>" Basic-auth credential — already padded with `==`
+    // when you copy it. We send it verbatim. If a future key happens to
+    // contain a literal ':' (i.e. raw keyId:secret form), encode it once
+    // before pasting into .env: `echo -n 'kid:sec' | base64`.
+    $authHeader = 'Authorization: Basic ' . $key;
+
+    $ch = curl_init('https://api.inworld.ai/tts/v1/voice');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_HTTPHEADER     => [
+            $authHeader,
+            'Content-Type: application/json',
+            'Accept: application/json',
+        ],
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_TIMEOUT        => 180,
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $cerr = curl_error($ch);
+    curl_close($ch);
+    if ($resp === false || $code >= 400) {
+        $body = $cerr ?: trim((string)$resp);
+        $err = "Inworld TTS HTTP $code: " . substr($body, 0, 400);
+        return '';
+    }
+    $data = json_decode((string)$resp, true);
+    if (!is_array($data) || empty($data['audioContent'])) {
+        $err = 'Inworld TTS returned no audioContent: ' . substr((string)$resp, 0, 300);
+        return '';
+    }
+    $bytes = base64_decode((string)$data['audioContent'], true);
+    if ($bytes === false || $bytes === '') {
+        $err = 'Inworld TTS audioContent failed base64 decode';
+        return '';
+    }
+    return $bytes;
+}
+
 function elevenlabsTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?string &$err = null): string {
     $key = readEnv('ELEVENLABS_API_KEY');
     if (!$key) { $err = 'ELEVENLABS_API_KEY not set in .env'; return ''; }
@@ -831,7 +960,29 @@ function elevenlabsTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?
     $ratePct = (int)($seg['rate'] ?? 0);
     $speed = max(0.5, min(2.0, 1.0 + ($ratePct / 100.0)));
 
-    $voiceSettings = ['stability' => 0.5, 'similarity_boost' => 0.75];
+    // ── Lockdown voice settings (no hallucinations) ──────────────────────
+    // 'stability' is the single most important knob for "say EXACTLY what
+    // I typed, no more, no less." ElevenLabs documents 0.5 as "mid" where
+    // the sampler has the most freedom to add emotion AND to invent filler
+    // on short segments (autoregressive continuation hallucinations like
+    // "and another" / "here's another" after a one-word fragment). 0.85+
+    // pins the model tight to the transcript; 1.0 reads as monotone but
+    // refuses to deviate from the input. We sit at 0.85 — strict enough
+    // to suppress hallucinations on the short main-voice fragments that
+    // book paragraphs are split into (e.g. "thereof " alone between two
+    // parenthetical translations), expressive enough that single-voice
+    // long-form narration still sounds natural.
+    // 'similarity_boost' clamps to the chosen voice — high value prevents
+    // the model from drifting toward a generic voice on out-of-distribution
+    // text (Hebrew transliterations). 'style' = 0 disables style exaggeration
+    // (we want neutral narration). 'use_speaker_boost' = true strengthens
+    // similarity-locking further.
+    $voiceSettings = [
+        'stability'         => 0.85,
+        'similarity_boost'  => 0.85,
+        'style'             => 0.0,
+        'use_speaker_boost' => true,
+    ];
     if ($modelId === 'eleven_turbo_v2_5' || $modelId === 'eleven_flash_v2_5') {
         $voiceSettings['speed'] = $speed;
     }
@@ -1260,6 +1411,7 @@ function ttsProviderUsesSsml(array $cfg, int $providerKey): bool {
  * Classify a provider by where its synthesis call lands:
  *   'azure-ssml'        → azureTtsSynthesize via the SSML path
  *   'elevenlabs-cloud'  → elevenlabsTtsSynthesize via the ElevenLabs HTTP API
+ *   'inworld-cloud'     → inworldTtsSynthesize via the Inworld HTTP API
  *   'gpu-tailnet'       → localTtsSynthesize via the Puget gateway (Chatterbox / CosyVoice / Qwen3 / Kokoro)
  *
  * Used by preview + build worker to pick the right synth function. Unknown
@@ -1270,6 +1422,7 @@ function ttsProviderTransport(array $cfg, int $providerKey): string {
     if (!$p) return 'azure-ssml';
     $main = strtolower((string)($p['provider_main'] ?? ''));
     if ($main === 'elevenlabs') return 'elevenlabs-cloud';
+    if ($main === 'inworld')    return 'inworld-cloud';
     if (($p['provider_markup_format'] ?? 'ssml') === 'ssml') return 'azure-ssml';
     return 'gpu-tailnet';
 }
@@ -1340,6 +1493,13 @@ function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matc
     // ~95% of tunes before we touch their regex.
     $textLower = mb_strtolower($text, 'UTF-8');
     static $APOS_RE_FAST = '/[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]/u';
+    // Also strip apostrophe-class chars from the text-side of the pre-filter
+    // check. tunePrintToRegex treats those chars as optional in matching, so
+    // Print "Shabuwʿah" (core "Shabuwah") must be searchable against source
+    // text "Shabuwʿah" too — without this, half-ring words silently skip
+    // their tune and the raw character falls through to applyPauses, which
+    // emits an audible space where the ʿ used to be.
+    $textLowerCore = preg_replace($APOS_RE_FAST, '', $textLower);
     foreach ($tunes as $t) {
         $print = (string)($t['tts_tune_print'] ?? '');
         if ($print === '') continue;
@@ -1349,10 +1509,10 @@ function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matc
         // Skip tunes with no 'sub' so the English defaults handle them.
         if ($alias === '') continue;
         // Fast pre-filter: strip apostrophe-class chars from Print and
-        // check if the resulting core appears in the lowercased text.
-        // If not, no chance of a match — skip the expensive regex.
+        // check if the resulting core appears in the (also-stripped)
+        // lowercased text. If not, no chance of a match — skip the regex.
         $core = preg_replace($APOS_RE_FAST, '', $print);
-        if ($core === '' || mb_stripos($textLower, $core, 0, 'UTF-8') === false) continue;
+        if ($core === '' || mb_stripos($textLowerCore, $core, 0, 'UTF-8') === false) continue;
         $alias = str_replace(['[', ']', '{', '}'], '', $alias);
         // Hyphens in a SUB are syllable separators for human readability
         // ("yah-Hoe-wah"). Local engines like Chatterbox would treat a
@@ -1378,6 +1538,93 @@ function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matc
             // that range on every synth, so the same word can ring in
             // multiple variants across a long book. Deterministic case
             // (min == max) collapses to a single fixed seed.
+            if ($matchedSeed === null) {
+                $sMin = isset($t['tts_tune_seed_min']) ? (int)$t['tts_tune_seed_min'] : 0;
+                $sMax = isset($t['tts_tune_seed_max']) ? (int)$t['tts_tune_seed_max'] : $sMin;
+                if ($sMax < $sMin) $sMax = $sMin;
+                $matchedSeed = ($sMin === $sMax) ? $sMin : random_int($sMin, $sMax);
+            }
+        }
+    }
+    if (!empty($tokenMap)) $text = strtr($text, $tokenMap);
+    return $text;
+}
+
+/**
+ * Tune-substitution for Inworld TTS. Inworld accepts plain text with inline
+ * /IPA/ slash notation (per their docs: "Crete /kriːt/" → reads /kriːt/).
+ * For each matched tune:
+ *   - phonetic_type='ipa' AND phonetic_ipa non-empty  →  substitute "/IPA/"
+ *   - else if phonetic_sub non-empty                  →  substitute sub respelling
+ *   - else                                            →  skip (default English handles it)
+ *
+ * Same fast pre-filter + token round-trip as applyTunesPlain so the cost is
+ * identical. The IPA path avoids the mid-word-capital pause issue entirely
+ * (no respelling means no stress capitals in the output).
+ */
+function applyTunesInworld(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null): string {
+    $count = 0;
+    $matchedSeed = null;
+    $tokenMap = [];
+    $tokenIdx = 0;
+    $textLower = mb_strtolower($text, 'UTF-8');
+    static $APOS_RE_FAST = '/[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]/u';
+    $textLowerCore = preg_replace($APOS_RE_FAST, '', $textLower);
+    foreach ($tunes as $t) {
+        $print = (string)($t['tts_tune_print'] ?? '');
+        if ($print === '') continue;
+        $type = (string)($t['tts_tune_phonetic_type'] ?? 'sub');
+        $ipa  = trim((string)($t['tts_tune_phonetic_ipa'] ?? ''));
+        $sub  = trim((string)($t['tts_tune_phonetic_sub'] ?? ''));
+        // Choose the alias per the admin's phonetic_type setting.
+        if ($type === 'ipa' && $ipa !== '') {
+            // Inworld supports STANDARD ENGLISH IPA only (per their docs).
+            // Hebrew/Arabic-specific IPA glyphs that mark Semitic phonemes
+            // not present in English phonology cause the engine to guess —
+            // ʕ (voiced pharyngeal, ayin) comes out as /k/, χ (voiceless
+            // uvular, chaf) likewise. Map each to the closest sound English
+            // IPA can express. The lexicon's IPA strings keep their accurate
+            // Semitic glyphs — this normalisation is Inworld-only.
+            $ipaForInworld = strtr($ipa, [
+                // ʕ (voiced pharyngeal, ayin) — was mapped to ʔ (glottal stop)
+                // but Inworld's English sampler treats ʔ allophonically as /t/
+                // some fraction of calls ("Yisrael" → "Yis-RAH-tail"). Dropping
+                // entirely is the only Inworld-safe option; the silent-ayin
+                // pronunciation matches how English speakers actually say
+                // Hebrew names ("Israel", "Asaph"). Where the resulting
+                // vowel-vowel hiatus is itself a problem (e.g. /ɑɛ/ in
+                // "Yisrael" collapsing to a diphthong) the per-tune IPA needs
+                // an explicit syllable separator inserted in the lexicon.
+                "\u{0295}" => '',            // ʕ voiced pharyngeal (ayin) → drop
+                "\u{0127}" => 'h',           // ħ voiceless pharyngeal (chet) → h
+                "\u{0281}" => "\u{0279}",   // ʁ voiced uvular fricative → ɹ English r
+                "\u{03C7}" => 'h',           // χ voiceless uvular (chaf) → h
+                "\u{0263}" => 'g',           // ɣ voiced velar fricative → g
+            ]);
+            // Inworld's inline-IPA syntax: wrap in slashes.
+            $alias = '/' . $ipaForInworld . '/';
+        } elseif ($sub !== '') {
+            $alias = $sub;
+        } else {
+            continue;
+        }
+        // Fast pre-filter (same as applyTunesPlain).
+        $core = preg_replace($APOS_RE_FAST, '', $print);
+        if ($core === '' || mb_stripos($textLowerCore, $core, 0, 'UTF-8') === false) continue;
+        // SUB-style stress markers ([slow] / {fast} braces) are noise to
+        // Inworld; strip them. Hyphens are syllable separators in sub
+        // respellings — strip so the engine doesn't break on them. (IPA
+        // already lacks these markers.)
+        $alias = str_replace(['[', ']', '{', '}', '-'], '', $alias);
+        $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
+        $hits = 0;
+        $text = preg_replace_callback($regex, function ($m) use ($alias, &$tokenMap, &$tokenIdx) {
+            $tok = "\x02PT" . ($tokenIdx++) . "\x02";
+            $tokenMap[$tok] = !empty($m[2]) ? $alias . 's' : $alias;
+            return $tok;
+        }, $text, -1, $hits);
+        if ($hits > 0) {
+            $count += $hits;
             if ($matchedSeed === null) {
                 $sMin = isset($t['tts_tune_seed_min']) ? (int)$t['tts_tune_seed_min'] : 0;
                 $sMax = isset($t['tts_tune_seed_max']) ? (int)$t['tts_tune_seed_max'] : $sMin;
@@ -1465,6 +1712,68 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     // applyTunesPlain and passed through to the engine here. Normal
     // English text (no tune match) gets seed=null → stochastic.
     $seedHint = $tuneHits > 0 ? (int)$matchedTuneSeed : null;
+    return [
+        'provider_key' => $providerKey,
+        'voice'        => $voiceCode,
+        'text'         => $text,
+        'phonemes'     => null,
+        'rate'         => (int)($cat['tts_voice_rate_pct']  ?? 0),
+        'pitch'        => (float)($cat['tts_voice_pitch_st'] ?? 0),
+        'volume'       => (int)($cat['tts_voice_volume']     ?? 100),
+        'style'        => $style,
+        'seed'         => $seedHint,
+    ];
+}
+
+/**
+ * Build a plain-text + inline-/IPA/ segment for Inworld TTS. Mirrors
+ * buildLocalSegment but routes through applyTunesInworld so ipa-typed
+ * tunes are emitted as Inworld's inline slash notation rather than the
+ * sub respelling. Result text is what inworldTtsSynthesize POSTs.
+ */
+function buildInworldSegment(string $text, array $cfg, string $category): array {
+    $providerKey = ttsResolveProviderKey($cfg, $category);
+    $voiceCode   = ttsResolveVoiceCode($cfg, $category) ?? '';
+    if (!empty($cfg['bible_books'])) {
+        $text = rewriteBibleCitations($text, $cfg['bible_books']);
+    }
+    $tuneHits = 0;
+    $matchedTuneSeed = null;
+    $text = applyTunesInworld($text, ttsTunesForProvider($cfg, $providerKey), $tuneHits, $matchedTuneSeed);
+    if (!empty($cfg['pauses'])) {
+        $localPlaceholder = '';
+        $text = applyPauses($text, $cfg['pauses'], $localPlaceholder);
+    }
+    $text = applyInlinePauses($text);
+    // Same pause-as-punctuation strategy as buildLocalSegment — Inworld
+    // honours commas / periods for natural pacing without needing SSML breaks.
+    $text = preg_replace_callback('/\x01PAUSE_\d+_(\d+)\x01/', function ($m) {
+        $ms = (int)$m[1];
+        if ($ms < 100)  return ' ';
+        if ($ms < 300)  return ', ';
+        if ($ms < 1500) return '. ';
+        $n = (int)ceil($ms / 700);
+        return str_repeat('. ', $n);
+    }, $text);
+    // Strip half-rings that escaped a tune (e.g. words with no tune row).
+    $text = preg_replace('/[\x{02BF}\x{02BE}]/u', '', $text);
+    $text = str_replace('~', ' ', $text);
+    $text = preg_replace('/<\/?(?:b|i|em|strong)\b[^>]*>/i', '', $text);
+    $text = trim((string)preg_replace('/\s+/u', ' ', $text));
+    $cat = $cfg['categories'][$category] ?? null;
+    $cur = $category;
+    while ($cat === null && $cur !== null) { $cur = ttsCategoryParent($cur); if ($cur !== null) $cat = $cfg['categories'][$cur] ?? null; }
+    if ($cat === null && !empty($cfg['categories'])) $cat = reset($cfg['categories']);
+    $style = trim((string)($cat['tts_voice_style'] ?? ''));
+    if ($style === 'general') $style = '';
+    // Reproducible audio: forward the first matching tune's seed to
+    // inworldTtsSynthesize, which adds it to the API payload. When no
+    // tune matched (regular text), leave seed null so Inworld picks one
+    // randomly per call (its default behaviour). yy_tts_tune.tts_tune_seed_min
+    // == _max gives byte-identical playback every time for that word; min < max
+    // gives controlled variability inside that range — same logic
+    // buildLocalSegment uses for Chatterbox / CosyVoice.
+    $seedHint = ($tuneHits > 0 && $matchedTuneSeed !== null) ? (int)$matchedTuneSeed : null;
     return [
         'provider_key' => $providerKey,
         'voice'        => $voiceCode,

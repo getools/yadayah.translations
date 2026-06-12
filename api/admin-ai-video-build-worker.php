@@ -170,10 +170,30 @@ while (time() < $deadline) {
     }
     if ($st === 'complete') break;
     if ($st === 'running' || $st === 'pending') {
-        updateJob($db, $jobKey, [
-            'i2v_job_progress' => max(5, min(95, (int)($j['progress'] ?? 5))),
+        // Preserve engine-reported fractional progress (column is
+        // numeric(5,2) so values like 12.7 survive instead of being
+        // truncated to 12). Cap with float arithmetic, not (int).
+        $progRaw = (float)($j['progress'] ?? 5);
+        $prog = max(5.0, min(95.0, $progRaw));
+        $update = [
+            'i2v_job_progress' => $prog,
             'i2v_job_message'  => (string)($j['message'] ?? 'Generating'),
-        ]);
+        ];
+        // Engine may also report eta_seconds / phase / step / total — pull
+        // them into the message when present so the UI can show actionable
+        // detail without a schema change per field.
+        $extras = [];
+        if (isset($j['eta_seconds']) && (int)$j['eta_seconds'] > 0) {
+            $eta = (int)$j['eta_seconds'];
+            $mm = intdiv($eta, 60); $ss = $eta % 60;
+            $extras[] = 'ETA ~' . ($mm > 0 ? "{$mm}m {$ss}s" : "{$ss}s");
+        }
+        if (!empty($j['phase']))             $extras[] = 'phase=' . (string)$j['phase'];
+        if (isset($j['step'], $j['total']))  $extras[] = "step {$j['step']}/{$j['total']}";
+        if ($extras) {
+            $update['i2v_job_message'] = $update['i2v_job_message'] . ' · ' . implode(' · ', $extras);
+        }
+        updateJob($db, $jobKey, $update);
     }
     sleep(3);
 }
@@ -192,9 +212,36 @@ $outRel  = '/u/i2v-videos/' . $outName;
 $fh = fopen($outAbs . '.staging', 'wb');
 if (!$fh) bailJob($db, $jobKey, "cannot open $outAbs.staging");
 $ch = curl_init($endpoint . '/jobs/' . rawurlencode($remoteJobId) . '/file');
+// Surface the in-flight download as i2v_job_size_bytes (already a real
+// schema column the UI reads in the expanded detail block). The UI polls
+// list_jobs every 4 s, so we only need to flush on the first byte and
+// every ~1 s after — anything more is wasted DB load.
+$lastFlush = 0.0;
+$progressCb = function ($curl, $dltot, $dlnow, $ultot, $ulnow) use (&$lastFlush, $db, $jobKey) {
+    $now = microtime(true);
+    if ($dlnow > 0 && ($now - $lastFlush) >= 1.0) {
+        $lastFlush = $now;
+        $totalKnown = $dltot > 0 ? (int)$dltot : 0;
+        $bytesNow   = (int)$dlnow;
+        $pct = ($totalKnown > 0) ? (96.0 + min(3.9, ($bytesNow / $totalKnown) * 3.9)) : 96.0;
+        $msg = $totalKnown > 0
+            ? sprintf('Downloading MP4 — %.1f MB / %.1f MB', $bytesNow / 1048576.0, $totalKnown / 1048576.0)
+            : sprintf('Downloading MP4 — %.1f MB',           $bytesNow / 1048576.0);
+        try {
+            updateJob($db, $jobKey, [
+                'i2v_job_size_bytes' => $bytesNow,
+                'i2v_job_progress'   => $pct,
+                'i2v_job_message'    => $msg,
+            ]);
+        } catch (Throwable $e) { /* db hiccup — don't abort the download */ }
+    }
+    return 0; // continue
+};
 curl_setopt_array($ch, [
-    CURLOPT_FILE    => $fh,
-    CURLOPT_TIMEOUT => 600,
+    CURLOPT_FILE              => $fh,
+    CURLOPT_TIMEOUT           => 600,
+    CURLOPT_NOPROGRESS        => false,
+    CURLOPT_XFERINFOFUNCTION  => $progressCb,
 ]);
 $ok   = curl_exec($ch);
 $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);

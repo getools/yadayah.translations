@@ -627,7 +627,20 @@ if ($action === 'redo_paragraph') {
         ")->execute([$audioKey]);
         ttsTrySpawn($db, $audioKey);
         $requeued = true;
-    } else if (in_array($st, ['complete', 'paused', 'failed'], true)) {
+    } else if ($st === 'paused') {
+        // User explicitly paused this chapter — a per-paragraph redo MUST
+        // NOT override that intent and resume the worker. The part file is
+        // already deleted above; that's all we do. When the user manually
+        // clicks Resume on the chapter, the missing paragraph gets refilled
+        // during the resumed build's first iteration (per-iter cache check
+        // in the build worker loop). requeued stays false so the UI shows
+        // a quiet "✓" rather than "✓ queued" — matches reality.
+        $db->prepare("
+            UPDATE yy_tts_audio
+               SET tts_audio_message='Paused — paragraph redo deleted; click Resume to gap-fill'
+             WHERE tts_audio_key = ?
+        ")->execute([$audioKey]);
+    } else if (in_array($st, ['complete', 'failed'], true)) {
         $db->prepare("
             UPDATE yy_tts_audio
                SET tts_audio_status='pending', tts_audio_progress=0,

@@ -162,6 +162,128 @@ if ($action === 'refresh') {
         $provKey  = (int)$sys['tts_key'];
         $provCode = $sys['tts_code'];
 
+        // ── Inworld adapter ──────────────────────────────────────────────
+        if ($provCode === 'inworld') {
+            $apiKey = readEnv('INWORLD_API_KEY');
+            if (!$apiKey) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'INWORLD_API_KEY not set'];
+                continue;
+            }
+            $iwProviderKey = (int)$db->query("SELECT provider_key FROM yy_provider
+                                                WHERE provider_main='Inworld' AND provider_engine='TTS'
+                                                ORDER BY provider_key LIMIT 1")->fetchColumn();
+            if ($iwProviderKey <= 0) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'no Inworld provider row found'];
+                continue;
+            }
+            // GET /tts/v1/voices — single page (not paginated per docs).
+            // The API key in .env is the pre-encoded Basic credential as
+            // issued by Inworld's dashboard; pass it verbatim.
+            $authHeader = 'Authorization: Basic ' . $apiKey;
+            $ch = curl_init('https://api.inworld.ai/tts/v1/voices');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER     => [$authHeader, 'Accept: application/json'],
+                CURLOPT_TIMEOUT        => 30,
+            ]);
+            $resp = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $cerr = curl_error($ch);
+            curl_close($ch);
+            if ($resp === false || $httpCode >= 400) {
+                errorResponse('Inworld /v1/voices failed: HTTP ' . $httpCode . ' ' . ($cerr ?: substr((string)$resp, 0, 300)));
+            }
+            $body = json_decode((string)$resp, true);
+            $voices = is_array($body['voices'] ?? null) ? $body['voices'] : [];
+
+            $upsert = $db->prepare("
+                INSERT INTO yy_tts_voice
+                    (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
+                     tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_type,
+                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_note,
+                     tts_voice_download_dtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, NOW())
+                ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
+                    tts_voice_label             = EXCLUDED.tts_voice_label,
+                    tts_voice_locale            = EXCLUDED.tts_voice_locale,
+                    tts_voice_locale_name       = EXCLUDED.tts_voice_locale_name,
+                    tts_voice_language          = EXCLUDED.tts_voice_language,
+                    tts_voice_region            = EXCLUDED.tts_voice_region,
+                    tts_voice_gender            = EXCLUDED.tts_voice_gender,
+                    tts_voice_type              = EXCLUDED.tts_voice_type,
+                    tts_voice_styles            = EXCLUDED.tts_voice_styles,
+                    tts_voice_status            = EXCLUDED.tts_voice_status,
+                    provider_key                = EXCLUDED.provider_key,
+                    tts_voice_note              = EXCLUDED.tts_voice_note,
+                    tts_voice_download_dtime    = NOW()
+                RETURNING (xmax = 0) AS is_insert
+            ");
+
+            $added = 0; $updated = 0;
+            $db->beginTransaction();
+            try {
+                foreach ($voices as $v) {
+                    $code = (string)($v['voiceId'] ?? '');
+                    if ($code === '') continue;
+                    $label = (string)($v['displayName'] ?? $code);
+                    $desc  = (string)($v['description'] ?? '');
+                    $tags  = is_array($v['tags'] ?? null) ? $v['tags'] : [];
+                    $langs = is_array($v['languages'] ?? null) ? $v['languages'] : [];
+                    $isCustom = !empty($v['isCustom']);
+
+                    // Gender from tags ("male" / "female"). Inworld doesn't
+                    // expose a dedicated gender field; tag matching is the
+                    // closest signal.
+                    $gender = null;
+                    foreach ($tags as $t) {
+                        $tl = strtolower((string)$t);
+                        if ($tl === 'male' || $tl === 'female') { $gender = ucfirst($tl); break; }
+                    }
+                    // Inworld voices are multilingual — primary locale = en-US
+                    // unless an explicit 2-letter code is listed first.
+                    $primary = (string)($langs[0] ?? 'en');
+                    $locale = ($primary === 'en') ? 'en-US' : $primary;
+                    $localeName = ($primary === 'en') ? 'English (United States)' : strtoupper($primary);
+
+                    $voiceType = $isCustom ? 'Custom' : 'Neural';
+                    $noteParts = array_filter([
+                        $desc,
+                        $tags ? 'tags:' . implode(',', $tags) : '',
+                        $langs ? 'langs:' . implode(',', $langs) : '',
+                        $isCustom ? 'custom' : '',
+                    ]);
+                    $note = implode(' · ', $noteParts);
+
+                    $upsert->execute([
+                        $provKey, $code, $label,
+                        $locale, $localeName,
+                        substr($locale, 0, 2), substr($locale, 3),
+                        $gender, $voiceType,
+                        json_encode([], JSON_UNESCAPED_UNICODE),
+                        $isCustom ? 'custom' : 'premade',
+                        $iwProviderKey,
+                        $note,
+                    ]);
+                    $row = $upsert->fetch();
+                    if ($row && $row['is_insert']) $added++; else $updated++;
+                }
+                $db->commit();
+            } catch (Throwable $e) {
+                if ($db->inTransaction()) $db->rollBack();
+                errorResponse('refresh failed for ' . $provCode . ': ' . $e->getMessage());
+            }
+            $totStmt = $db->prepare("SELECT COUNT(*) FROM yy_tts_voice WHERE tts_key = ?");
+            $totStmt->execute([$provKey]);
+            $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                              'added' => $added, 'updated' => $updated,
+                              'total' => (int)$totStmt->fetchColumn()];
+            $totalAdded   += $added;
+            $totalUpdated += $updated;
+            continue;
+        }
+
         // ── ElevenLabs adapter ───────────────────────────────────────────
         if ($provCode === 'elevenlabs') {
             $apiKey = readEnv('ELEVENLABS_API_KEY');

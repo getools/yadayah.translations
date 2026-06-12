@@ -120,6 +120,7 @@ if ($overrideVoice) {
 // Dispatch by provider. ttsProviderTransport returns one of:
 //   'azure-ssml'        → existing SSML path verbatim
 //   'elevenlabs-cloud'  → ElevenLabs HTTP API (eleven_v3 / eleven_turbo_v2_5)
+//   'inworld-cloud'     → Inworld HTTP API (inworld-tts-1.5-max / inworld-tts-2)
 //   'gpu-tailnet'       → local engines (Chatterbox/CosyVoice/Qwen3/Kokoro) via gpu-client
 $primaryCat  = $hasFormat ? null : $category;
 $resolvedCat = $primaryCat ?? 'main';
@@ -131,15 +132,30 @@ $mp3 = '';
 
 try {
     if ($transport === 'elevenlabs-cloud') {
-        // ElevenLabs cloud API. Same per-segment payload shape as the local
-        // GPU path; the synth helper handles the HTTP call. We carry the
-        // provider_key on the segment so the synth picks model/voice off
-        // the matching yy_provider / yy_tts_voice row.
-        $elSeg = buildLocalSegment($text, $cfg, $resolvedCat);
+        // ElevenLabs cloud API. The build worker uses buildElevenLabsSegment
+        // because ElevenLabs v3 / flash_v2 / turbo_v2 understand inline
+        // <phoneme alphabet="ipa" ph="…"> and <break time="…"/> tags. The
+        // earlier preview code here called buildLocalSegment, which is the
+        // shaper for engines that DON'T speak SSML (Chatterbox / CosyVoice /
+        // Qwen3) — it flattens every <phoneme> tag back to the ASCII sub
+        // respelling. Net effect: every ElevenLabs preview silently played
+        // the phonetic spelling no matter what IPA the operator typed.
+        // Match the build worker so the preview reflects what a real book
+        // build will hear.
+        $elSeg = buildElevenLabsSegment($text, $cfg, $resolvedCat);
         $elSeg['provider_key'] = $providerKey;
         if ($overrideVoice !== null) $elSeg['voice'] = $overrideVoice;
         $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
         $mp3 = elevenlabsTtsSynthesize($cfg, $elSeg, $outputFormat, $err);
+    } elseif ($transport === 'inworld-cloud') {
+        // Inworld cloud API — uses inline /IPA/ slash notation for ipa-typed
+        // tunes via buildInworldSegment (was buildLocalSegment, which used the
+        // sub respelling for everything and caused mid-word-stress pauses).
+        $iwSeg = buildInworldSegment($text, $cfg, $resolvedCat);
+        $iwSeg['provider_key'] = $providerKey;
+        if ($overrideVoice !== null) $iwSeg['voice'] = $overrideVoice;
+        $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
+        $mp3 = inworldTtsSynthesize($cfg, $iwSeg, $outputFormat, $err);
     } elseif ($usesSsml) {
         if ($hasFormat) {
             $segs = segmentParagraph($text);

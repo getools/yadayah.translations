@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781051210">
+    <meta name="page-version" content="1781215209">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -25,7 +25,10 @@
         .voice-row select, .voice-row input { padding:6px 10px; border:1px solid #ccc; border-radius:4px; font-size:0.88rem; font-family:inherit; }
         .voice-row .prosody { display:flex; gap:8px; align-items:center; font-size:0.78rem; color:#666; }
         .voice-row .prosody input { width:60px; }
-        .voice-row .btn-listen { background:#31345A; color:#fff; border:none; border-radius:4px; padding:6px 12px; cursor:pointer; font-size:0.85rem; font-weight:600; }
+        /* Fixed dimensions + flex centering keep the row from shifting when
+           ▶ is swapped to … (the busy indicator) — the two characters have
+           different rendered heights otherwise. */
+        .voice-row .btn-listen { background:#31345A; color:#fff; border:none; border-radius:4px; padding:0; width:40px; height:30px; display:inline-flex; align-items:center; justify-content:center; line-height:1; cursor:pointer; font-size:0.85rem; font-weight:600; box-sizing:border-box; }
         .voice-row .btn-listen:hover { background:#252850; }
         .voice-row .btn-listen[disabled] { background:#888; cursor:wait; }
 
@@ -585,8 +588,13 @@
             <div class="books-controls">
                 <select id="volume-select"><option value="">— Select volume —</option></select>
                 <span id="volume-summary" style="font-size:0.85rem;color:#666"></span>
+                <button type="button" id="pause-all-btn" onclick="pauseAllQueuedBuilds()"
+                        title="Pause every chapter in this volume that's currently queued or running. Cached paragraphs are preserved for later Resume."
+                        style="display:none;margin-left:auto;padding:6px 12px;border:1px solid #5c4a8a;background:#5c4a8a;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">
+                    ⏸ Pause all queued
+                </button>
                 <button type="button" id="build-all-btn" onclick="openBuildAllModal()" disabled
-                        style="margin-left:auto;padding:6px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">
+                        style="margin-left:8px;padding:6px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">
                     Build all chapters
                 </button>
             </div>
@@ -1678,6 +1686,12 @@ document.addEventListener('keydown', function (e) {
 var VC_STATE = {
     voices: [],
     sort: { col: 'language', dir: 'asc' },
+    // Cached from loadProviders() so the per-column Provider filter can
+    // list every TTS provider regardless of which provider the "Check for
+    // new voices" scope dropdown is currently pointing at. Without this
+    // the filter built its options from VC_STATE.voices, so narrowing the
+    // scope to ElevenLabs left only "ElevenLabs" in the filter dropdown.
+    providers: [],
 };
 var VC_DEFAULT_TEST_TEXT = 'Yahowah commanded the children of Yisraʾel to keep the Shabuwʿah.';
 
@@ -1754,6 +1768,12 @@ async function loadProviders() {
     try {
         var r = await api('/admin-tts-config.php?action=list_providers');
         var providers = r.providers || [];
+        // Cache for the per-column Provider filter so it can render
+        // every TTS provider, not just the ones currently in VC_STATE.voices.
+        VC_STATE.providers = providers.slice();
+        // Refresh the per-column filter now in case voices loaded before
+        // providers did. The filter populator unions both sources.
+        if (typeof populateVoiceFilterOptions === 'function') populateVoiceFilterOptions();
         if (!providers.length) {
             tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#888;padding:12px;">No TTS providers with voices yet — populate the catalog below first.</td></tr>';
             return;
@@ -1852,7 +1872,19 @@ function populateVoiceFilterOptions() {
     // Kokoro / etc.) so a single TTS system that fans out to multiple
     // engines still gets a per-engine filter. Falls back to tts_name on
     // legacy rows with no provider_key.
+    //
+    // The Provider list is UNIONed from two sources so it stays accurate
+    // regardless of which provider the "Check for new voices" scope
+    // dropdown is currently pointing at: VC_STATE.providers (the full
+    // catalog from list_providers, populated by loadProviders) and the
+    // currently-loaded VC_STATE.voices (covers any provider seen via the
+    // loaded voices). Lang / region / type / etc. still derive from the
+    // loaded voices since those values are voice-shaped, not provider-shaped.
     var langs = new Set(), regions = new Set(), types = new Set(), providers = new Set();
+    (VC_STATE.providers || []).forEach(function (p) {
+        var providerLabel = p.provider_main || p.provider_label || '';
+        if (providerLabel) providers.add(providerLabel);
+    });
     VC_STATE.voices.forEach(function (v) {
         if (v.tts_voice_language) langs.add(v.tts_voice_language);
         if (v.tts_voice_region)   regions.add(v.tts_voice_region);
@@ -3001,7 +3033,7 @@ function buildTuneRow(t) {
             + '<span class="f-warn f-warn-sapi" title="">⚠</span>'
         + '</div></td>' +
         '<td style="padding:8px 2px;text-align:center;">' +
-            '<button class="btn-sm btn-sec" data-act="listen" title="Play with the selected variant (SUB or IPA)" style="margin:0;padding:5px 8px;">▶</button>' +
+            '<button class="btn-sm btn-sec" data-act="listen" title="Play with the selected variant (SUB or IPA)" style="margin:0;padding:0;width:32px;height:28px;display:inline-flex;align-items:center;justify-content:center;line-height:1;font-size:0.82rem;box-sizing:border-box;">▶</button>' +
         '</td>' +
         // Provider column — per-tune engine scope. Blank = apply to all engines.
         '<td style="padding:4px 2px;">' +
@@ -3330,8 +3362,26 @@ async function handleTuneAction(tr, act) {
             if (!print) return;
             // Read the row's current form values rather than what's saved
             // — the preview should reflect exactly what's on screen.
-            var typeRadio2 = tr.querySelector('.f-type-radio:checked');
-            var selType = typeRadio2 ? typeRadio2.value : 'sub';
+            // Play whichever variant column is currently *visible* in the
+            // table. The Pronunciations tab has an IPA ↔ Phonetic toggle
+            // in the column headers that puts a 'mode-phonetic' class on
+            // the pane; default (no class) = IPA mode. Reading the hidden
+            // f-type-radio instead would always play the row's saved type
+            // even when the admin is auditioning the other column.
+            // Pick whichever variant is ACTUALLY visible on this row, not
+            // whichever mode the global toggle is in. Two CSS layers decide
+            // visibility:
+            //   1. Global mode-phonetic → every row shows .f-sub
+            //   2. Default (IPA) mode   → each row shows whichever its
+            //      per-row radio (tune-mode-sub vs tune-mode-ipa/sapi)
+            //      selected; a row in tune-mode-sub still displays the
+            //      phonetic spelling even when the table is in IPA mode
+            // The preview must follow the eye — auditioning IPA when the
+            // operator can only see the phonetic respelling is the bug.
+            var pronsPane = document.getElementById('pane-pronunciations');
+            var globalPhonetic = !!(pronsPane && pronsPane.classList.contains('mode-phonetic'));
+            var rowIsSub = tr.classList.contains('tune-mode-sub');
+            var selType = (globalPhonetic || rowIsSub) ? 'sub' : 'ipa';
             var subVal  = tr.querySelector('.f-sub').value;
             var ipaVal  = tr.querySelector('.f-ipa').value;
             // Use the Pronunciations tab's own audio player so the
@@ -3660,6 +3710,7 @@ async function loadChapters(volumeKey) {
     ACTIVE_VOLUME_CODE = (r.volume && r.volume.volume_code) || '';
     $('volume-summary').textContent = (r.volume.volume_label || '') + ' — ' + CHAPTERS.length + ' chapters';
     if (allBtn) allBtn.disabled = false;
+    if (typeof updatePauseAllVisibility === 'function') updatePauseAllVisibility();
     $('chapters-table').style.display = '';
     // Lazy-load paragraph counts in parallel — initial render happens
     // immediately with the placeholder "—" for each row's Paragraphs cell.
@@ -3944,8 +3995,14 @@ function renderChapters() {
         if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
     });
     // Sweep any stray rows without a data-ck (the "Loading chapters…"
-    // placeholder before fetch arrives).
-    Array.prototype.slice.call(tb.querySelectorAll('tr:not([data-ck])')).forEach(function (r) {
+    // placeholder before fetch arrives). MUST be `:scope > tr` — the
+    // unscoped selector also matches paragraph rows INSIDE the expand-
+    // row tables (which have data-idx, not data-ck), and the forEach
+    // below would wipe every paragraph the user just expanded to see.
+    // This was the regression behind "the list of paragraphs loads and
+    // then goes away" — every 5 s poll → renderChapters → this sweep →
+    // 270 paragraph rows gone. Verified with Playwright on prod, 2026-06-11.
+    Array.prototype.slice.call(tb.querySelectorAll(':scope > tr:not([data-ck])')).forEach(function (r) {
         if (r.parentNode) r.parentNode.removeChild(r);
     });
 }
@@ -4232,19 +4289,40 @@ function _paraSurgicalUpdate(container, rows, doneCount) {
         if (tr.dataset.sig === sig) return;   // unchanged — skip entirely
         var audioCell = tr.children[4];
         if (audioCell) {
-            audioCell.innerHTML = p.has_part
-                ? '<audio controls preload="none" style="width:225px;height:24px;vertical-align:middle;" src="' + escapeHtml(p.part_url) + '"></audio>'
-                : '<span style="color:#bbb;font-size:0.78rem;">— not yet synthesised —</span>';
+            // SURGICAL: preserve any existing <audio> element whose src
+            // already points at the same part URL. _paraRowSig includes
+            // p.part_bytes which increases on every poll while the build
+            // worker is mid-write — that means without this guard, every
+            // poll wholesale-replaces the audio element, which (a) stops
+            // playback if the user was listening, (b) re-fetches the
+            // bytes on play, and (c) was the trigger for the "the whole
+            // panel is refreshing" symptom users keep reporting.
+            var wantSrc = p.has_part ? p.part_url : null;
+            var existingAudio = audioCell.querySelector('audio');
+            var existingSrc   = existingAudio ? (existingAudio.getAttribute('src') || '') : '';
+            var srcMatches    = !!wantSrc && existingSrc === wantSrc;
+            if (!srcMatches) {
+                audioCell.innerHTML = p.has_part
+                    ? '<audio controls preload="none" style="width:225px;height:24px;vertical-align:middle;" src="' + escapeHtml(p.part_url) + '"></audio>'
+                    : '<span style="color:#bbb;font-size:0.78rem;">— not yet synthesised —</span>';
+            }
         }
         var textCell = tr.children[3];
         if (textCell) {
-            textCell.innerHTML =
-                  (p.is_table ? '<span title="parser flagged as table; auto-skipped" style="color:#888;font-style:italic;font-size:0.78rem;">[table] </span>' : '')
+            // Only rewrite the text cell when its content has materially
+            // changed. The flag prefixes (table / skipped) plus the
+            // preview substring make a stable comparison string; if it
+            // matches what's already rendered, leave the cell alone (no
+            // flicker, no DOM churn).
+            var nextHtml = (p.is_table ? '<span title="parser flagged as table; auto-skipped" style="color:#888;font-style:italic;font-size:0.78rem;">[table] </span>' : '')
                 + (p.is_skipped ? '<span title="excluded by Delete" style="color:#c0392b;font-weight:600;font-size:0.78rem;">[skipped] </span>' : '')
                 + escapeHtml(p.preview || '');
+            if (textCell.innerHTML !== nextHtml) textCell.innerHTML = nextHtml;
         }
-        tr.style.opacity     = p.is_skipped ? '0.55' : '';
-        tr.style.background  = p.is_skipped ? '#fdf2f2' : (p.is_failed ? '#fff5e6' : '');
+        var nextOpacity = p.is_skipped ? '0.55' : '';
+        var nextBg      = p.is_skipped ? '#fdf2f2' : (p.is_failed ? '#fff5e6' : '');
+        if (tr.style.opacity    !== nextOpacity) tr.style.opacity    = nextOpacity;
+        if (tr.style.background !== nextBg)      tr.style.background = nextBg;
         tr.dataset.sig = sig;
     });
 }
@@ -4595,6 +4673,58 @@ async function toggleAudioActive(audioKey, makeActive) {
         if (typeof renderChapters === 'function') renderChapters();
     } catch (e) {
         alert('Toggle failed: ' + (e.message || e));
+    }
+}
+
+// Show the Pause-all button only when there's something to pause.
+// Called after every loadChapters() poll so the badge reflects the
+// current queue state without a separate poll of its own.
+function updatePauseAllVisibility() {
+    var btn = document.getElementById('pause-all-btn');
+    if (!btn) return;
+    var queued = (CHAPTERS || []).filter(function (c) {
+        return c.tts_audio_status === 'running' || c.tts_audio_status === 'pending';
+    });
+    if (queued.length > 0) {
+        btn.style.display = '';
+        btn.textContent = '⏸ Pause all (' + queued.length + ')';
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
+// Bulk-pause every running/pending chapter build for the current volume.
+// Iterates client-side because the existing per-chapter pause endpoint
+// already handles all the state plumbing — no new API surface needed.
+// Errors on individual chapters are aggregated into one summary at the end
+// rather than per-chapter alerts that would fire N times.
+async function pauseAllQueuedBuilds() {
+    var queued = (CHAPTERS || []).filter(function (c) {
+        return c.tts_audio_status === 'running' || c.tts_audio_status === 'pending';
+    });
+    if (queued.length === 0) { alert('No queued or running chapter builds to pause.'); return; }
+    if (!confirm('Pause ' + queued.length + ' queued/running chapter build' + (queued.length === 1 ? '' : 's') + '?')) return;
+    var btn = document.getElementById('pause-all-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Pausing…'; }
+    var paused = 0, failed = [];
+    for (var __i = 0; __i < queued.length; __i++) {
+        var __ch = queued[__i];
+        try {
+            await api('/admin-tts-build.php?action=pause', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ action:'pause', tts_audio_key: __ch.tts_audio_key }),
+            });
+            __ch.tts_audio_status = 'paused';
+            paused++;
+        } catch (e) {
+            failed.push('ch' + __ch.tts_audio_key + ': ' + (e.message || e));
+        }
+    }
+    if (btn) { btn.disabled = false; }
+    updatePauseAllVisibility();
+    if (typeof loadChapters === 'function' && ACTIVE_VOLUME) loadChapters(ACTIVE_VOLUME);
+    if (failed.length) {
+        alert('Paused ' + paused + ' of ' + queued.length + ' chapter(s).\nFailed:\n' + failed.join('\n'));
     }
 }
 

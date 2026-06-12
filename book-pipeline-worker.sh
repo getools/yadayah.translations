@@ -274,53 +274,50 @@ process_job() {
         fi
         if [ "$graph_rc" -ne 0 ]; then
             # 1b. Fallback: Word for the Web via headless Playwright.
-            # Graph fails on files that need >60s to render. Word Online
-            # uses the same render engine but has no 60s cap on its UI
-            # path, so the fallback handles the timeout-bound stragglers.
+            # Graph's Python script already retries up to 10 times with
+            # exponential backoff before returning rc≠0. By the time rc
+            # reaches the shell, the failure is not a transient network
+            # blip — fall through to Word Online regardless of whether
+            # the root cause was a WRS timeout or a persistent 500.
+            local wol_reason
             if echo "$graph_output" | grep -qE "Timeout_TaskCanceled|wordcs\.officeapps\.live\.com"; then
-                log "Graph hit WRS timeout for $docx_name — falling back to Word for the Web"
-                update_status "$volume_key" "running" "Graph timed out — falling back to Word for the Web"
-                local wol_output wol_rc=0
-                wol_output=$(/opt/yada-www/parsers/docx_to_pdf_via_word_online.py \
-                    --input  "$docx_path" \
-                    --output "$PDF_DIR/$pdf_name" 2>&1) || wol_rc=$?
-                wol_rc=${wol_rc:-0}
-                echo "$wol_output" >> /var/log/book-pipeline.log
-                if [ "$wol_rc" -eq 3 ]; then
-                    log "Word Online auth expired for $docx_name — manual re-bootstrap required"
-                    update_status "$volume_key" "error" \
-                        "Word Online auth state expired — re-run refresh_word_online_auth.py on a Windows machine and SCP the result to /opt/yada-www/secrets/" \
-                        "$wol_output"
-                    mv "$job" "$JOBS_DIR/failed/"
-                    return
-                fi
-                if [ "$wol_rc" -eq 2 ]; then
-                    log "Word Online produced suspect PDF for $docx_name — refusing to publish"
-                    update_status "$volume_key" "error" \
-                        "Word Online PDF validation failed (producer != Word, or kerning regression)" \
-                        "$wol_output"
-                    rm -f "$PDF_DIR/$pdf_name"
-                    mv "$job" "$JOBS_DIR/failed/"
-                    return
-                fi
-                if [ "$wol_rc" -ne 0 ]; then
-                    log "Word Online fallback failed for $docx_name (rc=$wol_rc) — leaving job queued for next tick"
-                    update_status "$volume_key" "warning" \
-                        "Both Graph and Word Online failed (Graph rc=$graph_rc, WOL rc=$wol_rc) — retry next tick" \
-                        "$wol_output"
-                    return
-                fi
-                log "Word Online fallback succeeded for $docx_name"
+                wol_reason="Graph timed out"
             else
-                # Graph failed for some non-timeout reason — likely transient
-                # network / 5xx. Leave queued for next tick rather than
-                # fall through to Word Online.
-                log "Graph conversion failed for $docx_name (rc=$graph_rc, non-timeout) — leaving job queued for next tick"
-                update_status "$volume_key" "warning" \
-                    "Microsoft Graph DOCX→PDF failed (rc=$graph_rc) — auto-retry on next cron tick" \
-                    "$graph_output"
+                wol_reason="Graph returned persistent errors (rc=$graph_rc)"
+            fi
+            log "Graph failed for $docx_name ($wol_reason) — falling back to Word for the Web"
+            update_status "$volume_key" "running" "$wol_reason — falling back to Word for the Web"
+            local wol_output wol_rc=0
+            wol_output=$(/opt/yada-www/parsers/docx_to_pdf_via_word_online.py \
+                --input  "$docx_path" \
+                --output "$PDF_DIR/$pdf_name" 2>&1) || wol_rc=$?
+            wol_rc=${wol_rc:-0}
+            echo "$wol_output" >> /var/log/book-pipeline.log
+            if [ "$wol_rc" -eq 3 ]; then
+                log "Word Online auth expired for $docx_name — manual re-bootstrap required"
+                update_status "$volume_key" "error" \
+                    "Word Online auth state expired — re-run refresh_word_online_auth.py on a Windows machine and SCP the result to /opt/yada-www/secrets/" \
+                    "$wol_output"
+                mv "$job" "$JOBS_DIR/failed/"
                 return
             fi
+            if [ "$wol_rc" -eq 2 ]; then
+                log "Word Online produced suspect PDF for $docx_name — refusing to publish"
+                update_status "$volume_key" "error" \
+                    "Word Online PDF validation failed (producer != Word, or kerning regression)" \
+                    "$wol_output"
+                rm -f "$PDF_DIR/$pdf_name"
+                mv "$job" "$JOBS_DIR/failed/"
+                return
+            fi
+            if [ "$wol_rc" -ne 0 ]; then
+                log "Word Online fallback failed for $docx_name (rc=$wol_rc) — leaving job queued for next tick"
+                update_status "$volume_key" "warning" \
+                    "Both Graph and Word Online failed (Graph rc=$graph_rc, WOL rc=$wol_rc) — retry next tick" \
+                    "$wol_output"
+                return
+            fi
+            log "Word Online fallback succeeded for $docx_name"
         fi
         if [ ! -s "$PDF_DIR/$pdf_name" ] || [ $(stat -c%s "$PDF_DIR/$pdf_name") -lt 10000 ]; then
             log "PDF output missing/tiny for $docx_name — failing job"

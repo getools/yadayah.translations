@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781042406">
+    <meta name="page-version" content="1781215205">
     <meta charset="UTF-8">
     <title>AI — Yada Admin</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -152,8 +152,8 @@
                 <div><label>Height (px)</label><input type="number" data-p="height" min="256" max="2048" step="16" value="480"></div>
                 <div><label>FPS</label><input type="number" data-p="fps" min="8" max="60" step="1" value="16"></div>
                 <div><label>Seed</label><input type="number" data-p="seed" placeholder="random"></div>
-                <div><label>Inference steps</label><input type="number" data-p="num_inference_steps" min="1" max="200" step="1" value="30"></div>
-                <div><label>Guidance scale</label><input type="number" data-p="guidance_scale" min="0" max="20" step="0.5" value="5"></div>
+                <div><label>Inference steps <span style="color:#888;font-weight:normal;font-size:.85em" title="CogVideoX-5B-I2V's reference value. Anything below ~40 produces smeared / noisy output — the diffusion didn't run enough denoising rounds to converge.">(≥ 40 recommended; ref = 50)</span></label><input type="number" data-p="num_inference_steps" min="1" max="200" step="1" value="50"></div>
+                <div><label>Guidance scale</label><input type="number" data-p="guidance_scale" min="0" max="20" step="0.5" value="6"></div>
             </div>
             <details style="margin-top:12px">
                 <summary>Advanced parameters (raw JSON; merged over the structured fields)</summary>
@@ -315,6 +315,18 @@ function toast(msg, kind) {
     el.className = 'toast show' + (kind === 'err' ? ' err' : '');
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.className = 'toast', 3500);
+}
+// Compact wall-clock duration formatter: 8s / 1m 12s / 22m / 1h 4m. Used
+// on every running job row so the operator can see at a glance whether
+// they're 30 s in or 30 min in — critical when the underlying engine
+// status text doesn't change for long stretches (cold model loads etc).
+function fmtDuration(secs) {
+    secs = Math.max(0, Math.round(secs));
+    if (secs < 60)   return secs + 's';
+    const m = Math.floor(secs / 60), s = secs % 60;
+    if (m < 60)      return s === 0 ? m + 'm' : m + 'm ' + s + 's';
+    const h = Math.floor(m / 60), mm = m % 60;
+    return mm === 0 ? h + 'h' : h + 'h ' + mm + 'm';
 }
 function fmtDateShort(s) {
     if (!s) return '';
@@ -532,8 +544,13 @@ class TabController {
                 width:               Math.round(this.readNum('width', 720)),
                 height:              Math.round(this.readNum('height', 480)),
                 fps:                 Math.round(this.readNum('fps', 16)),
-                num_inference_steps: Math.round(this.readNum('num_inference_steps', 30)),
-                guidance_scale:      this.readNum('guidance_scale', 5),
+                // CogVideoX-5B-I2V reference is 50 inference steps with cfg=6.
+                // Below ~40 steps the model never finishes denoising and the
+                // output looks like noise / smear (job #10 ran with the old 30
+                // default — visibly bad). These fallbacks only kick in if the
+                // form field is missing / blank.
+                num_inference_steps: Math.round(this.readNum('num_inference_steps', 50)),
+                guidance_scale:      this.readNum('guidance_scale', 6),
             };
         } else {
             p = {
@@ -676,12 +693,42 @@ class TabController {
         const msgCol    = this.keyField === 'i2v_job_key' ? 'i2v_job_message' : 't2i_job_message';
         const startCol  = this.keyField === 'i2v_job_key' ? 'i2v_job_started_dtime' : 't2i_job_started_dtime';
         const dCol      = this.keyField === 'i2v_job_key' ? 'i2v_job_dtime' : 't2i_job_dtime';
+        const revCol    = this.keyField === 'i2v_job_key' ? 'i2v_job_revision_dtime' : 't2i_job_revision_dtime';
+        const status    = String(j[statusCol] || '?');
+        // Elapsed time since the job kicked off + freshness of the last
+        // engine ack. "Loading model" at 5 % for 25 min is a different
+        // animal than "Loading model" at 5 % with no engine ping for 90 s
+        // — the row needs to communicate that.
+        const startedMs = j[startCol] ? new Date(j[startCol]).getTime()
+                       : j[dCol]      ? new Date(j[dCol]).getTime() : 0;
+        const revisedMs = j[revCol]   ? new Date(j[revCol]).getTime() : 0;
+        const elapsedSec = startedMs ? Math.max(0, (Date.now() - startedMs) / 1000) : 0;
+        const sinceUpdateSec = revisedMs ? Math.max(0, (Date.now() - revisedMs) / 1000) : 0;
+        const prog = Number(j[progCol] || 0);
         set('key',      String(j[this.keyField]),                       ref.cells.key,      (n,v) => n.textContent = v);
         set('service',  String(j.provider_model_id || '?'),             ref.cells.service,  (n,v) => n.textContent = v);
         set('prompt',   String(j[promptCol] || ''),                     ref.cells.prompt,   (n,v) => n.textContent = v.length > 90 ? v.slice(0, 90) + '…' : v);
-        set('status',   String(j[statusCol] || '?'),                    ref.cells.status,   (n,v) => n.innerHTML = badgeForStatus(v));
-        set('progress', Number(j[progCol] || 0),                        ref.cells.progress, (n,v) => n.style.width = Math.max(0, Math.min(100, v)) + '%');
-        set('msg',      String(j[msgCol] || ''),                        ref.cells.msg,      (n,v) => n.textContent = v);
+        set('status',   status,                                         ref.cells.status,   (n,v) => n.innerHTML = badgeForStatus(v));
+        set('progress', prog,                                           ref.cells.progress, (n,v) => n.style.width = Math.max(0, Math.min(100, v)) + '%');
+        // Slot key includes elapsed/freshness so the message line refreshes
+        // even when the engine-reported `message` stays the same (which is
+        // exactly the case the user hit on the "Loading model" plateau).
+        const msgPieces = [String(j[msgCol] || '')];
+        if (status === 'running' || status === 'pending') {
+            if (elapsedSec > 0)            msgPieces.push(fmtDuration(elapsedSec) + ' elapsed');
+            if (revisedMs && sinceUpdateSec >= 1) {
+                const fresh = sinceUpdateSec < 15;
+                msgPieces.push((fresh ? 'engine ack ' : '⚠ no engine ack ') + Math.round(sinceUpdateSec) + 's ago');
+            }
+            msgPieces.push(prog.toFixed(1) + ' %');
+        }
+        const msgStr = msgPieces.filter(Boolean).join(' · ');
+        const msgKey = status + '|' + msgStr;
+        set('msg', msgKey, ref.cells.msg, (n) => {
+            n.textContent = msgStr;
+            const stale = (status === 'running' || status === 'pending') && revisedMs && sinceUpdateSec >= 15;
+            n.style.color = stale ? '#b85c00' : '';
+        });
         set('when',     String(j[startCol] || j[dCol] || ''),           ref.cells.when,     (n,v) => n.textContent = fmtDateShort(v));
         if (this.state.expanded.has(Number(j[this.keyField]))) this.refreshDetail(ref, j);
     }

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781042406">
+    <meta name="page-version" content="1781215205">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Books Admin - Yada Yah</title>
@@ -274,10 +274,43 @@ function doLogout() { fetch(API + '/auth.php', {method:'DELETE', credentials:'in
 function togglePassword() { var i = document.getElementById('login-pass'); i.type = i.type === 'password' ? 'text' : 'password'; }
 
 var _pipelineRefreshTimer = null;
+// Last-known nonzero paragraph + translation counts per volume_key,
+// remembered across polls. The parser path (parse_volume_from_bundle.py)
+// DELETEs all rows for the volume from yy_paragraph and yy_translation
+// before re-INSERTing them — for ~30-90 seconds during a parse the live
+// counts the server reports drop to 0. Without this guard the cells
+// flicker "X T / Y P" → "0 T / 0 P" → back, which reads as "the parsed
+// data disappeared." We hold the last good value during in-flight parses
+// and only trust a smaller-or-zero count once the parse is settled.
+var _lastVolumeCounts = {};
+
 function loadBooks() {
     return fetch(API + '/admin-books.php', {credentials:'include'}).then(function(r){return safeJson(r);}).then(function(d) {
         allSeries = d.series || [];
         allVolumes = d.volumes || [];
+        // Surgical count preservation: while a volume is parsing, never let
+        // the displayed count drop. Track the running max; restore it onto
+        // the volume object before render so dataCell() sees the held value.
+        for (var __vi = 0; __vi < allVolumes.length; __vi++) {
+            var __v = allVolumes[__vi];
+            var __k = __v.volume_key;
+            var __newPc = parseInt(__v.paragraph_count_live   || 0, 10);
+            var __newTc = parseInt(__v.translation_count_live || 0, 10);
+            var __status = (__v.volume_parse_status || '').toLowerCase();
+            var __inProc = PROC_STATES.indexOf(__status) >= 0;
+            var __prev = _lastVolumeCounts[__k] || { pc: 0, tc: 0 };
+            if (__inProc) {
+                if (__newPc > __prev.pc) __prev.pc = __newPc;
+                if (__newTc > __prev.tc) __prev.tc = __newTc;
+                _lastVolumeCounts[__k] = __prev;
+                __v.paragraph_count_live   = __prev.pc;
+                __v.translation_count_live = __prev.tc;
+            } else {
+                // Parse settled — trust the server's final number, even if
+                // smaller (some paragraphs may have been filtered out).
+                _lastVolumeCounts[__k] = { pc: __newPc, tc: __newTc };
+            }
+        }
         document.getElementById('book-count').textContent = allSeries.length + ' series, ' + allVolumes.length + ' volumes';
         renderBooks();
         // Auto-refresh every 6 seconds while any volume's pipeline is queued

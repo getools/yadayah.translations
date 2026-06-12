@@ -796,6 +796,15 @@ foreach ($paragraphs as $idx => $p) {
                 $elSeg = buildElevenLabsSegment($seg['text'], $cfg, $seg['category']);
                 $elSeg['provider_key'] = $pk;
                 $b = elevenlabsTtsSynthesize($cfg, $elSeg, $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3', $err);
+            } elseif ($transport === 'inworld-cloud') {
+                // Inworld accepts plain text with inline /IPA/ slash notation.
+                // buildInworldSegment emits /IPA/ for tunes typed 'ipa' (more
+                // precise than the sub respelling and avoids the mid-word
+                // stress-capital pause issue) and falls back to sub for tunes
+                // typed 'sub'. 2k-char cap is enforced inside inworldTtsSynthesize.
+                $iwSeg = buildInworldSegment($seg['text'], $cfg, $seg['category']);
+                $iwSeg['provider_key'] = $pk;
+                $b = inworldTtsSynthesize($cfg, $iwSeg, $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3', $err);
             } elseif ($transport === 'azure-ssml') {
                 $b = azureTtsSynthesizeRetry(wrapSsml(buildVoiceBlock($seg['text'], $cfg, $seg['category'])), $cfg, $err);
             } else {
