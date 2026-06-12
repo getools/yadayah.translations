@@ -105,15 +105,22 @@ def _get_word_frame(page, timeout_ms=PAGE_LOAD_TIMEOUT_MS):
     raise RuntimeError("Word editor iframe didn't reach word-edit.officeapps.live.com")
 
 
-def _dismiss_overlays(frame):
+def _dismiss_overlays(frame, page=None):
     """Word for the Web shows a 'Your privacy option' dialog (and possibly
     other one-time dialogs) on first sign-in or after cookies are cleared.
     The dialog has a WACDialogOverlay div that intercepts pointer events,
     blocking any clicks on the ribbon. Close any open dialogs before
-    proceeding."""
+    proceeding.
+
+    Pass page= to also sweep all page frames (e.g. when the dialog may
+    render in a sibling frame rather than in the Word editor iframe)."""
     dismissed = 0
     candidates = [
         "button#WACDialogActionButton",   # generic Close on WAC dialog
+        # The privacy dialog container often lacks role="dialog", so match
+        # the button text directly — observed in production (May/Jun 2026).
+        "button:has-text('Close')",
+        "button:has-text('Got it')",
         "[role='dialog'] button:has-text('Close')",
         "[role='dialog'] button:has-text('OK')",
         "[role='dialog'] button:has-text('Got it')",
@@ -123,21 +130,29 @@ def _dismiss_overlays(frame):
         "[role='alertdialog'] button:has-text('Got it')",
         "[role='alertdialog'] button:has-text('Accept')",
     ]
+    frames_to_check = [frame]
+    if page:
+        for _f in page.frames:
+            if _f is not frame:
+                frames_to_check.append(_f)
     # Try multiple cycles in case dialogs queue up
     for _ in range(3):
         any_clicked = False
-        for sel in candidates:
-            try:
-                loc = frame.locator(sel).first
-                if loc.is_visible(timeout=1500):
-                    loc.click()
-                    dismissed += 1
-                    any_clicked = True
-                    sys.stderr.write(f"[word-online] dismissed dialog via {sel!r}\n")
-                    time.sleep(1)
-                    break
-            except (PlaywrightTimeoutError, Exception):
-                continue
+        for _fr in frames_to_check:
+            for sel in candidates:
+                try:
+                    loc = _fr.locator(sel).first
+                    if loc.is_visible(timeout=1500):
+                        loc.click()
+                        dismissed += 1
+                        any_clicked = True
+                        sys.stderr.write(f"[word-online] dismissed dialog via {sel!r}\n")
+                        time.sleep(1)
+                        break
+                except (PlaywrightTimeoutError, Exception):
+                    continue
+            if any_clicked:
+                break
         if not any_clicked:
             break
     if dismissed:
@@ -153,8 +168,9 @@ def _trigger_pdf_download(page) -> str:
     sys.stderr.write("[word-online] giving Word for the Web 10s to settle...\n")
     time.sleep(10)
     # Dismiss any first-time / privacy / consent dialogs that the frame
-    # shows on top of the ribbon — they block pointer events.
-    _dismiss_overlays(frame)
+    # shows on top of the ribbon — they block pointer events. Sweep all
+    # frames so the privacy dialog is caught regardless of where it renders.
+    _dismiss_overlays(frame, page=page)
     # The frame itself needs to finish booting — wait for the ribbon to
     # appear (File tab is the universal first ribbon item).
     file_candidates = [
@@ -189,7 +205,7 @@ def _trigger_pdf_download(page) -> str:
                     except PlaywrightTimeoutError as e:
                         if "intercepts pointer events" in str(e) or "WACDialog" in str(e):
                             sys.stderr.write("[word-online] click intercepted; dismissing overlay\n")
-                            _dismiss_overlays(frame)
+                            _dismiss_overlays(frame, page=page)
                             # Retry click
                             try:
                                 loc.click(timeout=5000)
@@ -214,8 +230,8 @@ def _trigger_pdf_download(page) -> str:
                     break
             except Exception as _js_e:
                 sys.stderr.write(f'[word-online] JS fallback: {_js_e}\n')
-            # Maybe the dialog has reappeared — try dismissing again
-            _dismiss_overlays(frame)
+            # Maybe the dialog has reappeared — try dismissing again (all frames)
+            _dismiss_overlays(frame, page=page)
             time.sleep(2)
     if not clicked_file:
         for _f in page.frames:
@@ -236,8 +252,9 @@ def _trigger_pdf_download(page) -> str:
     time.sleep(4)
     # Re-dismiss any dialog that appeared *after* File was clicked (e.g. the
     # "Your privacy option" overlay which re-surfaces mid-session and blocks
-    # backstage pointer events).
-    _dismiss_overlays(frame)
+    # backstage pointer events). Also sweep all frames in case the privacy
+    # dialog renders in a sibling frame.
+    _dismiss_overlays(frame, page=page)
     download_pdf_candidates = [
         "button:has-text('Download as PDF')",
         "div[role='menuitem']:has-text('Download as PDF')",
