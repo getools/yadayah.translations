@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""
+docx_to_pdf_via_word_online.py — Headless Playwright fallback for
+DOCX→PDF when Microsoft Graph hits its 60-second WRS render timeout.
+
+The Microsoft Graph format=pdf endpoint is limited to ~60s of internal
+render time by Microsoft's Word Conversion Service. Larger / more
+complex DOCXes exceed this and fail with HTTP 500 / Timeout_TaskCanceled.
+
+Word for the Web does NOT have this 60s cap — its UI waits as long as
+the render takes, even multiple minutes. So we automate it:
+
+  1. Upload the DOCX to the service account's OneDrive (via Graph — same
+     code path used by docx_to_pdf_via_graph.py).
+  2. Open the file in Word for the Web in a headless Chromium browser,
+     pre-authenticated via the saved storage state.
+  3. Trigger File → Save As → Download as PDF (UI automation).
+  4. Wait for the PDF to download (no time cap on our side; we cap at 15 min).
+  5. Save the downloaded PDF to the output path.
+  6. Delete the temporary OneDrive copy.
+
+Auth state lifecycle:
+  - One-time bootstrap: run refresh_word_online_auth.py ON A WINDOWS
+    MACHINE, sign in interactively, SCP the resulting word-online-auth.json
+    to /opt/yada-www/secrets/ on prod.
+  - Auth state expires every 30-90 days (depending on tenant policy).
+    Symptom: this script's run errors with "redirected to sign-in page".
+  - When that happens, re-run refresh_word_online_auth.py and replace
+    the secrets file on prod.
+
+Usage:
+  docx_to_pdf_via_word_online.py --input book.docx --output book.pdf
+
+Exit codes:
+  0   success
+  1   generic failure
+  2   PDF validation failed (producer != Word, or empty)
+  3   auth state expired / missing — re-bootstrap required
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+import requests
+
+# Reuse the auth + upload code we already battle-tested.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import docx_to_pdf_via_graph as graph  # type: ignore
+
+try:
+    from playwright.sync_api import (
+        sync_playwright, TimeoutError as PlaywrightTimeoutError,
+    )
+except ImportError:
+    sys.stderr.write("Missing dependency: pip install playwright; playwright install chromium\n")
+    sys.exit(1)
+
+AUTH_STATE_PATH = "/opt/yada-www/secrets/word-online-auth.json"
+DOWNLOAD_DIR = "/tmp/word-online-downloads"
+
+# How long we'll let Word for the Web grind on a render before giving up.
+PDF_DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000   # 15 minutes
+PAGE_LOAD_TIMEOUT_MS = 90 * 1000           # 90 seconds for initial load
+FILE_MENU_TIMEOUT_MS = 180 * 1000          # 180 seconds to find File menu (large docs need time to render)
+
+
+# ── SharePoint web URL resolution ─────────────────────────────────────
+
+def _get_file_web_url(item_id: str) -> str:
+    """Fetch the SharePoint webUrl (the user-facing URL for the file)."""
+    graph._load_env()
+    user = graph._require("GRAPH_SERVICE_USER")
+    headers = graph._headers()
+    r = requests.get(
+        f"{graph.GRAPH_ROOT}/users/{user}/drive/items/{item_id}",
+        headers=headers, timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["webUrl"]
+
+
+# ── Word for the Web automation ───────────────────────────────────────
+
+def _get_word_frame(page, timeout_ms=PAGE_LOAD_TIMEOUT_MS):
+    """Word for the Web's actual editor UI lives inside an iframe named
+    'WacFrame_Word_0' pointing at word-edit.officeapps.live.com. We need
+    to switch into that frame to interact with the ribbon/menus."""
+    sys.stderr.write("[word-online] waiting for WacFrame_Word_0 iframe...\n")
+    page.wait_for_selector("iframe[name='WacFrame_Word_0']", timeout=timeout_ms)
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        for f in page.frames:
+            if f.name == "WacFrame_Word_0":
+                # Make sure the frame's URL has actually settled at word-edit
+                if "word-edit.officeapps.live.com" in f.url:
+                    sys.stderr.write(f"[word-online] found Word editor frame: {f.url[:120]}\n")
+                    return f
+        time.sleep(1)
+    raise RuntimeError("Word editor iframe didn't reach word-edit.officeapps.live.com")
+
+
+def _dismiss_overlays(frame):
+    """Word for the Web shows a 'Your privacy option' dialog (and possibly
+    other one-time dialogs) on first sign-in or after cookies are cleared.
+    The dialog has a WACDialogOverlay div that intercepts pointer events,
+    blocking any clicks on the ribbon. Close any open dialogs before
+    proceeding."""
+    dismissed = 0
+    candidates = [
+        "button#WACDialogActionButton",   # generic Close on WAC dialog
+        "[role='dialog'] button:has-text('Close')",
+        "[role='dialog'] button:has-text('OK')",
+        "[role='dialog'] button:has-text('Got it')",
+        "[role='dialog'] button:has-text('Accept')",
+    ]
+    # Try multiple cycles in case dialogs queue up
+    for _ in range(3):
+        any_clicked = False
+        for sel in candidates:
+            try:
+                loc = frame.locator(sel).first
+                if loc.is_visible(timeout=1500):
+                    loc.click()
+                    dismissed += 1
+                    any_clicked = True
+                    sys.stderr.write(f"[word-online] dismissed dialog via {sel!r}\n")
+                    time.sleep(1)
+                    break
+            except (PlaywrightTimeoutError, Exception):
+                continue
+        if not any_clicked:
+            break
+    if dismissed:
+        sys.stderr.write(f"[word-online] dismissed {dismissed} overlay(s)\n")
+
+
+def _trigger_pdf_download(page) -> str:
+    """Navigate File menu inside the Word for the Web iframe and trigger
+    Download as PDF. Returns the path to the downloaded PDF."""
+    frame = _get_word_frame(page)
+    # Give Word for the Web ~10s to finish rendering the ribbon and any
+    # first-time dialogs that pop on top of it.
+    sys.stderr.write("[word-online] giving Word for the Web 10s to settle...\n")
+    time.sleep(10)
+    # Dismiss any first-time / privacy / consent dialogs that the frame
+    # shows on top of the ribbon — they block pointer events.
+    _dismiss_overlays(frame)
+    # The frame itself needs to finish booting — wait for the ribbon to
+    # appear (File tab is the universal first ribbon item).
+    file_candidates = [
+        "button:has-text('File')",
+        "[role='menuitem']:has-text('File')",
+        "[aria-label='File']",
+        "button[name='File']",
+        "div.ribbonTabContainer:has-text('File')",
+    ]
+    sys.stderr.write("[word-online] waiting for File button inside editor frame...\n")
+    clicked_file = False
+    deadline = time.time() + (FILE_MENU_TIMEOUT_MS / 1000)
+    while time.time() < deadline and not clicked_file:
+        for sel in file_candidates:
+            try:
+                loc = frame.locator(sel).first
+                if loc.is_visible(timeout=2000):
+                    # Try the click — if an overlay intercepts, dismiss
+                    # it and try once more.
+                    try:
+                        loc.click(timeout=5000)
+                        clicked_file = True
+                        sys.stderr.write(f"[word-online] clicked File via {sel!r}\n")
+                        break
+                    except PlaywrightTimeoutError as e:
+                        if "intercepts pointer events" in str(e) or "WACDialog" in str(e):
+                            sys.stderr.write("[word-online] click intercepted; dismissing overlay\n")
+                            _dismiss_overlays(frame)
+                            # Retry click
+                            try:
+                                loc.click(timeout=5000)
+                                clicked_file = True
+                                sys.stderr.write(f"[word-online] clicked File via {sel!r} (after dismiss)\n")
+                                break
+                            except (PlaywrightTimeoutError, Exception):
+                                continue
+                        else:
+                            continue
+            except PlaywrightTimeoutError:
+                continue
+            except Exception:
+                continue
+        if not clicked_file:
+            # Maybe the dialog has reappeared — try dismissing again
+            _dismiss_overlays(frame)
+            time.sleep(2)
+    if not clicked_file:
+        path = Path(DOWNLOAD_DIR) / "debug-no-file-menu.png"
+        try:
+            page.screenshot(path=str(path), full_page=True, timeout=5000)
+        except Exception:
+            pass
+        raise RuntimeError(f"could not find File menu in editor frame; screenshot at {path}")
+
+    # File pane opens. The path is usually "Export" → "Download as PDF",
+    # but sometimes the direct "Download as PDF" button is visible. Look
+    # for and click the final PDF action.
+    time.sleep(2)
+    download_pdf_candidates = [
+        "button:has-text('Download as PDF')",
+        "div[role='menuitem']:has-text('Download as PDF')",
+        "[aria-label='Download as PDF']",
+        "[aria-label*='Download as PDF']",
+        "button:has-text('Download PDF')",
+        "[role='menuitem']:has-text('Download a copy')",
+    ]
+    submenu_candidates = [
+        "button:has-text('Export')",
+        "[role='menuitem']:has-text('Export')",
+        "button:has-text('Save As')",
+        "[role='menuitem']:has-text('Save As')",
+        "button:has-text('Save a Copy')",
+        "[role='menuitem']:has-text('Save a Copy')",
+    ]
+
+    clicked_pdf = False
+    # Try the direct one-click first.
+    for sel in download_pdf_candidates:
+        try:
+            loc = frame.locator(sel).first
+            if loc.is_visible(timeout=3000):
+                loc.click()
+                clicked_pdf = True
+                sys.stderr.write(f"[word-online] clicked '{sel}' direct\n")
+                break
+        except PlaywrightTimeoutError:
+            continue
+        except Exception:
+            continue
+
+    if not clicked_pdf:
+        # Two-step: open Export/Save-As submenu first, then PDF.
+        for save_sel in submenu_candidates:
+            try:
+                loc = frame.locator(save_sel).first
+                if loc.is_visible(timeout=3000):
+                    loc.click()
+                    sys.stderr.write(f"[word-online] opened submenu '{save_sel}'\n")
+                    time.sleep(1)
+                    break
+            except (PlaywrightTimeoutError, Exception):
+                continue
+        for sel in download_pdf_candidates:
+            try:
+                loc = frame.locator(sel).first
+                if loc.is_visible(timeout=5000):
+                    loc.click()
+                    clicked_pdf = True
+                    sys.stderr.write(f"[word-online] clicked '{sel}' from submenu\n")
+                    break
+            except (PlaywrightTimeoutError, Exception):
+                continue
+
+    if not clicked_pdf:
+        path = Path(DOWNLOAD_DIR) / "debug-no-pdf-button.png"
+        try:
+            page.screenshot(path=str(path), full_page=True, timeout=5000)
+        except Exception:
+            pass
+        raise RuntimeError(f"could not find Download-as-PDF button; screenshot at {path}")
+
+    # ── Wait for the "Your document is ready" dialog ──
+    # Word for the Web renders the PDF server-side (3-10 min typical),
+    # then shows a dialog with a Download button that triggers the
+    # actual browser download. The dialog text varies; we look for a
+    # button labelled "Download" inside any visible dialog.
+    sys.stderr.write(
+        f"[word-online] waiting for 'Document ready' dialog "
+        f"(up to {PDF_DOWNLOAD_TIMEOUT_MS // 60_000} min for render)...\n"
+    )
+    deadline = time.time() + (PDF_DOWNLOAD_TIMEOUT_MS / 1000)
+    ready_clicked = False
+    while time.time() < deadline:
+        # Look for any "Download" button inside a dialog
+        for sel in [
+            "[role='dialog'] button:has-text('Download')",
+            "[role='dialog'] [aria-label='Download']",
+            "button:has-text('Your document is ready')",  # rare
+        ]:
+            try:
+                loc = frame.locator(sel).first
+                if loc.is_visible(timeout=2000):
+                    # Capture the download as we click
+                    with page.expect_download(timeout=120_000) as dl_info:
+                        loc.click()
+                        sys.stderr.write(
+                            f"[word-online] clicked Download via {sel!r} — "
+                            f"after {(deadline - time.time() + PDF_DOWNLOAD_TIMEOUT_MS/1000):.0f}s of waiting\n"
+                        )
+                    download = dl_info.value
+                    suggested = download.suggested_filename
+                    dl_path = Path(DOWNLOAD_DIR) / suggested
+                    download.save_as(str(dl_path))
+                    sys.stderr.write(f"[word-online] download saved to {dl_path}\n")
+                    return str(dl_path)
+            except PlaywrightTimeoutError:
+                continue
+            except Exception:
+                continue
+        # Also handle the case where render fails with an error dialog
+        try:
+            err = frame.locator(
+                "[role='dialog']:has-text('error'), "
+                "[role='dialog']:has-text('failed'), "
+                "[role='dialog']:has-text('unable')"
+            ).first
+            if err.is_visible(timeout=1000):
+                err_text = err.inner_text()[:300]
+                try:
+                    page.screenshot(path=str(Path(DOWNLOAD_DIR) / "debug-render-error.png"), timeout=5000)
+                except Exception:
+                    pass
+                raise RuntimeError(f"Word for the Web reported an error: {err_text!r}")
+        except PlaywrightTimeoutError:
+            pass
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        time.sleep(10)
+
+    try:
+        page.screenshot(path=str(Path(DOWNLOAD_DIR) / "debug-render-timeout.png"), timeout=5000)
+    except Exception:
+        pass
+    raise RuntimeError(
+        f"PDF render didn't complete within {PDF_DOWNLOAD_TIMEOUT_MS // 60_000} min"
+    )
+
+
+def _auth_state_present() -> bool:
+    return os.path.exists(AUTH_STATE_PATH) and os.path.getsize(AUTH_STATE_PATH) > 0
+
+
+def _signed_in(page) -> bool:
+    """Heuristic: signed in if we're on a SharePoint URL and not redirected
+    to login.microsoftonline.com."""
+    return "login.microsoftonline.com" not in page.url and "sharepoint.com" in page.url
+
+
+def convert_one(docx_path: Path, pdf_path: Path) -> None:
+    if not _auth_state_present():
+        sys.stderr.write(
+            f"[word-online] auth state missing at {AUTH_STATE_PATH}. "
+            "Run refresh_word_online_auth.py on a Windows machine and SCP the result.\n"
+        )
+        sys.exit(3)
+
+    Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
+
+    # SharePoint holds file locks for 5-30 min after a session ends.
+    # Re-running this script with the same DOCX name commonly hits 423
+    # Locked. Avoid that by uploading with a unique timestamped name; the
+    # render is name-agnostic.
+    import shutil as _shutil, tempfile as _tempfile
+    sys.stderr.write(f"[word-online] uploading {docx_path.name} to SharePoint via Graph (timestamped)...\n")
+    graph._load_env()
+    folder_id = graph._ensure_folder()
+    ts_name = f"{docx_path.stem}__{int(time.time())}__{os.getpid()}{docx_path.suffix}"
+    tmp_docx = Path(_tempfile.gettempdir()) / ts_name
+    _shutil.copy2(docx_path, tmp_docx)
+    try:
+        size = tmp_docx.stat().st_size
+        if size < graph.LARGE_UPLOAD_THRESHOLD:
+            item_id = graph._upload_small(tmp_docx, folder_id)
+        else:
+            item_id = graph._upload_large(tmp_docx, folder_id)
+        sys.stderr.write(f"[word-online] uploaded as {ts_name}; item_id={item_id}\n")
+    finally:
+        try: tmp_docx.unlink()
+        except Exception: pass
+
+    try:
+        web_url = _get_file_web_url(item_id)
+        sys.stderr.write(f"[word-online] file webUrl: {web_url}\n")
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            context = browser.new_context(
+                storage_state=AUTH_STATE_PATH,
+                viewport={"width": 1600, "height": 1000},
+                accept_downloads=True,
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/130.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+
+            # Open in Word for the Web. The ?action=default param on a
+            # .docx in SharePoint opens it in the Word web app.
+            url = web_url + ("&" if "?" in web_url else "?") + "action=default"
+            sys.stderr.write(f"[word-online] navigating to {url}\n")
+            page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+
+            if not _signed_in(page):
+                browser.close()
+                sys.stderr.write(
+                    "[word-online] redirected to sign-in — auth state expired. "
+                    "Re-bootstrap via refresh_word_online_auth.py on Windows.\n"
+                )
+                sys.exit(3)
+
+            # _trigger_pdf_download handles waiting for the editor iframe
+            # to load, finding File inside it, and triggering the PDF
+            # download. No outer wait needed here.
+            tmp_pdf = _trigger_pdf_download(page)
+            browser.close()
+
+        # Move into final location with validation.
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(tmp_pdf, pdf_path)
+        problems = graph.validate_pdf(pdf_path)
+        if problems:
+            for p_msg in problems:
+                sys.stderr.write(f"[word-online] VALIDATION: {p_msg}\n")
+            sys.exit(2)
+        sys.stderr.write(f"[word-online] OK: {pdf_path} ({pdf_path.stat().st_size} bytes)\n")
+    finally:
+        try:
+            graph._delete_item(item_id)
+        except Exception:
+            pass
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    ap.add_argument("--input", "-i", required=True, help="Path to .docx")
+    ap.add_argument("--output", "-o", required=True, help="Path to write .pdf")
+    args = ap.parse_args(argv)
+    convert_one(Path(args.input), Path(args.output))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
