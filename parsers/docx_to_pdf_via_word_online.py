@@ -233,7 +233,11 @@ def _trigger_pdf_download(page) -> str:
     # File pane opens. The path is usually "Export" → "Download as PDF",
     # but sometimes the direct "Download as PDF" button is visible. Look
     # for and click the final PDF action.
-    time.sleep(2)
+    time.sleep(4)
+    # Re-dismiss any dialog that appeared *after* File was clicked (e.g. the
+    # "Your privacy option" overlay which re-surfaces mid-session and blocks
+    # backstage pointer events).
+    _dismiss_overlays(frame)
     download_pdf_candidates = [
         "button:has-text('Download as PDF')",
         "div[role='menuitem']:has-text('Download as PDF')",
@@ -288,6 +292,44 @@ def _trigger_pdf_download(page) -> str:
                     break
             except (PlaywrightTimeoutError, Exception):
                 continue
+
+    if not clicked_pdf:
+        # JS fallback: scan all page frames for the submenu and PDF download
+        # element by innerText. The Word Online backstage may render in a
+        # sibling frame rather than in WacFrame itself (observed post-2024
+        # UI refresh), so we try each frame — mirrors the File-click JS path.
+        def _js_click_by_text(page, frame, text):
+            js = (
+                "() => { var tags=['a','button','li','td','div','span'];"
+                " for(var ti=0;ti<tags.length;ti++){"
+                "  var els=document.querySelectorAll(tags[ti]);"
+                "  for(var ei=0;ei<els.length;ei++){"
+                "   var t=(els[ei].innerText||els[ei].textContent||'').trim();"
+                f"   if(t.indexOf({text!r})!==-1){{els[ei].click();return t;}}"
+                "  }} return null;}"
+            )
+            for f in [frame] + [ff for ff in page.frames if ff is not frame]:
+                try:
+                    hit = f.evaluate(js)
+                    if hit:
+                        return (f.name, hit)
+                except Exception:
+                    continue
+            return None
+
+        for sm_text in ['Export', 'Save As', 'Save a Copy']:
+            r = _js_click_by_text(page, frame, sm_text)
+            if r:
+                sys.stderr.write(f"[word-online] JS opened submenu {r[1]!r} in frame {r[0]!r}\n")
+                time.sleep(2)
+                break
+
+        for pdf_text in ['Download as PDF', 'Download PDF', 'Download a copy']:
+            r = _js_click_by_text(page, frame, pdf_text)
+            if r:
+                sys.stderr.write(f"[word-online] JS clicked PDF download {r[1]!r} in frame {r[0]!r}\n")
+                clicked_pdf = True
+                break
 
     if not clicked_pdf:
         path = Path(DOWNLOAD_DIR) / "debug-no-pdf-button.png"
