@@ -118,6 +118,10 @@ def _dismiss_overlays(frame):
         "[role='dialog'] button:has-text('OK')",
         "[role='dialog'] button:has-text('Got it')",
         "[role='dialog'] button:has-text('Accept')",
+        "[role='alertdialog'] button:has-text('Close')",
+        "[role='alertdialog'] button:has-text('OK')",
+        "[role='alertdialog'] button:has-text('Got it')",
+        "[role='alertdialog'] button:has-text('Accept')",
     ]
     # Try multiple cycles in case dialogs queue up
     for _ in range(3):
@@ -159,6 +163,13 @@ def _trigger_pdf_download(page) -> str:
         "[aria-label='File']",
         "button[name='File']",
         "div.ribbonTabContainer:has-text('File')",
+        # WAC ribbon tabs are <a> elements, not buttons
+        "a:has-text('File')",
+        "[role='tab']:has-text('File')",
+        "li:has-text('File')",
+        "[data-automationid='FileMenuButton']",
+        "[aria-label='File Tab']",
+        "td:has-text('File')",
     ]
     sys.stderr.write("[word-online] waiting for File button inside editor frame...\n")
     clicked_file = False
@@ -194,10 +205,24 @@ def _trigger_pdf_download(page) -> str:
             except Exception:
                 continue
         if not clicked_file:
+            # JS fallback: WAC <a> tabs pass visibility but fail css checks
+            try:
+                result = frame.evaluate("() => { var tags=['a','button','li','td','div','span']; for(var i=0;i<tags.length;i++){  var els=document.querySelectorAll(tags[i]);  for(var j=0;j<els.length;j++){   var t=(els[j].innerText||els[j].textContent||'').trim();   if(t==='File'){els[j].click();return true;}  } } return false;}")
+                if result:
+                    clicked_file = True
+                    sys.stderr.write('[word-online] clicked File via JS\n')
+                    break
+            except Exception as _js_e:
+                sys.stderr.write(f'[word-online] JS fallback: {_js_e}\n')
             # Maybe the dialog has reappeared — try dismissing again
             _dismiss_overlays(frame)
             time.sleep(2)
     if not clicked_file:
+        for _f in page.frames:
+            try:
+                sys.stderr.write(f'[word-online] frame: {_f.name!r} {_f.url[:80]!r}\n')
+            except Exception:
+                pass
         path = Path(DOWNLOAD_DIR) / "debug-no-file-menu.png"
         try:
             page.screenshot(path=str(path), full_page=True, timeout=5000)
