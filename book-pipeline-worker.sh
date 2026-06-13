@@ -311,10 +311,27 @@ process_job() {
                 return
             fi
             if [ "$wol_rc" -ne 0 ]; then
-                log "Word Online fallback failed for $docx_name (rc=$wol_rc) — leaving job queued for next tick"
-                update_status "$volume_key" "warning" \
-                    "Both Graph and Word Online failed (Graph rc=$graph_rc, WOL rc=$wol_rc) — retry next tick" \
-                    "$wol_output"
+                # Cap consecutive Graph+WOL failures so a permanently-broken DOCX
+                # does not block other queued volumes indefinitely.
+                local conv_retry
+                conv_retry=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -t -A -c \
+                    "UPDATE yy_volume SET volume_pipeline_retry_count = COALESCE(volume_pipeline_retry_count, 0) + 1 \
+                     WHERE volume_key = $volume_key \
+                     RETURNING volume_pipeline_retry_count" 2>/dev/null | tr -d '[:space:]')
+                conv_retry=${conv_retry:-99}
+                local conv_max=3
+                if [ "$conv_retry" -lt "$conv_max" ]; then
+                    log "Word Online fallback failed for $docx_name (rc=$wol_rc) â retry $conv_retry/$conv_max next tick"
+                    update_status "$volume_key" "warning" \
+                        "Both Graph and Word Online failed (Graph rc=$graph_rc, WOL rc=$wol_rc) â retry $conv_retry/$conv_max" \
+                        "$wol_output"
+                else
+                    log "Word Online fallback failed for $docx_name (rc=$wol_rc) â retry cap ($conv_max) reached, moving to failed/"
+                    update_status "$volume_key" "error" \
+                        "Both Graph and Word Online failed after $conv_max retries â manual conversion required. Graph: persistent HTTP 500. WOL: cannot find Download-as-PDF button." \
+                        "$wol_output"
+                    mv "$job" "$JOBS_DIR/failed/"
+                fi
                 return
             fi
             log "Word Online fallback succeeded for $docx_name"

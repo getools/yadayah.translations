@@ -332,8 +332,10 @@ def _trigger_pdf_download(page) -> str:
                 " for(var ti=0;ti<tags.length;ti++){"
                 "  var els=document.querySelectorAll(tags[ti]);"
                 "  for(var ei=0;ei<els.length;ei++){"
-                "   var t=(els[ei].innerText||els[ei].textContent||'').trim().toLowerCase();"
-                f"   if(t.indexOf({text_lower!r})!==-1){{els[ei].click();return t;}}"
+                "   var raw=(els[ei].innerText||els[ei].textContent||'').trim();"
+                "   if(raw.length===0||raw.length>300) continue;"
+                "   var t=raw.toLowerCase();"
+                f"   if(t.indexOf({text_lower!r})!==-1){{els[ei].click();return raw;}}"
                 "  }} return null;}"
             )
             for f in [frame] + [ff for ff in page.frames if ff is not frame]:
