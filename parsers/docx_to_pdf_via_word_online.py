@@ -223,10 +223,26 @@ def _trigger_pdf_download(page) -> str:
         if not clicked_file:
             # JS fallback: WAC <a> tabs pass visibility but fail css checks
             try:
-                result = frame.evaluate("() => { var tags=['a','button','li','td','div','span']; for(var i=0;i<tags.length;i++){  var els=document.querySelectorAll(tags[i]);  for(var j=0;j<els.length;j++){   var t=(els[j].innerText||els[j].textContent||'').trim();   if(t==='File'){els[j].click();return true;}  } } return false;}")
+                result = frame.evaluate(
+                    "() => {"
+                    " var tags=['a','button','li','td','div','span'];"
+                    " for(var i=0;i<tags.length;i++){"
+                    "  var els=document.querySelectorAll(tags[i]);"
+                    "  for(var j=0;j<els.length;j++){"
+                    "   var t=(els[j].innerText||els[j].textContent||'').trim();"
+                    "   if(t==='File'){"
+                    "    try{els[j].focus();}catch(e){}"
+                    "    ['mouseenter','mouseover','mousedown','mouseup','click'].forEach(function(tp){"
+                    "     els[j].dispatchEvent(new MouseEvent(tp,{bubbles:true,cancelable:true,view:window,buttons:1}));"
+                    "    });"
+                    "    return true;"
+                    "   }"
+                    "  }"
+                    " } return false;}"
+                )
                 if result:
                     clicked_file = True
-                    sys.stderr.write('[word-online] clicked File via JS\n')
+                    sys.stderr.write('[word-online] clicked File via JS (full mouse events)\n')
                     break
             except Exception as _js_e:
                 sys.stderr.write(f'[word-online] JS fallback: {_js_e}\n')
@@ -360,6 +376,44 @@ def _trigger_pdf_download(page) -> str:
                 sys.stderr.write(f"[word-online] JS clicked PDF download {r[1]!r} in frame {r[0]!r}\n")
                 clicked_pdf = True
                 break
+
+    if not clicked_pdf:
+        # Alt+F keyboard shortcut as last resort to open File backstage.
+        try:
+            sys.stderr.write("[word-online] trying Alt+F keyboard shortcut for File backstage...\n")
+            try:
+                frame.click("body", timeout=3000)
+            except Exception:
+                pass
+            time.sleep(1)
+            page.keyboard.press("Alt+F")
+            time.sleep(5)
+            _dismiss_overlays(frame, page=page)
+            for _sel in download_pdf_candidates:
+                try:
+                    _loc = frame.locator(_sel).first
+                    if _loc.is_visible(timeout=3000):
+                        _loc.click()
+                        clicked_pdf = True
+                        sys.stderr.write(f"[word-online] Alt+F + {_sel!r} clicked\n")
+                        break
+                except Exception:
+                    continue
+            if not clicked_pdf:
+                for _sm in ['Export', 'Save As', 'Save a Copy', 'Download']:
+                    _r = _js_click_by_text(page, frame, _sm)
+                    if _r:
+                        sys.stderr.write(f"[word-online] Alt+F opened submenu {_r[1]!r}\n")
+                        time.sleep(2)
+                        break
+                for _pt in ['Download as PDF', 'Download PDF', 'Download a copy', 'Save as PDF', 'as pdf']:
+                    _r = _js_click_by_text(page, frame, _pt)
+                    if _r:
+                        clicked_pdf = True
+                        sys.stderr.write(f"[word-online] Alt+F+JS clicked PDF {_r[1]!r}\n")
+                        break
+        except Exception as _altf_e:
+            sys.stderr.write(f"[word-online] Alt+F fallback: {_altf_e}\n")
 
     if not clicked_pdf:
         path = Path(DOWNLOAD_DIR) / "debug-no-pdf-button.png"

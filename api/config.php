@@ -58,6 +58,9 @@ function getDb(): PDO {
         // Pass session user_key to PostgreSQL so revision triggers can record who made the change
         $sessionUserKey = $_SESSION['user_key'] ?? 0;
         $pdo->exec("SET app.user_key = " . (int)$sessionUserKey);
+        // Kill any query that exceeds 2 minutes — user requests time out at the
+        // HTTP layer well before this, so a longer-running query is orphaned.
+        $pdo->exec("SET statement_timeout = '120s'");
     }
     return $pdo;
 }
