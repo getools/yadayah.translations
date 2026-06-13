@@ -221,6 +221,42 @@ def _trigger_pdf_download(page) -> str:
             except Exception:
                 continue
         if not clicked_file:
+            # Coordinate-based native click — page.mouse.click() is isTrusted=true.
+            # JS dispatchEvent is isTrusted=false; Word Online's WAC ribbon requires
+            # a trusted event to navigate the File backstage. This is the primary fix
+            # for "clicked File via JS but backstage never opened" failures.
+            try:
+                coords = frame.evaluate(
+                    "() => {"
+                    " var tags=['a','button','span','div','li','td'];"
+                    " for(var i=0;i<tags.length;i++){"
+                    "  var els=document.querySelectorAll(tags[i]);"
+                    "  for(var j=0;j<els.length;j++){"
+                    "   var t=(els[j].innerText||els[j].textContent||'').trim();"
+                    "   if(t==='File'){"
+                    "    var r=els[j].getBoundingClientRect();"
+                    "    if(r.width>0&&r.height>0&&r.top>=0&&r.top<500)"
+                    "     return{x:r.left+r.width/2,y:r.top+r.height/2};"
+                    "   }"
+                    "  }"
+                    " } return null;}"
+                )
+                if coords:
+                    iframe_el = page.query_selector("iframe[name='WacFrame_Word_0']")
+                    if iframe_el:
+                        bb = iframe_el.bounding_box()
+                        if bb:
+                            px = bb['x'] + coords['x']
+                            py = bb['y'] + coords['y']
+                            page.mouse.move(px, py)
+                            time.sleep(0.3)
+                            page.mouse.click(px, py)
+                            clicked_file = True
+                            sys.stderr.write('[word-online] clicked File via native coordinate click\n')
+                            break
+            except Exception as _coord_e:
+                sys.stderr.write(f'[word-online] coordinate click: {_coord_e}\n')
+        if not clicked_file:
             # JS fallback: WAC <a> tabs pass visibility but fail css checks
             try:
                 result = frame.evaluate(
@@ -265,7 +301,7 @@ def _trigger_pdf_download(page) -> str:
     # File pane opens. The path is usually "Export" → "Download as PDF",
     # but sometimes the direct "Download as PDF" button is visible. Look
     # for and click the final PDF action.
-    time.sleep(8)
+    time.sleep(15)
     # Re-dismiss any dialog that appeared *after* File was clicked (e.g. the
     # "Your privacy option" overlay which re-surfaces mid-session and blocks
     # backstage pointer events). Also sweep all frames in case the privacy

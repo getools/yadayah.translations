@@ -317,7 +317,7 @@ process_job() {
                 conv_retry=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -t -A -c \
                     "UPDATE yy_volume SET volume_pipeline_retry_count = COALESCE(volume_pipeline_retry_count, 0) + 1 \
                      WHERE volume_key = $volume_key \
-                     RETURNING volume_pipeline_retry_count" 2>/dev/null | tr -d '[:space:]')
+                     RETURNING volume_pipeline_retry_count" 2>/dev/null | grep -oE '^[0-9]+$' | head -1 | tr -d '[:space:]')
                 conv_retry=${conv_retry:-99}
                 local conv_max=3
                 if [ "$conv_retry" -lt "$conv_max" ]; then
