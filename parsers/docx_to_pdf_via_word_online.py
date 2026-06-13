@@ -320,6 +320,17 @@ def _trigger_pdf_download(page) -> str:
         "[aria-label*='PDF']",
         "button:has-text('Save as PDF')",
         "[role='menuitem']:has-text('Save as PDF')",
+        # New Word Online format-picker UI (post-2024): after clicking
+        # "Download a copy" the backstage shows a format picker with
+        # radio/list items labelled "PDF (.pdf)" rather than a direct
+        # "Download as PDF" action button.
+        "li:has-text('PDF (.pdf)')",
+        "[role='radio']:has-text('PDF (.pdf)')",
+        "[role='option']:has-text('PDF (.pdf)')",
+        "[role='radio']:has-text('PDF')",
+        "[role='option']:has-text('PDF')",
+        "button:has-text('PDF (.pdf)')",
+        "[aria-label*='.pdf']",
     ]
     submenu_candidates = [
         "button:has-text('Export')",
@@ -335,48 +346,65 @@ def _trigger_pdf_download(page) -> str:
     ]
 
     clicked_pdf = False
-    # Try the direct one-click first.
-    for sel in download_pdf_candidates:
-        try:
-            loc = frame.locator(sel).first
-            if loc.is_visible(timeout=3000):
-                loc.click()
-                clicked_pdf = True
-                sys.stderr.write(f"[word-online] clicked '{sel}' direct\n")
-                break
-        except PlaywrightTimeoutError:
-            continue
-        except Exception:
-            continue
+    # Try the direct one-click first — search both WacFrame and main page
+    # (post-2024 Word Online may render the backstage outside the iframe).
+    for ctx in [frame, page]:
+        for sel in download_pdf_candidates:
+            try:
+                loc = ctx.locator(sel).first
+                if loc.is_visible(timeout=3000):
+                    loc.click()
+                    clicked_pdf = True
+                    ctx_label = "frame" if ctx is frame else "page"
+                    sys.stderr.write(f"[word-online] clicked '{sel}' direct ({ctx_label})\n")
+                    break
+            except PlaywrightTimeoutError:
+                continue
+            except Exception:
+                continue
+        if clicked_pdf:
+            break
 
     if not clicked_pdf:
         # Two-step: open Export/Save-As submenu first, then PDF.
-        for save_sel in submenu_candidates:
-            try:
-                loc = frame.locator(save_sel).first
-                if loc.is_visible(timeout=3000):
-                    loc.click()
-                    sys.stderr.write(f"[word-online] opened submenu '{save_sel}'\n")
-                    time.sleep(1)
-                    break
-            except (PlaywrightTimeoutError, Exception):
-                continue
-        for sel in download_pdf_candidates:
-            try:
-                loc = frame.locator(sel).first
-                if loc.is_visible(timeout=5000):
-                    loc.click()
-                    clicked_pdf = True
-                    sys.stderr.write(f"[word-online] clicked '{sel}' from submenu\n")
-                    break
-            except (PlaywrightTimeoutError, Exception):
-                continue
+        # Search both WacFrame and main page for the submenu entry.
+        opened_submenu = False
+        for ctx in [frame, page]:
+            for save_sel in submenu_candidates:
+                try:
+                    loc = ctx.locator(save_sel).first
+                    if loc.is_visible(timeout=3000):
+                        loc.click()
+                        ctx_label = "frame" if ctx is frame else "page"
+                        sys.stderr.write(f"[word-online] opened submenu '{save_sel}' ({ctx_label})\n")
+                        opened_submenu = True
+                        break
+                except (PlaywrightTimeoutError, Exception):
+                    continue
+            if opened_submenu:
+                break
+        # Wait longer for the format picker to appear — Word Online's
+        # "Download a copy" picker takes 5-10s to render.
+        time.sleep(8)
+        for ctx in [frame, page]:
+            for sel in download_pdf_candidates:
+                try:
+                    loc = ctx.locator(sel).first
+                    if loc.is_visible(timeout=5000):
+                        loc.click()
+                        clicked_pdf = True
+                        ctx_label = "frame" if ctx is frame else "page"
+                        sys.stderr.write(f"[word-online] clicked '{sel}' from submenu ({ctx_label})\n")
+                        break
+                except (PlaywrightTimeoutError, Exception):
+                    continue
+            if clicked_pdf:
+                break
 
     if not clicked_pdf:
-        # JS fallback: scan all page frames for the submenu and PDF download
-        # element by innerText. The Word Online backstage may render in a
-        # sibling frame rather than in WacFrame itself (observed post-2024
-        # UI refresh), so we try each frame — mirrors the File-click JS path.
+        # JS fallback: scan all page frames AND the main page for the submenu
+        # and PDF download element by innerText. Post-2024 Word Online may render
+        # the backstage/format-picker in the main page context (outside WacFrame).
         def _js_click_by_text(page, frame, text):
             text_lower = text.lower()
             js = (
@@ -390,11 +418,16 @@ def _trigger_pdf_download(page) -> str:
                 f"   if(t.indexOf({text_lower!r})!==-1){{els[ei].click();return raw;}}"
                 "  }} return null;}"
             )
-            for f in [frame] + [ff for ff in page.frames if ff is not frame]:
+            # Search main page first (format picker may render outside iframes),
+            # then WacFrame, then other iframes.
+            search_pool = [('__main__', page), (frame.name, frame)] + [
+                (ff.name, ff) for ff in page.frames if ff is not frame
+            ]
+            for ctx_name, ctx in search_pool:
                 try:
-                    hit = f.evaluate(js)
+                    hit = ctx.evaluate(js)
                     if hit:
-                        return (f.name, hit)
+                        return (ctx_name, hit)
                 except Exception:
                     continue
             return None
@@ -403,10 +436,11 @@ def _trigger_pdf_download(page) -> str:
             r = _js_click_by_text(page, frame, sm_text)
             if r:
                 sys.stderr.write(f"[word-online] JS opened submenu {r[1]!r} in frame {r[0]!r}\n")
-                time.sleep(3)
+                time.sleep(8)
                 break
 
-        for pdf_text in ['Download as PDF', 'Download PDF', 'Download a copy', 'Download a PDF', 'Save as PDF', 'as pdf']:
+        for pdf_text in ['Download as PDF', 'Download PDF', 'Download a copy', 'Download a PDF',
+                         'Save as PDF', 'as pdf', 'pdf (.pdf)', '.pdf']:
             r = _js_click_by_text(page, frame, pdf_text)
             if r:
                 sys.stderr.write(f"[word-online] JS clicked PDF download {r[1]!r} in frame {r[0]!r}\n")
@@ -425,24 +459,29 @@ def _trigger_pdf_download(page) -> str:
             page.keyboard.press("Alt+F")
             time.sleep(5)
             _dismiss_overlays(frame, page=page)
-            for _sel in download_pdf_candidates:
-                try:
-                    _loc = frame.locator(_sel).first
-                    if _loc.is_visible(timeout=3000):
-                        _loc.click()
-                        clicked_pdf = True
-                        sys.stderr.write(f"[word-online] Alt+F + {_sel!r} clicked\n")
-                        break
-                except Exception:
-                    continue
+            for ctx in [frame, page]:
+                for _sel in download_pdf_candidates:
+                    try:
+                        _loc = ctx.locator(_sel).first
+                        if _loc.is_visible(timeout=3000):
+                            _loc.click()
+                            clicked_pdf = True
+                            ctx_label = "frame" if ctx is frame else "page"
+                            sys.stderr.write(f"[word-online] Alt+F + {_sel!r} clicked ({ctx_label})\n")
+                            break
+                    except Exception:
+                        continue
+                if clicked_pdf:
+                    break
             if not clicked_pdf:
                 for _sm in ['Export', 'Save As', 'Save a Copy', 'Download']:
                     _r = _js_click_by_text(page, frame, _sm)
                     if _r:
                         sys.stderr.write(f"[word-online] Alt+F opened submenu {_r[1]!r}\n")
-                        time.sleep(2)
+                        time.sleep(8)
                         break
-                for _pt in ['Download as PDF', 'Download PDF', 'Download a copy', 'Save as PDF', 'as pdf']:
+                for _pt in ['Download as PDF', 'Download PDF', 'Download a copy', 'Save as PDF',
+                            'as pdf', 'pdf (.pdf)', '.pdf']:
                     _r = _js_click_by_text(page, frame, _pt)
                     if _r:
                         clicked_pdf = True
@@ -458,14 +497,38 @@ def _trigger_pdf_download(page) -> str:
         except Exception:
             pass
         # Dump backstage frame text to diagnose which UI elements are present
-        for _dbg_f in [frame] + [ff for ff in page.frames if ff is not frame]:
+        # (include main page and all iframes for full picture)
+        for _dbg_ctx_name, _dbg_ctx in [('__main__', page)] + [
+            (_f.name, _f) for _f in page.frames
+        ]:
             try:
-                _txt = _dbg_f.evaluate("() => document.body ? document.body.innerText.slice(0, 3000) : ''")
+                _txt = _dbg_ctx.evaluate("() => document.body ? document.body.innerText.slice(0, 3000) : ''")
                 if _txt and len(_txt.strip()) > 10:
-                    sys.stderr.write(f"[word-online] backstage frame {_dbg_f.name!r} text: {_txt[:800]!r}\n")
+                    sys.stderr.write(f"[word-online] backstage frame {_dbg_ctx_name!r} text: {_txt[:800]!r}\n")
             except Exception:
                 pass
         raise RuntimeError(f"could not find Download-as-PDF button; screenshot at {path}")
+
+    # If we clicked a format-picker radio button (e.g. "PDF (.pdf)") rather than
+    # a direct action button, the picker shows a "Download" confirm button.
+    # Try to click it immediately so the PDF conversion starts; the "wait for
+    # ready dialog" loop below handles the case where no confirm is needed.
+    time.sleep(3)
+    for ctx in [page, frame]:
+        for confirm_sel in [
+            "[role='dialog'] button:has-text('Download')",
+            "button.ms-Button--primary:has-text('Download')",
+            "[data-is-focusable] button:has-text('Download')",
+        ]:
+            try:
+                loc = ctx.locator(confirm_sel).first
+                if loc.is_visible(timeout=2000):
+                    loc.click()
+                    ctx_label = "page" if ctx is page else "frame"
+                    sys.stderr.write(f"[word-online] clicked format confirm {confirm_sel!r} ({ctx_label})\n")
+                    break
+            except Exception:
+                continue
 
     # ── Wait for the "Your document is ready" dialog ──
     # Word for the Web renders the PDF server-side (3-10 min typical),
@@ -479,52 +542,57 @@ def _trigger_pdf_download(page) -> str:
     deadline = time.time() + (PDF_DOWNLOAD_TIMEOUT_MS / 1000)
     ready_clicked = False
     while time.time() < deadline:
-        # Look for any "Download" button inside a dialog
+        # Look for any "Download" button inside a dialog — search both
+        # main page and WacFrame since the ready dialog may render outside
+        # the iframe in newer Word Online versions.
         for sel in [
             "[role='dialog'] button:has-text('Download')",
             "[role='dialog'] [aria-label='Download']",
             "button:has-text('Your document is ready')",  # rare
         ]:
-            try:
-                loc = frame.locator(sel).first
-                if loc.is_visible(timeout=2000):
-                    # Capture the download as we click
-                    with page.expect_download(timeout=120_000) as dl_info:
-                        loc.click()
-                        sys.stderr.write(
-                            f"[word-online] clicked Download via {sel!r} — "
-                            f"after {(deadline - time.time() + PDF_DOWNLOAD_TIMEOUT_MS/1000):.0f}s of waiting\n"
-                        )
-                    download = dl_info.value
-                    suggested = download.suggested_filename
-                    dl_path = Path(DOWNLOAD_DIR) / suggested
-                    download.save_as(str(dl_path))
-                    sys.stderr.write(f"[word-online] download saved to {dl_path}\n")
-                    return str(dl_path)
-            except PlaywrightTimeoutError:
-                continue
-            except Exception:
-                continue
-        # Also handle the case where render fails with an error dialog
-        try:
-            err = frame.locator(
-                "[role='dialog']:has-text('error'), "
-                "[role='dialog']:has-text('failed'), "
-                "[role='dialog']:has-text('unable')"
-            ).first
-            if err.is_visible(timeout=1000):
-                err_text = err.inner_text()[:300]
+            for ctx in [page, frame]:
                 try:
-                    page.screenshot(path=str(Path(DOWNLOAD_DIR) / "debug-render-error.png"), timeout=5000)
+                    loc = ctx.locator(sel).first
+                    if loc.is_visible(timeout=2000):
+                        # Capture the download as we click
+                        with page.expect_download(timeout=120_000) as dl_info:
+                            loc.click()
+                            ctx_label = "page" if ctx is page else "frame"
+                            sys.stderr.write(
+                                f"[word-online] clicked Download via {sel!r} ({ctx_label}) — "
+                                f"after {(deadline - time.time() + PDF_DOWNLOAD_TIMEOUT_MS/1000):.0f}s of waiting\n"
+                            )
+                        download = dl_info.value
+                        suggested = download.suggested_filename
+                        dl_path = Path(DOWNLOAD_DIR) / suggested
+                        download.save_as(str(dl_path))
+                        sys.stderr.write(f"[word-online] download saved to {dl_path}\n")
+                        return str(dl_path)
+                except PlaywrightTimeoutError:
+                    continue
                 except Exception:
-                    pass
-                raise RuntimeError(f"Word for the Web reported an error: {err_text!r}")
-        except PlaywrightTimeoutError:
-            pass
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
+                    continue
+        # Also handle the case where render fails with an error dialog
+        for ctx in [page, frame]:
+            try:
+                err = ctx.locator(
+                    "[role='dialog']:has-text('error'), "
+                    "[role='dialog']:has-text('failed'), "
+                    "[role='dialog']:has-text('unable')"
+                ).first
+                if err.is_visible(timeout=1000):
+                    err_text = err.inner_text()[:300]
+                    try:
+                        page.screenshot(path=str(Path(DOWNLOAD_DIR) / "debug-render-error.png"), timeout=5000)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Word for the Web reported an error: {err_text!r}")
+            except PlaywrightTimeoutError:
+                pass
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
         time.sleep(10)
 
     try:
