@@ -249,7 +249,7 @@ def _trigger_pdf_download(page) -> str:
     # File pane opens. The path is usually "Export" → "Download as PDF",
     # but sometimes the direct "Download as PDF" button is visible. Look
     # for and click the final PDF action.
-    time.sleep(4)
+    time.sleep(8)
     # Re-dismiss any dialog that appeared *after* File was clicked (e.g. the
     # "Your privacy option" overlay which re-surfaces mid-session and blocks
     # backstage pointer events). Also sweep all frames in case the privacy
@@ -262,6 +262,12 @@ def _trigger_pdf_download(page) -> str:
         "[aria-label*='Download as PDF']",
         "button:has-text('Download PDF')",
         "[role='menuitem']:has-text('Download a copy')",
+        "button:has-text('Download a PDF')",
+        "[role='menuitem']:has-text('Download as PDF')",
+        "[role='menuitem']:has-text('Download a PDF')",
+        "[aria-label*='PDF']",
+        "button:has-text('Save as PDF')",
+        "[role='menuitem']:has-text('Save as PDF')",
     ]
     submenu_candidates = [
         "button:has-text('Export')",
@@ -270,6 +276,10 @@ def _trigger_pdf_download(page) -> str:
         "[role='menuitem']:has-text('Save As')",
         "button:has-text('Save a Copy')",
         "[role='menuitem']:has-text('Save a Copy')",
+        "button:has-text('Save a copy')",
+        "[role='menuitem']:has-text('Save a copy')",
+        "button:has-text('Download')",
+        "[role='menuitem']:has-text('Download')",
     ]
 
     clicked_pdf = False
@@ -316,13 +326,14 @@ def _trigger_pdf_download(page) -> str:
         # sibling frame rather than in WacFrame itself (observed post-2024
         # UI refresh), so we try each frame — mirrors the File-click JS path.
         def _js_click_by_text(page, frame, text):
+            text_lower = text.lower()
             js = (
-                "() => { var tags=['a','button','li','td','div','span'];"
+                "() => { var tags=['a','button','li','td','div','span','p'];"
                 " for(var ti=0;ti<tags.length;ti++){"
                 "  var els=document.querySelectorAll(tags[ti]);"
                 "  for(var ei=0;ei<els.length;ei++){"
-                "   var t=(els[ei].innerText||els[ei].textContent||'').trim();"
-                f"   if(t.indexOf({text!r})!==-1){{els[ei].click();return t;}}"
+                "   var t=(els[ei].innerText||els[ei].textContent||'').trim().toLowerCase();"
+                f"   if(t.indexOf({text_lower!r})!==-1){{els[ei].click();return t;}}"
                 "  }} return null;}"
             )
             for f in [frame] + [ff for ff in page.frames if ff is not frame]:
@@ -334,14 +345,14 @@ def _trigger_pdf_download(page) -> str:
                     continue
             return None
 
-        for sm_text in ['Export', 'Save As', 'Save a Copy']:
+        for sm_text in ['Export', 'Save As', 'Save a Copy', 'Save a copy', 'Download', 'download a copy']:
             r = _js_click_by_text(page, frame, sm_text)
             if r:
                 sys.stderr.write(f"[word-online] JS opened submenu {r[1]!r} in frame {r[0]!r}\n")
-                time.sleep(2)
+                time.sleep(3)
                 break
 
-        for pdf_text in ['Download as PDF', 'Download PDF', 'Download a copy']:
+        for pdf_text in ['Download as PDF', 'Download PDF', 'Download a copy', 'Download a PDF', 'Save as PDF', 'as pdf']:
             r = _js_click_by_text(page, frame, pdf_text)
             if r:
                 sys.stderr.write(f"[word-online] JS clicked PDF download {r[1]!r} in frame {r[0]!r}\n")
@@ -354,6 +365,14 @@ def _trigger_pdf_download(page) -> str:
             page.screenshot(path=str(path), full_page=True, timeout=5000)
         except Exception:
             pass
+        # Dump backstage frame text to diagnose which UI elements are present
+        for _dbg_f in [frame] + [ff for ff in page.frames if ff is not frame]:
+            try:
+                _txt = _dbg_f.evaluate("() => document.body ? document.body.innerText.slice(0, 3000) : ''")
+                if _txt and len(_txt.strip()) > 10:
+                    sys.stderr.write(f"[word-online] backstage frame {_dbg_f.name!r} text: {_txt[:800]!r}\n")
+            except Exception:
+                pass
         raise RuntimeError(f"could not find Download-as-PDF button; screenshot at {path}")
 
     # ── Wait for the "Your document is ready" dialog ──

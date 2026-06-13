@@ -44,6 +44,11 @@ rsync -a "$DEPLOY_DIR/public/js/" "$GIT_DIR/public/js/" \
 rsync -a "$DEPLOY_DIR/public/" "$GIT_DIR/public/" \
     --include='*.html' --exclude='*/' --exclude='*'
 
+# Sync parsers (Python scripts for document processing pipelines)
+mkdir -p "$GIT_DIR/parsers"
+rsync -a --delete "$DEPLOY_DIR/parsers/" "$GIT_DIR/parsers/" \
+    --include='*.py' --exclude='__pycache__/' --include='*/' --exclude='*'
+
 # Sync flipbook templates (per-book slim shell + helper assets)
 mkdir -p "$GIT_DIR/templates"
 rsync -a --delete "$DEPLOY_DIR/templates/" "$GIT_DIR/templates/"
