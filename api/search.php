@@ -285,7 +285,7 @@ try {
 } catch (PDOException $e) {
     $total = 0; // Count too slow; fall through to Tier 2
 } finally {
-    try { $pdo->exec("SET statement_timeout = '0'"); } catch (PDOException $_) {}
+    try { $pdo->exec("SET statement_timeout = '600s'"); } catch (PDOException $_) {}
 }
 
 // ── Search-log + auto-alias learning ─────────────────────────────────
@@ -427,7 +427,7 @@ if ($total > 0) {
     } catch (PDOException $e) {
         $total = 0; // Count too slow; fall through to Tier 3
     } finally {
-        try { $pdo->exec("SET statement_timeout = '0'"); } catch (PDOException $_) {}
+        try { $pdo->exec("SET statement_timeout = '600s'"); } catch (PDOException $_) {}
     }
 
     if ($total > 0) {
