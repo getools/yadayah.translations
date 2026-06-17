@@ -157,6 +157,24 @@ function gpuTranscribe(string $audioPath, array $opts = []): array {
 }
 
 /**
+ * Enumerate the FULL voice catalog a Puget-side provider offers — the
+ * candidate pool that admin-tts-voices.php upserts into yy_tts_voice when an
+ * admin clicks "Check for new voices" for that provider.
+ *
+ * Currently meaningful for 'xtts' (58 XTTS v2 built-in speakers) and 'coqui'
+ * (Coqui TTS toolkit model list); other providers fall back to whatever the
+ * engine has registered in voices.json.
+ *
+ * Returns the engine's response: ['ok'=>true, 'provider'=>…, 'voices'=>[...]].
+ */
+function gpuProviderCatalog(string $provider, int $timeout = 600): array {
+    // Caddy strips the '/tts/' prefix and forwards to tts-engine:8801/catalog.
+    return gpuRequest('GET', '/tts/catalog?provider=' . urlencode($provider), [
+        'timeout' => $timeout,
+    ]);
+}
+
+/**
  * Synthesize speech via TTS. $params mirror the engine contract, e.g.
  *   ['provider'=>'chatterbox','voice'=>'cb-quran-ar-en','text'=>'…','format'=>'mp3']
  * If $saveTo is given the audio is streamed to that path
@@ -220,6 +238,20 @@ function gpuEditVoice(array $params, int $timeout = 30): array {
         if (isset($params[$k])) $form[$k] = (string)$params[$k];
     }
     return gpuRequest('POST', '/tts/voices/edit', ['multipart' => $form, 'timeout' => $timeout]);
+}
+
+/**
+ * Rename a voice's code on the box: moves its clip file(s) and rewrites the
+ * clone_ref paths + code key in voices.json. Engine route POST /tts/voices/rename.
+ * Returns ['ok'=>bool, ...]; caller MUST treat a non-ok local-engine response as
+ * fatal (don't change the DB) to avoid a code that the engine can't synth.
+ */
+function gpuRenameVoice(string $code, string $newCode, int $timeout = 60): array {
+    if ($code === '' || $newCode === '') {
+        return ['ok' => false, 'status' => 0, 'error' => "code and new_code required"];
+    }
+    return gpuRequest('POST', '/tts/voices/rename',
+        ['multipart' => ['code' => $code, 'new_code' => $newCode], 'timeout' => $timeout]);
 }
 
 /**

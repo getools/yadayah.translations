@@ -83,6 +83,9 @@ function buildOrTsquery(string $text): string {
         }
     }
     if (empty($terms)) return '';
+    // Cap at 10 terms; more OR branches make the FTS planner do a bitmap-OR
+    // across hundreds of posting lists, which can exceed the 120 s timeout.
+    if (count($terms) > 10) $terms = array_slice($terms, 0, 10);
     return implode(' | ', $terms);
 }
 
@@ -176,15 +179,20 @@ if (count($contextRows) < 5 && $orQuery) {
         ORDER BY rank DESC
         LIMIT 20
     ");
-    $orStmt->execute([$orQuery, $orQuery, $EXCLUDE_SERIES]);
-    $orRows = $orStmt->fetchAll();
-    // Merge, avoiding duplicates (by text prefix)
-    $seen = [];
-    foreach ($contextRows as $r) $seen[substr($r['paragraph_text_plain'] ?? '', 0, 100)] = true;
-    foreach ($orRows as $r) {
-        $key = substr($r['paragraph_text_plain'] ?? '', 0, 100);
-        if (!isset($seen[$key])) { $contextRows[] = $r; $seen[$key] = true; }
-        if (count($contextRows) >= 20) break;
+    try {
+        $orStmt->execute([$orQuery, $orQuery, $EXCLUDE_SERIES]);
+        $orRows = $orStmt->fetchAll();
+        // Merge, avoiding duplicates (by text prefix)
+        $seen = [];
+        foreach ($contextRows as $r) $seen[substr($r['paragraph_text_plain'] ?? '', 0, 100)] = true;
+        foreach ($orRows as $r) {
+            $key = substr($r['paragraph_text_plain'] ?? '', 0, 100);
+            if (!isset($seen[$key])) { $contextRows[] = $r; $seen[$key] = true; }
+            if (count($contextRows) >= 20) break;
+        }
+    } catch (PDOException $e) {
+        // OR-based FTS can time out on very broad queries; fall back to AND results.
+        if (strpos($e->getCode(), '57014') === false && $e->getCode() !== '57014') throw $e;
     }
 }
 

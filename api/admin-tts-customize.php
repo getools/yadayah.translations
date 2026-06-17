@@ -75,7 +75,7 @@ if ($mode === 'meta') {
     $args = [];
     if (array_key_exists('label', $_POST))       { $sets[] = 'tts_voice_label = ?';    $args[] = $label !== '' ? $label : $code; }
     if (array_key_exists('gender', $_POST))      { $sets[] = 'tts_voice_gender = ?';   $args[] = $gender !== '' ? $gender : null; }
-    if (array_key_exists('description', $_POST)) { $sets[] = 'tts_voice_note = ?';     $args[] = $description !== '' ? $description : null; }
+    if (array_key_exists('description', $_POST)) { $sets[] = 'tts_voice_description = ?'; $args[] = $description !== '' ? $description : null; }
     if (array_key_exists('language', $_POST))    { $sets[] = 'tts_voice_language = ?'; $args[] = $language !== '' ? $language : 'en'; }
     if (!$sets) errorResponse('no editable field in request');
 
@@ -185,15 +185,16 @@ try {
             INSERT INTO yy_tts_voice
                 (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
                  tts_voice_gender, tts_voice_type, tts_voice_status, tts_voice_active_flag,
-                 tts_voice_note, tts_voice_download_dtime, provider_key, tts_voice_language,
-                 tts_voice_styles)
-            VALUES (?, ?, ?, ?, ?, ?, 'Custom', 'GA', TRUE, ?, NOW(), ?, ?, ?::jsonb)
+                 tts_voice_description, tts_voice_download_dtime, provider_key, tts_voice_language,
+                 tts_voice_styles, tts_voice_custom_flag)
+            VALUES (?, ?, ?, ?, ?, ?, 'Custom', 'GA', TRUE, ?, NOW(), ?, ?, ?::jsonb, TRUE)
             ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
                 tts_voice_label    = EXCLUDED.tts_voice_label,
                 tts_voice_gender   = EXCLUDED.tts_voice_gender,
                 tts_voice_type     = EXCLUDED.tts_voice_type,
+                tts_voice_custom_flag = TRUE,
                 tts_voice_active_flag = TRUE,
-                tts_voice_note     = COALESCE(EXCLUDED.tts_voice_note, yy_tts_voice.tts_voice_note),
+                tts_voice_description = COALESCE(EXCLUDED.tts_voice_description, yy_tts_voice.tts_voice_description),
                 provider_key       = EXCLUDED.provider_key,
                 tts_voice_language = EXCLUDED.tts_voice_language,
                 tts_voice_styles   = CASE

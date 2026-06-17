@@ -32,14 +32,48 @@ if (!function_exists('readEnv')) {
     }
 }
 
-function loadTtsConfig(PDO $db, int $ttsKey): array {
+/**
+ * Resolve the active profile for $ttsKey, with optional caller override.
+ *
+ * If $profileKey is null/0 we pick the default profile (yy_tts_profile row
+ * with tts_profile_default_flag=TRUE for this tts_key). Returns the
+ * profile's key, or 0 if the tts_key has no profile rows yet (legacy
+ * tenants before the migration ran).
+ */
+function ttsResolveProfileKey(PDO $db, int $ttsKey, ?int $profileKey = null): int {
+    if ($profileKey !== null && $profileKey > 0) {
+        $st = $db->prepare("SELECT tts_profile_key FROM yy_tts_profile WHERE tts_profile_key = ? AND tts_key = ? AND tts_profile_active_flag = TRUE");
+        $st->execute([$profileKey, $ttsKey]);
+        $found = (int)$st->fetchColumn();
+        if ($found > 0) return $found;
+    }
+    $st = $db->prepare("SELECT tts_profile_key FROM yy_tts_profile WHERE tts_key = ? AND tts_profile_default_flag = TRUE AND tts_profile_active_flag = TRUE LIMIT 1");
+    $st->execute([$ttsKey]);
+    return (int)$st->fetchColumn();
+}
+
+/**
+ * Load the full TTS config for a system + a specific profile.
+ *
+ * $profileKey: 0/null = default profile for this tts_key. A user-supplied
+ * profile_key is honoured (validated against yy_tts_profile to prevent
+ * cross-tts contamination). The returned config carries 'profile_key' so
+ * downstream callers (build worker, preview) can persist which profile
+ * a synthesised audio file was rendered with.
+ */
+function loadTtsConfig(PDO $db, int $ttsKey, ?int $profileKey = null): array {
     $sysStmt = $db->prepare("SELECT * FROM yy_tts WHERE tts_key = ?");
     $sysStmt->execute([$ttsKey]);
     $system = $sysStmt->fetch();
-    if (!$system) return ['system' => null, 'categories' => [], 'tunes' => [], 'pauses' => []];
+    if (!$system) return ['system' => null, 'categories' => [], 'tunes' => [], 'pauses' => [], 'profile_key' => 0];
 
-    $catStmt = $db->prepare("SELECT * FROM yy_tts_category_voice WHERE tts_key = ? AND tts_category_voice_active_flag = TRUE");
-    $catStmt->execute([$ttsKey]);
+    // Pick the profile (caller-supplied or default). Categories load
+    // scoped to that profile so different profiles can have completely
+    // different voice maps for the same tts_key.
+    $resolvedProfile = ttsResolveProfileKey($db, $ttsKey, $profileKey);
+
+    $catStmt = $db->prepare("SELECT * FROM yy_tts_category_voice WHERE tts_key = ? AND tts_profile_key = ? AND tts_category_voice_active_flag = TRUE");
+    $catStmt->execute([$ttsKey, $resolvedProfile]);
     $categories = [];
     foreach ($catStmt->fetchAll() as $r) {
         $categories[$r['tts_category']] = $r;
@@ -114,7 +148,7 @@ function loadTtsConfig(PDO $db, int $ttsKey): array {
         $providers = []; $voiceProvider = [];
     }
 
-    return ['system' => $system, 'categories' => $categories, 'tunes' => $tunes, 'pauses' => $pauses, 'fonts' => $fonts, 'bible_books' => $bibleBooks, 'providers' => $providers, 'voice_provider' => $voiceProvider];
+    return ['system' => $system, 'categories' => $categories, 'tunes' => $tunes, 'pauses' => $pauses, 'fonts' => $fonts, 'bible_books' => $bibleBooks, 'providers' => $providers, 'voice_provider' => $voiceProvider, 'profile_key' => $resolvedProfile];
 }
 
 /**
@@ -694,6 +728,15 @@ function tokensToSsml(string $escaped, array $tokenMap): string {
  * Wrapped in a <voice> element with prosody from the category config.
  */
 function buildVoiceBlock(string $text, array $cfg, string $category, ?string $overrideVoice = null): string {
+    // Skipped categories: if the admin unchecked "read" on this category
+    // (or an ancestor it inherits from), emit nothing at all — no <voice>
+    // wrapper, no whitespace — so neighbouring blocks concatenate directly
+    // with zero added pause. The override path is exempt because the
+    // caller already chose a specific voice and the skip flag is meant
+    // to suppress AUTOMATIC routing, not explicit picks.
+    if ($overrideVoice === null && !ttsCategoryReadable($cfg, $category)) {
+        return '';
+    }
     // Resolve the category through the parent chain so segments tagged
     // with a source-specific category (kjv, bukhari, esv, …) route to
     // their generic parent voice — and ultimately to 'main' — when the
@@ -1330,10 +1373,18 @@ function ttsCategories(): array {
         ['code' => 'bible',           'parent' => null,    'label' => 'Bible — generic / fallback'],
         ['code' => 'kjv',             'parent' => 'bible', 'label' => 'King James Version (KJV)'],
         ['code' => 'nas',             'parent' => 'bible', 'label' => 'New American Standard (NAS / NASB)'],
+        ['code' => 'na',              'parent' => 'bible', 'label' => 'New American (NA)'],
         ['code' => 'nlt',             'parent' => 'bible', 'label' => 'New Living Translation (NLT)'],
         ['code' => 'jps',             'parent' => 'bible', 'label' => 'Jewish Publication Society (JPS)'],
         ['code' => 'niv',             'parent' => 'bible', 'label' => 'New International Version (NIV)'],
         ['code' => 'esv',             'parent' => 'bible', 'label' => 'English Standard Version (ESV)'],
+        ['code' => 'lv',              'parent' => 'bible', 'label' => 'Latin Vulgate (LV)'],
+        // The parser tags YY's NT/Pauline bold prose with data-style="nt" /
+        // "paul" via color detection (see STYLE_BY_COLOR in
+        // bundle_paragraphs.py); these are scripture sources, so they
+        // inherit the Bible voice through this parent chain.
+        ['code' => 'nt',              'parent' => 'bible', 'label' => 'New Testament (NT)'],
+        ['code' => 'paul',            'parent' => 'bible', 'label' => 'Pauline Epistles'],
 
         // ── Islam ── source-specific children are tagged by the worker
         // (see TTS_ISLAMIC_SOURCES + the chapter-intro classifier in
@@ -1353,7 +1404,11 @@ function ttsCategories(): array {
         // extensively (especially the s05 Babel and s06 Twistianity volumes).
         ['code' => 'other',           'parent' => null,    'label' => 'Other — generic catch-all'],
         ['code' => 'quote',           'parent' => 'other', 'label' => 'General extended quote (non-scripture)'],
-        ['code' => 'mein_kampf',      'parent' => 'other', 'label' => 'Mein Kampf'],
+        // Parser emits cat='kampf' (5 chars) from data-style="kampf". Map
+        // to the same voice slot mein_kampf would use — they're the
+        // same content type, just different short-codes.
+        ['code' => 'kampf',           'parent' => 'other', 'label' => 'Mein Kampf'],
+        ['code' => 'mein_kampf',      'parent' => 'other', 'label' => 'Mein Kampf (legacy alias)'],
     ];
 }
 
@@ -1378,6 +1433,83 @@ function ttsCategoryParent(string $code): ?string {
  * override applies. Until a category is pointed at a self-hosted voice,
  * every segment resolves to Azure (provider 1) and behavior is unchanged.
  */
+
+/**
+ * Drop segments whose category is marked skip and stitch their readable
+ * neighbours back into a single segment per category run. Without this,
+ * a bold paragraph like
+ *
+ *   <b>"Indeed</b> (kai)<b>, on</b> (en)<b> the Day</b> ...
+ *
+ * would survive as [translation, word_definition, translation, word_definition,
+ * translation, ...] — and after dropping the unreadable word_definition
+ * entries, the worker would still synthesise SIX tiny translation fragments
+ * separately (`"Indeed`, `, on`, ` the Day`, ...). ElevenLabs hallucinates
+ * filler on short fragments and outright fails some of them, so individual
+ * paragraphs lose all their audio and Play returns 404.
+ *
+ * Merging adjacent same-category survivors produces ONE call per category
+ * run ("Indeed, on the Day of Fifty, it was fulfilled...") and the prose
+ * reads naturally.
+ *
+ * Idempotent: a no-op when nothing is marked skip.
+ */
+function ttsCollapseSkippedSegments(array $cfg, array $segments): array {
+    $out = [];
+    foreach ($segments as $s) {
+        $cat = $s['category'] ?? '';
+        if (!ttsCategoryReadable($cfg, $cat)) continue;
+        if ($out && end($out)['category'] === $cat) {
+            // Glue with a single space so "Indeed" + ", on" reads
+            // "Indeed, on" rather than running together as "Indeed,on".
+            // segmentParagraph already trimmed each segment's outer
+            // whitespace; we restore the boundary explicitly here.
+            $tail = $out[count($out) - 1]['text'];
+            $glue = ($tail !== '' && substr($tail, -1) !== ' ') ? ' ' : '';
+            $out[count($out) - 1]['text'] = $tail . $glue . $s['text'];
+        } else {
+            $out[] = $s;
+        }
+    }
+    // Normalise whitespace inside each merged run (runs of >1 space →
+    // single space; trim outer).
+    foreach ($out as &$s) {
+        $s['text'] = preg_replace('/\s+/u', ' ', $s['text']);
+        $s['text'] = trim($s['text']);
+    }
+    unset($s);
+    // Drop any that ended up empty after the trim.
+    return array_values(array_filter($out, function ($s) { return ($s['text'] ?? '') !== ''; }));
+}
+
+/**
+ * Should content tagged with $category be synthesised at all?
+ *
+ * Walks the parent chain like buildVoiceBlock() and inspects
+ * `tts_category_voice_read_flag` on the matched row. FALSE → caller should
+ * skip the entire segment so no audio is emitted AND no inter-segment pause
+ * is introduced. Unknown / no-row categories default to TRUE (read).
+ *
+ * Caller pattern (build worker / preview loop):
+ *   foreach ($segs as $seg) {
+ *     if (!ttsCategoryReadable($cfg, $seg['category'])) continue;
+ *     ... synthesise ...
+ *   }
+ */
+function ttsCategoryReadable(array $cfg, string $category): bool {
+    $cat = $cfg['categories'][$category] ?? null;
+    $cur = $category;
+    while ($cat === null && $cur !== null) {
+        $cur = ttsCategoryParent($cur);
+        if ($cur !== null) $cat = $cfg['categories'][$cur] ?? null;
+    }
+    if ($cat === null) return true;
+    $flag = $cat['tts_category_voice_read_flag'] ?? null;
+    if ($flag === null) return true;
+    if (is_bool($flag)) return $flag;
+    if ($flag === 'f' || $flag === '0' || $flag === 0) return false;
+    return true;
+}
 
 /** Resolve a category to its voice code, walking parents like buildVoiceBlock(). */
 function ttsResolveVoiceCode(array $cfg, string $category): ?string {
@@ -1956,6 +2088,36 @@ function trimLeadingTrailingSilence(string $mp3): string {
 
 // Azure TTS retry wrapper. 429 / 5xx / curl errors are retriable with
 // exponential backoff; other 4xx (bad SSML, auth) bail immediately.
+/**
+ * Retry wrapper for elevenlabsTtsSynthesize — mirrors azureTtsSynthesizeRetry.
+ *
+ * Without this, transient ElevenLabs 429 (rate limit), 5xx, and network
+ * timeouts cause a paragraph to be marked permanently failed and the
+ * part file is never written. Roughly 10% of paragraphs in a 600-para
+ * chapter hit this without retries because long-form runs eventually
+ * trip the per-minute quota.
+ *
+ * Retries on HTTP 0 (network), 429 (rate limit), 5xx (server side).
+ * Exponential backoff capped at 30s; 6 attempts total (~63s worst case).
+ */
+function elevenlabsTtsSynthesizeRetry(array $cfg, array $seg, string $outputFormat, ?string &$err = null, int $maxAttempts = 6): string {
+    $attempt = 0;
+    $delay   = 1;
+    while ($attempt < $maxAttempts) {
+        $bytes = elevenlabsTtsSynthesize($cfg, $seg, $outputFormat, $err);
+        if ($bytes !== '') return $bytes;
+        $retry = ($err === null || $err === '' || preg_match('/HTTP (0|429|5\d\d)\b/', (string)$err));
+        if (!$retry) return '';
+        $attempt++;
+        if ($attempt >= $maxAttempts) break;
+        if (defined('STDERR')) fwrite(STDERR, "elevenlabs retry $attempt after {$delay}s — $err\n");
+        else error_log("elevenlabs retry $attempt after {$delay}s — $err");
+        sleep($delay);
+        $delay = min($delay * 2, 30);
+    }
+    return '';
+}
+
 function azureTtsSynthesizeRetry(string $ssml, array $cfg, ?string &$err = null, int $maxAttempts = 6): string {
     $attempt = 0;
     $delay   = 1;

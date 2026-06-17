@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781359212">
+    <meta name="page-version" content="1781728999">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -19,6 +19,14 @@
 
         .tts-pane { display:none; }
         .tts-pane.active { display:block; }
+
+        /* Wider page than the default admin container — TTS has 7-column
+           Voices rows plus per-row prosody fields. Without this override
+           the Voice and Style selects get cramped. Scoped to this page
+           via #app so other admin pages keep the default width. */
+        #app.container { max-width: 1700px; }
+        /* Checkbox sized for easy click target in the dense voice row. */
+        .voice-row input[type=checkbox] { width: 18px; height: 18px; margin: 0; padding: 0; cursor: pointer; justify-self: center; }
 
         .voice-row { display:grid; grid-template-columns: 220px 1fr 120px; gap:12px; align-items:center; padding:10px 0; border-bottom:1px solid #f0f0f0; }
         .voice-row label { font-weight:600; font-size:0.9rem; color:#444; }
@@ -138,7 +146,8 @@
         .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:1000; align-items:center; justify-content:center; }
         .modal-overlay.visible { display:flex; }
         .modal-box { background:#fff; border-radius:8px; padding:24px; max-width:680px; width:90%; max-height:85vh; overflow-y:auto; box-shadow:0 4px 20px rgba(0,0,0,0.3); }
-        #build-modal .modal-box { max-width:1040px; }
+        #build-modal .modal-box,
+        #build-all-modal .modal-box { max-width: 1500px; }
         /* Placeholder behavior for the contenteditable preview field —
            shows the data-placeholder text in muted grey only when the
            div has no content. */
@@ -171,9 +180,8 @@
     <h1>Text-to-Speech</h1>
 
     <div class="tts-tabs">
-        <button data-tab="defaults"      class="active">Defaults</button>
+        <button data-tab="defaults"      class="active">Profiles</button>
         <button data-tab="voices">Voices</button>
-        <button data-tab="customize" title="Train / clone a custom voice for a self-hosted provider">Customize</button>
         <button data-tab="pronunciations">Pronunciations</button>
         <button data-tab="pauses">Pauses</button>
         <button data-tab="fonts">Fonts</button>
@@ -194,8 +202,22 @@
         </div>
 
         <div class="tts-section">
+            <h3>Profiles</h3>
+            <p class="desc">A profile is a named bundle of category-voice mappings. Pick a profile to view / edit its voices; the Books-tab Build picks which profile each chapter audio is rendered with. The chapter can have one audio file per profile and the flipbook reader can switch between them.</p>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                <label style="font-weight:600;color:#444;">Profile:</label>
+                <select id="profile-select" onchange="onProfileSelectChange()" style="min-width:220px;padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.88rem;"></select>
+                <button class="btn btn-sm" onclick="newProfile()" title="Create a new profile, optionally cloning the current one">+ New</button>
+                <button class="btn btn-sm" onclick="renameProfile()" title="Rename the currently-selected profile">Rename</button>
+                <button id="profile-set-default-btn" class="btn btn-sm" onclick="setDefaultProfile()" title="Make this profile the default (used when no profile is explicitly chosen at build time)">Set as default</button>
+                <button class="btn btn-sm btn-del" onclick="deleteProfile()" title="Delete this profile (refuses if it is the default)">Delete</button>
+                <span id="profile-status" class="status-msg" style="font-size:0.8rem;"></span>
+            </div>
+        </div>
+
+        <div class="tts-section">
             <h3>Default voice per content category</h3>
-            <p class="desc">Each category gets its own voice + style + prosody. Used as defaults for new audio builds (overridable per build).</p>
+            <p class="desc">Each category gets its own voice + style + prosody, scoped to the profile above. Used as defaults for new audio builds (overridable per build).</p>
             <div id="category-rows"></div>
         </div>
     </div>
@@ -220,11 +242,12 @@
                     <tr>
                         <th style="text-align:left;">Provider</th>
                         <th style="width:120px;text-align:center;" title="Number of voices this provider contributes to the catalog below">Voices</th>
+                        <th style="width:110px;text-align:center;" title="Whether custom voices can be trained / cloned for this provider (drives the Add Custom Voice flow)">Custom</th>
                         <th style="width:220px;text-align:center;">Pronunciation</th>
                     </tr>
                 </thead>
                 <tbody id="providers-tbody">
-                    <tr><td colspan="3" style="text-align:center;color:#888;padding:12px;">Loading…</td></tr>
+                    <tr><td colspan="4" style="text-align:center;color:#888;padding:12px;">Loading…</td></tr>
                 </tbody>
             </table>
             <div id="providers-status" class="status-msg" style="margin-top:6px;"></div>
@@ -283,13 +306,15 @@
             <h3>Voice catalog</h3>
             <p class="desc">Every voice Azure offers in your region. Uncheck a row to hide it from the picker dropdowns above. Click ▶ to hear a row's voice say the text from <em>Preview any voice</em>, using that section's Rate &amp; Pitch.</p>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:0.85rem;flex-wrap:wrap;">
-                <button type="button" id="vc-refresh-btn" onclick="refreshVoiceCatalog()" title="Pull the latest voice list from the selected provider (or every active provider when 'All providers' is chosen) and upsert into the catalog. Existing active flags are preserved." style="padding:5px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">Check for new voices</button>
-                <!-- Provider scope for the refresh button + the table below.
-                     "All providers" (default) lists every voice in the catalog
-                     and refreshes each active provider in turn. -->
-                <select id="vc-refresh-provider" onchange="loadVoiceCatalog()" title="Which provider to refresh / which provider's voices to display" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;background:#fff;">
+                <!-- Provider scope: drives the table below, the "Check for New
+                     Voices" refresh, AND which provider "Add Custom Voice"
+                     creates for. "All providers" (default) lists the whole
+                     catalog and refreshes each active provider in turn. -->
+                <select id="vc-refresh-provider" onchange="onCatalogScopeChange()" title="Which provider to refresh / which provider's voices to display / which provider a new custom voice is created for" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;background:#fff;">
                     <option value="all">All providers</option>
                 </select>
+                <button type="button" id="vc-refresh-btn" onclick="refreshVoiceCatalog()" title="Pull the latest voice list from the selected provider (or every active provider when 'All providers' is chosen) and upsert into the catalog. Existing active flags are preserved." style="padding:5px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">Check for New Voices</button>
+                <button type="button" id="vc-add-custom-btn" onclick="openAddCustomVoice()" disabled title="Select a custom-capable provider above to create a new custom voice for it" style="padding:5px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">Add Custom Voice</button>
                 <span id="vc-refresh-status" style="font-size:0.8rem;"></span>
                 <div style="flex:1 1 auto;"></div>
                 <span id="vc-summary" style="color:#666;font-size:0.8rem;font-variant-numeric:tabular-nums;"></span>
@@ -307,7 +332,8 @@
                         <th style="width:64px;text-align:center;cursor:pointer;" onclick="sortVoicesBy('type')">Type<span class="vc-sort-arrow" data-col="type"></span></th>
                         <th style="width:54px;text-align:center;" title="Multilingual (can pronounce languages other than its primary locale)">Multi</th>
                         <th style="width:100px;text-align:center;cursor:pointer;" onclick="sortVoicesBy('downloaded')" title="Last time the row was refreshed from Azure">Downloaded<span class="vc-sort-arrow" data-col="downloaded"></span></th>
-                        <th style="width:30px;text-align:center;" title="Click the icon to add or edit a note">Note</th>
+                        <th style="width:30px;text-align:center;" title="Click the icon to add or edit a longer description">Description</th>
+                        <th style="width:60px;text-align:center;cursor:pointer;" onclick="sortVoicesBy('custom')" title="Custom-trained voice (created through Add Custom Voice) — click ✎ to edit">Custom<span class="vc-sort-arrow" data-col="custom"></span></th>
                         <th style="width:48px;text-align:center;">▶</th>
                     </tr>
                     <!-- Filter row — directly under each column label. -->
@@ -353,78 +379,28 @@
                         </th>
                         <th style="padding:4px;"></th>
                         <th style="padding:4px;"></th>
+                        <th style="padding:4px;text-align:center;">
+                            <select id="vc-f-custom" onchange="filterVoices()" style="width:100%;padding:2px;border:1px solid #ccc;border-radius:3px;font-size:0.78rem;font-weight:normal;color:#555;">
+                                <option value="">all</option>
+                                <option value="1">yes</option>
+                                <option value="0">no</option>
+                            </select>
+                        </th>
                         <th style="padding:4px;"></th>
                     </tr>
                 </thead>
                 <tbody id="voices-tbody"></tbody>
             </table>
-            <audio id="vc-audio" controls preload="none" style="width:100%;margin-top:8px;display:none;"></audio>
+            <div id="vc-audio-row" style="display:none;align-items:center;gap:10px;margin-top:8px;">
+                <span id="vc-audio-name" title="" style="flex:0 0 auto;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.85rem;font-weight:600;color:#31345A;"></span>
+                <audio id="vc-audio" controls preload="none" style="flex:1 1 auto;min-width:0;"></audio>
+            </div>
             <div id="vc-status" class="status-msg"></div>
         </div>
     </div>
 
-    <!-- ── Customize tab — train / clone a custom voice ──────────────── -->
-    <div id="pane-customize" class="tts-pane">
-        <div class="tts-section">
-            <h3>Custom voice training</h3>
-            <p class="desc">Create a custom voice by uploading a clean reference clip to a self-hosted provider that supports voice cloning. Providers without customization (Kokoro, Azure Standard) are not listed. Azure Custom Neural Voice has a different workflow in Azure Speech Studio — not exposed here.</p>
-
-            <div style="display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap;margin-top:12px;">
-                <!-- LEFT: provider + form -->
-                <div style="flex:1 1 380px;min-width:320px;">
-                    <label style="font-weight:600;display:block;margin-bottom:6px;font-size:0.9rem;">Provider</label>
-                    <select id="cv-provider" onchange="onCustomizeProviderChange()" style="width:100%;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;background:#fff;">
-                        <option value="">— select a provider —</option>
-                    </select>
-
-                    <div id="cv-form" style="margin-top:14px;display:none;">
-                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Voice <span style="color:#888;font-weight:normal;">(pick an existing custom voice to edit, or “+ New” to create)</span> <span id="cv-autosave-status" style="float:right;font-weight:normal;font-size:0.78rem;color:#888;"></span></label>
-                        <select id="cv-voice-select" onchange="onCustomizeVoiceSelect()" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">
-                            <option value="">+ New custom voice</option>
-                        </select>
-
-                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Voice code <span style="color:#888;font-weight:normal;">(slug; will be prefixed per provider)</span></label>
-                        <input id="cv-code" type="text" placeholder="e.g. craig" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
-
-                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Display name</label>
-                        <input id="cv-name" type="text" placeholder='e.g. "Craig — calm narrator"' oninput="autoSaveCustomizeMeta('label', 500)" onchange="autoSaveCustomizeMeta('label', 0)" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
-
-                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Gender</label>
-                        <select id="cv-gender" onchange="autoSaveCustomizeMeta('gender', 0)" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">
-                            <option value="">— unspecified —</option>
-                            <option value="Male">Male</option>
-                            <option value="Female">Female</option>
-                            <option value="Neutral">Neutral</option>
-                        </select>
-
-                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Description <span style="color:#888;font-weight:normal;">(optional)</span></label>
-                        <textarea id="cv-desc" rows="2" placeholder="When to pick this voice over others" oninput="autoSaveCustomizeMeta('description', 500)" onchange="autoSaveCustomizeMeta('description', 0)" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;font-family:inherit;resize:vertical;"></textarea>
-
-                        <label id="cv-style-label" style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Style <span style="color:#888;font-weight:normal;">(first upload must be <code>default</code>; later: e.g. <code>happy</code>, <code>stoic</code>, <code>quiet</code>, <code>upset</code>)</span></label>
-                        <input id="cv-style-name" type="text" value="default" placeholder="default" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">
-
-                        <div id="cv-extra-fields"></div>
-
-                        <label style="font-weight:600;display:block;margin:8px 0 4px;font-size:0.85rem;">Reference audio</label>
-                        <input id="cv-audio" type="file" accept="audio/wav,audio/mp3,audio/x-wav,audio/mpeg" onchange="onCustomizeFilePicked(this)" style="font-size:0.85rem;">
-                        <audio id="cv-preview" controls style="display:none;width:100%;margin-top:6px;"></audio>
-
-                        <button type="button" id="cv-submit" onclick="submitCustomizeVoice()" style="margin-top:12px;padding:6px 14px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.9rem;">Train voice</button>
-                        <span id="cv-submit-status" style="margin-left:10px;font-size:0.82rem;color:#888;"></span>
-                    </div>
-                </div>
-
-                <!-- RIGHT: per-provider instructions panel -->
-                <div style="flex:1 1 320px;min-width:300px;">
-                    <h4 style="margin:0 0 6px;color:#5b4a00;">Provider-specific guidance</h4>
-                    <div id="cv-instructions" style="background:#fffbe6;border:1px solid #e4d27a;border-radius:4px;padding:10px 14px;color:#5b4a00;font-size:0.85rem;line-height:1.5;">
-                        <p style="font-style:italic;margin:0;">Select a provider above to see its data requirements and workflow.</p>
-                    </div>
-                </div>
-            </div>
-
-        </div>
-    </div>
+    <!-- Customize tab removed — custom voices are now created/edited via the
+         "Add Custom Voice" button + the ✎ row action in the Voices catalog. -->
 
     <!-- ── Pronunciations tab ─────────────────────────────────────── -->
     <div id="pane-pronunciations" class="tts-pane">
@@ -445,7 +421,8 @@
                     <li><strong>SAPI</strong> — reference-only spelling using legacy SAPI phoneme codes (<code>AH1 HH OW0</code>). Azure neural voices reject SAPI, so this column is preserved for cross-checking against older tools; not used by synthesis.</li>
                     <li><strong>▶</strong> — auditions this rule using the category voice selected in the picker above the table, with that category's saved style, rate, pitch, and volume.</li>
                     <li><strong>Voice</strong> — optional per-tune voice override. Setting one on a previously-voiceless row creates a clone (the original stays as the voice-NULL catch-all); only one voice-specific clone stays active per Text, others become inactive automatically.</li>
-                    <li><strong>Note</strong> — pencil icon opens a popover for free-form notes (intent, edge cases, etc.). Amber when a note is set.</li>
+                    <li><strong>Description</strong> — pencil icon opens a popover for free-form description (intent, edge cases, etc.). Amber when a description is set.</li>
+                    <li><strong>Note (inline)</strong> — small text field next to the voice name. Use for short admin tags ("v3", "post-clean") without renaming the upstream voice.</li>
                     <li><strong>×</strong> — delete the row.</li>
                 </ul>
                 <p class="desc" style="margin-top:6px;">Tunes apply <em>before</em> pause rules during synthesis, so the matched text consumes its half-ring / apostrophe characters before the pause filter ever sees them.</p>
@@ -587,6 +564,8 @@
             <p class="desc">Pick a volume to see chapter-level audio status and build new files.</p>
             <div class="books-controls">
                 <select id="volume-select"><option value="">— Select volume —</option></select>
+                <label style="font-size:0.85rem;color:#666;margin-left:8px;">Profile:</label>
+                <select id="books-profile-select" onchange="onBooksProfileChange()" title="Filter the chapter table to show audio status for this profile. Each chapter can have one audio file per profile." style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;"></select>
                 <span id="volume-summary" style="font-size:0.85rem;color:#666"></span>
                 <button type="button" id="pause-all-btn" onclick="pauseAllQueuedBuilds()"
                         title="Pause every chapter in this volume that's currently queued or running. Cached paragraphs are preserved for later Resume."
@@ -626,7 +605,11 @@
             <button class="btn-primary" id="build-start-btn" onclick="startBuild()">Start build</button>
             <button class="btn-cancel" onclick="closeBuildModal()">Cancel</button>
         </div>
-        <p style="font-size:0.85rem;color:#666;margin:0 0 14px">Defaults shown come from the Voices tab. Override per-build if you want.</p>
+        <p style="font-size:0.85rem;color:#666;margin:0 0 14px">Profile drives the voice-per-category map. Override individual categories below if needed; overrides apply to THIS build only and don't change the profile.</p>
+        <div class="voice-row" style="grid-template-columns:160px 1fr">
+            <label>Profile</label>
+            <select id="build-profile" onchange="onBuildProfileChange()"></select>
+        </div>
         <div class="voice-row" style="grid-template-columns:160px 1fr">
             <label>Output format</label>
             <select id="build-format"></select>
@@ -641,6 +624,10 @@
     <div class="modal-box">
         <h3 id="build-all-modal-title">Build all chapters</h3>
         <p style="font-size:0.85rem;color:#666;margin:0 0 14px">Queue every chapter in this volume in one shot. Voice config + overrides apply to every chapter — same modal as a single-chapter build.</p>
+        <div class="voice-row" style="grid-template-columns:160px 1fr">
+            <label>Profile</label>
+            <select id="build-all-profile" onchange="onBuildAllProfileChange()"></select>
+        </div>
         <div class="voice-row" style="grid-template-columns:160px 1fr">
             <label>Scope</label>
             <select id="build-all-scope">
@@ -728,7 +715,6 @@ function activateTtsTab(tabName) {
     var pane = $('pane-' + tabName);
     if (pane) pane.classList.add('active');
     if (tabName === 'voices') { loadProviders(); loadVoiceCatalog(); pvEnsureSeriesLoaded(); }
-    if (tabName === 'customize') initCustomizeTab();
     if (tabName === 'pronunciations') loadTunes();
     if (tabName === 'pauses') loadPauses();
     if (tabName === 'fonts')  loadFonts();
@@ -911,7 +897,7 @@ function onCustomizeVoiceSelect() {
         genderIn.value = found ? g : '';
     }
     var descIn = document.getElementById('cv-desc');
-    if (descIn) descIn.value = v.tts_voice_note || '';
+    if (descIn) descIn.value = v.tts_voice_description || '';
     if (btn) btn.textContent = (meta && meta.noAudio) ? 'Update voice' : 'Retrain voice';
     setCustomizeAutoSaveStatus('');
 }
@@ -959,7 +945,7 @@ function autoSaveCustomizeMeta(field, debounceMs) {
                   if (list[i].tts_voice_code === code) {
                       if (field === 'label')       list[i].tts_voice_label  = inp.value;
                       if (field === 'gender')      list[i].tts_voice_gender = inp.value;
-                      if (field === 'description') list[i].tts_voice_note   = inp.value;
+                      if (field === 'description') list[i].tts_voice_description = inp.value;
                       break;
                   }
               }
@@ -1172,16 +1158,153 @@ function api(path, opts) {
     });
 }
 
+// Active profile state. Persisted in sessionStorage so navigating away
+// and back lands on the same profile the user was editing. Defaults to
+// the tts_key's default profile when nothing is saved (or the saved key
+// no longer exists). Used by the Defaults tab, Books tab, and Build modal.
+var ACTIVE_PROFILE_KEY = 0;
+var PROFILES = [];  // [{tts_profile_key, tts_profile_code, tts_profile_label, tts_profile_default_flag}]
+
 async function bootstrap() {
     CATALOG = await api('/admin-tts-config.php?action=catalog');
-    var ov = await api('/admin-tts-config.php?action=overview&tts_key=' + TTS_KEY);
+    // Restore saved profile choice (per tts_key) so the user lands back
+    // on the profile they were last editing rather than always-default.
+    var savedProfile = (window.sessionState && sessionState.load) ? parseInt(sessionState.load('profileKey_' + TTS_KEY, 0), 10) || 0 : 0;
+    var ov = await api('/admin-tts-config.php?action=overview&tts_key=' + TTS_KEY + (savedProfile ? '&profile_key=' + savedProfile : ''));
     STATE.systems = ov.systems || [];
     if (ov.current) {
         STATE.system = ov.current.system;
+        STATE.categories = {};
         (ov.current.categories || []).forEach(c => { STATE.categories[c.tts_category] = c; });
+        PROFILES = ov.current.profiles || [];
+        ACTIVE_PROFILE_KEY = ov.current.profile_key || 0;
     }
     populateSystemUI();
     populateRefreshProviderDropdown();
+    populateProfileSelect();
+    await renderCategoryRows();
+}
+
+// ── Profiles UI ────────────────────────────────────────────────────────
+function populateProfileSelect() {
+    var sel = $('profile-select');
+    if (!sel) return;
+    sel.innerHTML = '';
+    PROFILES.forEach(function (p) {
+        var o = document.createElement('option');
+        o.value = String(p.tts_profile_key);
+        o.textContent = p.tts_profile_label + (p.tts_profile_default_flag ? ' (default)' : '');
+        sel.appendChild(o);
+    });
+    if (ACTIVE_PROFILE_KEY) sel.value = String(ACTIVE_PROFILE_KEY);
+    // Disable "Set as default" when this profile already is the default.
+    var btn = $('profile-set-default-btn');
+    if (btn) {
+        var current = PROFILES.find(function (p) { return p.tts_profile_key === ACTIVE_PROFILE_KEY; });
+        btn.disabled = !!(current && current.tts_profile_default_flag);
+    }
+}
+
+async function onProfileSelectChange() {
+    var sel = $('profile-select');
+    ACTIVE_PROFILE_KEY = parseInt(sel.value, 10) || 0;
+    if (window.sessionState && sessionState.save) sessionState.save('profileKey_' + TTS_KEY, ACTIVE_PROFILE_KEY);
+    // Re-pull the category list for this profile and re-render rows.
+    var ov = await api('/admin-tts-config.php?action=overview&tts_key=' + TTS_KEY + '&profile_key=' + ACTIVE_PROFILE_KEY);
+    STATE.categories = {};
+    if (ov.current) (ov.current.categories || []).forEach(c => { STATE.categories[c.tts_category] = c; });
+    populateProfileSelect();
+    await renderCategoryRows();
+    var s = $('profile-status'); if (s) { s.textContent = ''; }
+}
+
+async function newProfile() {
+    var label = prompt('New profile name (e.g., "Warm narrator", "Hebrew-focus"):');
+    if (label == null) return;
+    label = label.trim();
+    if (label === '') { alert('A name is required.'); return; }
+    var cloneFrom = confirm('Clone the current profile’s voice settings as the starting point?\n\nOK = clone, Cancel = start empty (every category falls back to provider defaults).')
+        ? ACTIVE_PROFILE_KEY : 0;
+    var s = $('profile-status'); if (s) { s.textContent = 'Creating…'; s.className = 'status-msg'; }
+    try {
+        var r = await api('/admin-tts-config.php', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'create_profile', tts_key: TTS_KEY, label: label, clone_from: cloneFrom }),
+        });
+        ACTIVE_PROFILE_KEY = r.tts_profile_key;
+        if (window.sessionState && sessionState.save) sessionState.save('profileKey_' + TTS_KEY, ACTIVE_PROFILE_KEY);
+        await reloadProfilesAndRows();
+        if (s) { s.textContent = 'Created.'; s.className = 'status-msg success'; }
+    } catch (e) {
+        if (s) { s.textContent = 'Error: ' + e.message; s.className = 'status-msg error'; }
+    }
+}
+
+async function renameProfile() {
+    var current = PROFILES.find(function (p) { return p.tts_profile_key === ACTIVE_PROFILE_KEY; });
+    if (!current) return;
+    var label = prompt('Rename profile:', current.tts_profile_label);
+    if (label == null) return;
+    label = label.trim();
+    if (label === '' || label === current.tts_profile_label) return;
+    var s = $('profile-status'); if (s) { s.textContent = 'Saving…'; s.className = 'status-msg'; }
+    try {
+        await api('/admin-tts-config.php', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'rename_profile', tts_profile_key: ACTIVE_PROFILE_KEY, label: label }),
+        });
+        await reloadProfilesAndRows();
+        if (s) { s.textContent = 'Saved.'; s.className = 'status-msg success'; }
+    } catch (e) {
+        if (s) { s.textContent = 'Error: ' + e.message; s.className = 'status-msg error'; }
+    }
+}
+
+async function setDefaultProfile() {
+    var s = $('profile-status'); if (s) { s.textContent = 'Saving…'; s.className = 'status-msg'; }
+    try {
+        await api('/admin-tts-config.php', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'set_default_profile', tts_profile_key: ACTIVE_PROFILE_KEY }),
+        });
+        await reloadProfilesAndRows();
+        if (s) { s.textContent = 'Default updated.'; s.className = 'status-msg success'; }
+    } catch (e) {
+        if (s) { s.textContent = 'Error: ' + e.message; s.className = 'status-msg error'; }
+    }
+}
+
+async function deleteProfile() {
+    var current = PROFILES.find(function (p) { return p.tts_profile_key === ACTIVE_PROFILE_KEY; });
+    if (!current) return;
+    if (current.tts_profile_default_flag) { alert('Cannot delete the default profile. Set another profile as default first.'); return; }
+    if (!confirm('Delete profile "' + current.tts_profile_label + '"?\n\nExisting audio files rendered under this profile remain accessible by their tts_audio_key but the profile dropdown will no longer list them.')) return;
+    var s = $('profile-status'); if (s) { s.textContent = 'Deleting…'; s.className = 'status-msg'; }
+    try {
+        await api('/admin-tts-config.php', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'delete_profile', tts_profile_key: ACTIVE_PROFILE_KEY }),
+        });
+        // Switch back to the default profile after deletion.
+        var def = PROFILES.find(function (p) { return p.tts_profile_default_flag; });
+        ACTIVE_PROFILE_KEY = def ? def.tts_profile_key : 0;
+        if (window.sessionState && sessionState.save) sessionState.save('profileKey_' + TTS_KEY, ACTIVE_PROFILE_KEY);
+        await reloadProfilesAndRows();
+        if (s) { s.textContent = 'Deleted.'; s.className = 'status-msg success'; }
+    } catch (e) {
+        if (s) { s.textContent = 'Error: ' + e.message; s.className = 'status-msg error'; }
+    }
+}
+
+async function reloadProfilesAndRows() {
+    var ov = await api('/admin-tts-config.php?action=overview&tts_key=' + TTS_KEY + '&profile_key=' + ACTIVE_PROFILE_KEY);
+    if (ov.current) {
+        STATE.categories = {};
+        (ov.current.categories || []).forEach(c => { STATE.categories[c.tts_category] = c; });
+        PROFILES = ov.current.profiles || [];
+        ACTIVE_PROFILE_KEY = ov.current.profile_key || ACTIVE_PROFILE_KEY;
+    }
+    populateProfileSelect();
     await renderCategoryRows();
 }
 
@@ -1240,13 +1363,18 @@ async function renderCategoryRows() {
         var saved = STATE.categories[cat.code] || {};
         var row = document.createElement('div');
         row.className = 'voice-row';
-        // 6 columns now: label | provider | voice | style | prosody | ▶
-        row.style.gridTemplateColumns = '240px 130px 1fr 160px auto auto';
+        // 7 columns now: read | label | provider | voice | style | prosody | ▶
+        row.style.gridTemplateColumns = '32px 240px 130px 1fr 160px auto auto';
         var isParent = !cat.parent;
         if (isParent) row.style.cssText += 'border-top:1px solid #ccd;margin-top:8px;padding-top:6px;';
         var labelStyle = isParent ? 'font-weight:700;color:#31345A;' : 'padding-left:22px;color:#555;';
         var voicePlaceholder = isParent ? '' : ' (inherits ' + cat.parent + ' if unset)';
+        // Default to checked (read) when there's no row yet or the field
+        // is missing on an older row. Explicit false → unchecked → skip.
+        var readChecked = (saved.tts_category_voice_read_flag === false || saved.tts_category_voice_read_flag === 'f' || saved.tts_category_voice_read_flag === 0)
+            ? '' : 'checked';
         row.innerHTML =
+            '<input type="checkbox" data-cat="' + cat.code + '" data-field="read" ' + readChecked + ' title="Read this content category aloud. Uncheck to skip — text in this category will be omitted from synthesis entirely (no audio AND no pause).">' +
             '<label style="' + labelStyle + '">' + escapeHtml(cat.label) + '</label>' +
             '<select data-cat="' + cat.code + '" data-field="provider" title="TTS provider — filters the Voice dropdown to its active voices."></select>' +
             '<select data-cat="' + cat.code + '" data-field="voice" title="' + escapeHtml('Voice for ' + cat.code + voicePlaceholder) + '"></select>' +
@@ -1331,12 +1459,14 @@ async function renderCategoryRows() {
         row.querySelector('button').addEventListener('click', function () {
             saveAndListenCategory(cat.code, row);
         });
-        // Autosave on voice / style / prosody changes. Provider isn't in this
-        // list — it's just a UI filter that doesn't get persisted (the voice's
-        // own row tells the build worker which engine to use).
+        // Autosave on voice / style / prosody / read-toggle changes. Provider
+        // isn't in this list — it's just a UI filter that doesn't get persisted
+        // (the voice's own row tells the build worker which engine to use).
+        // For the read checkbox, `change` is enough — the keystroke-debounced
+        // `input` handler is intended for numeric prosody fields only.
         row.querySelectorAll('select[data-field="voice"], select[data-field="style"], input[data-field]').forEach(function (el) {
             el.addEventListener('change', function () { saveCategoryOnly(cat.code, row); });
-            if (el.tagName === 'INPUT') {
+            if (el.tagName === 'INPUT' && el.type !== 'checkbox') {
                 el.addEventListener('input', function () {
                     scheduleAutoSave(el, function () { return saveCategoryOnly(cat.code, row); }, 600);
                 });
@@ -1381,33 +1511,47 @@ async function saveSystem() {
 
 function readCategoryRow(rowEl) {
     var styleSel = rowEl.querySelector('[data-field=style]');
+    var readChk  = rowEl.querySelector('[data-field=read]');
     return {
         voice:  rowEl.querySelector('[data-field=voice]').value,
         style:  styleSel ? styleSel.value : '',
         rate:   parseInt(rowEl.querySelector('[data-field=rate]').value, 10) || 0,
         pitch:  parseFloat(rowEl.querySelector('[data-field=pitch]').value) || 0,
         volume: parseInt(rowEl.querySelector('[data-field=volume]').value, 10) || 100,
+        read:   readChk ? !!readChk.checked : true,
     };
 }
 
 async function saveCategoryOnly(catCode, rowEl) {
     var c = readCategoryRow(rowEl);
+    // When the user only wants to mark a category as "don't read" but hasn't
+    // picked a voice, voice_code can be blank. The DB column is NOT NULL, so
+    // the row would be DELETEd by save_category_voice (clearing the flag we
+    // just set). Fall back to 'en-US-BrianMultilingualNeural' (the same
+    // hardcoded fallback buildVoiceBlock uses) so the row persists with the
+    // skip flag. The voice code is never actually used because the read_flag
+    // gates the segment before it reaches synth.
+    var voiceForSave = c.voice;
+    if (!voiceForSave && !c.read) voiceForSave = 'en-US-BrianMultilingualNeural';
     await api('/admin-tts-config.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             action: 'save_category_voice',
             tts_key: TTS_KEY,
+            profile_key: ACTIVE_PROFILE_KEY,
             tts_category: catCode,
-            voice_code: c.voice,
+            voice_code: voiceForSave,
             style: c.style || null,
             rate_pct: c.rate, pitch_st: c.pitch, volume: c.volume,
+            read_flag: c.read,
         }),
     });
     STATE.categories[catCode] = {
-        tts_category: catCode, tts_voice_code: c.voice,
+        tts_category: catCode, tts_voice_code: voiceForSave,
         tts_voice_style: c.style || null,
         tts_voice_rate_pct: c.rate, tts_voice_pitch_st: c.pitch, tts_voice_volume: c.volume,
+        tts_category_voice_read_flag: c.read,
     };
 }
 
@@ -1686,6 +1830,8 @@ document.addEventListener('keydown', function (e) {
 var VC_STATE = {
     voices: [],
     sort: { col: 'language', dir: 'asc' },
+    // Catalog row currently selected for inline editing (tts_voice_key) or null.
+    selectedKey: null,
     // Cached from loadProviders() so the per-column Provider filter can
     // list every TTS provider regardless of which provider the "Check for
     // new voices" scope dropdown is currently pointing at. Without this
@@ -1700,6 +1846,23 @@ var VC_DEFAULT_TEST_TEXT = 'Yahowah commanded the children of Yisraʾel to keep 
 // endpoint, so this is safe to run any time without re-enabling
 // previously-deactivated voices. New rows arrive with active_flag=false
 // — admins explicitly opt them in from the catalog table.
+// Catalog scope switched (user picked a different TTS system in the
+// "Check for new voices" dropdown). Reset every row filter to "all" so
+// the user sees the full picture for the new scope instead of staring
+// at a 0-shown table because a previously-applied filter (e.g.
+// Provider=Inworld carried over from a different scope) has no matches
+// in the new system.
+function onCatalogScopeChange() {
+    ['vc-f-active','vc-f-provider','vc-f-name','vc-f-lang','vc-f-region','vc-f-gender','vc-f-type','vc-f-multi'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (el.tagName === 'SELECT') el.value = '';
+        else el.value = '';
+    });
+    vcUpdateAddCustomBtn();
+    loadVoiceCatalog();
+}
+
 // Returns the scope chosen in the vc-refresh-provider dropdown:
 //   ""  → all providers (no tts_key filter)
 //   "N" → just provider tts_key=N
@@ -1723,6 +1886,7 @@ function populateRefreshProviderDropdown() {
     sel.innerHTML = html;
     sel.value = prev;
     if (sel.selectedIndex < 0) sel.value = 'all';
+    if (typeof vcUpdateAddCustomBtn === 'function') vcUpdateAddCustomBtn();
 }
 
 async function refreshVoiceCatalog() {
@@ -1766,7 +1930,9 @@ async function loadProviders() {
     var tbody = document.getElementById('providers-tbody');
     if (!tbody) return;
     try {
-        var r = await api('/admin-tts-config.php?action=list_providers');
+        // include_inactive=1 so providers switched off via the toggle below
+        // still render here (otherwise you couldn't flip one back on).
+        var r = await api('/admin-tts-config.php?action=list_providers&include_inactive=1');
         var providers = r.providers || [];
         // Cache for the per-column Provider filter so it can render
         // every TTS provider, not just the ones currently in VC_STATE.voices.
@@ -1774,19 +1940,35 @@ async function loadProviders() {
         // Refresh the per-column filter now in case voices loaded before
         // providers did. The filter populator unions both sources.
         if (typeof populateVoiceFilterOptions === 'function') populateVoiceFilterOptions();
+        // Provider custom-capability just (re)loaded — refresh the Add Custom
+        // Voice button's enabled state.
+        if (typeof vcUpdateAddCustomBtn === 'function') vcUpdateAddCustomBtn();
         if (!providers.length) {
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#888;padding:12px;">No TTS providers with voices yet — populate the catalog below first.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#888;padding:12px;">No TTS providers with voices yet — populate the catalog below first.</td></tr>';
             return;
         }
         tbody.innerHTML = providers.map(function (p) {
             var pk = p.provider_key;
             var phon = (p.provider_phonetic_type || 'sub') === 'ipa' ? 'ipa' : 'sub';
             var grp  = 'prov-phon-' + pk;
-            return '<tr data-provider-key="' + pk + '">' +
-                '<td style="padding:6px 6px;">' + escapeHtml(p.provider_label || '') +
+            var active = (p.provider_active_flag !== false && p.provider_active_flag !== 'f' && p.provider_active_flag !== 0);
+            var custom = (p.provider_custom_voice_flag === true || p.provider_custom_voice_flag === 't' || p.provider_custom_voice_flag === 1);
+            return '<tr data-provider-key="' + pk + '"' + (active ? '' : ' style="opacity:0.5;"') + '>' +
+                '<td style="padding:6px 6px;">' +
+                    '<input type="checkbox" class="prov-active-cb"' + (active ? ' checked' : '') +
+                        ' onchange="saveProviderActive(' + pk + ', this.checked, this)"' +
+                        ' title="Active — uncheck to hide this provider from the voice pickers and synth pipeline"' +
+                        ' style="vertical-align:middle;margin-right:8px;cursor:pointer;"> ' +
+                    escapeHtml(p.provider_label || '') +
                     '<span style="color:#888;font-size:0.78rem;margin-left:6px;">' + escapeHtml(p.provider_main || '') + '</span>' +
                 '</td>' +
                 '<td style="text-align:center;color:#666;font-variant-numeric:tabular-nums;">' + (p.voice_count || 0) + '</td>' +
+                '<td style="text-align:center;">' +
+                    '<input type="checkbox"' + (custom ? ' checked' : '') +
+                        ' onchange="saveProviderCustomVoice(' + pk + ', this.checked, this)"' +
+                        ' title="Custom voices can be trained / cloned for this provider"' +
+                        ' style="vertical-align:middle;cursor:pointer;">' +
+                '</td>' +
                 '<td style="text-align:center;">' +
                     '<label style="margin-right:14px;cursor:pointer;">' +
                         '<input type="radio" name="' + grp + '" value="sub"' + (phon === 'sub' ? ' checked' : '') + ' onchange="saveProviderPhoneticType(' + pk + ', \'sub\', this)" style="vertical-align:middle;"> Phonetic' +
@@ -1798,7 +1980,7 @@ async function loadProviders() {
             '</tr>';
         }).join('');
     } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#a00;padding:12px;">Failed to load providers: ' + escapeHtml(String(e && e.message || e)) + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#a00;padding:12px;">Failed to load providers: ' + escapeHtml(String(e && e.message || e)) + '</td></tr>';
     }
 }
 
@@ -1820,6 +2002,381 @@ async function saveProviderPhoneticType(providerKey, value, radioEl) {
         // Roll the radio back on failure so the UI matches server state.
         if (radioEl) radioEl.checked = false;
     }
+}
+
+// Active/Inactive toggle for a provider. Autosaves on change; dims the row
+// when inactive. Rolls the checkbox back if the save fails.
+async function saveProviderActive(providerKey, isActive, cbEl) {
+    var s = document.getElementById('providers-status');
+    if (s) { s.textContent = 'Saving…'; s.className = 'status-msg'; }
+    var tr = cbEl && cbEl.closest ? cbEl.closest('tr') : null;
+    if (tr) tr.style.opacity = isActive ? '' : '0.5';
+    try {
+        await api('/admin-tts-config.php', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+                action: 'save_provider',
+                provider_key: providerKey,
+                provider_active_flag: !!isActive,
+            }),
+        });
+        if (s) { s.textContent = 'Saved — provider ' + (isActive ? 'active' : 'inactive'); s.className = 'status-msg success'; }
+    } catch (e) {
+        if (s) { s.textContent = 'Failed to save: ' + (e && e.message || e); s.className = 'status-msg error'; }
+        // Roll the checkbox + row state back so the UI matches server state.
+        if (cbEl) cbEl.checked = !isActive;
+        if (tr) tr.style.opacity = !isActive ? '' : '0.5';
+    }
+}
+
+// Toggle whether custom voices can be trained/cloned for a provider.
+// Confirms first (this gates the Add Custom Voice flow), then autosaves;
+// rolls the checkbox back on cancel or on save failure.
+async function saveProviderCustomVoice(providerKey, canCustom, cbEl) {
+    var s = document.getElementById('providers-status');
+    if (!window.confirm('Mark this provider as ' + (canCustom ? 'able' : 'unable') +
+            ' to have custom voices trained through this interface?\n\n' +
+            'This controls whether "Add Custom Voice" is available for it in the Voice catalog.')) {
+        // Cancelled — restore the checkbox to its prior state.
+        if (cbEl) cbEl.checked = !canCustom;
+        return;
+    }
+    if (s) { s.textContent = 'Saving…'; s.className = 'status-msg'; }
+    try {
+        await api('/admin-tts-config.php', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+                action: 'save_provider',
+                provider_key: providerKey,
+                provider_custom_voice_flag: !!canCustom,
+            }),
+        });
+        if (s) { s.textContent = 'Saved — custom voices ' + (canCustom ? 'enabled' : 'disabled'); s.className = 'status-msg success'; }
+    } catch (e) {
+        if (s) { s.textContent = 'Failed to save: ' + (e && e.message || e); s.className = 'status-msg error'; }
+        // Roll the checkbox back so the UI matches server state.
+        if (cbEl) cbEl.checked = !canCustom;
+    }
+}
+
+// ── Custom-voice helpers + Add Custom Voice gating ──────────────────────
+// A voice is "custom" when it was created through this interface (the
+// tts_voice_custom_flag set by admin-tts-customize.php). PDO may hand the
+// boolean back as a real bool, 't'/'f', or 1/0 — accept them all.
+function vcIsCustom(v) {
+    var f = v && v.tts_voice_custom_flag;
+    return f === true || f === 't' || f === 1 || f === '1';
+}
+
+// Value the inline Multi <select> preselects — the effective yes/no.
+function vcMultiSelectValue(v) { return vcIsMulti(v) ? 'yes' : 'no'; }
+
+// Effective multilingual flag: the manual override (tts_voice_multi_flag) wins
+// when set; otherwise fall back to the derived value (has secondary locales).
+function vcIsMulti(v) {
+    var f = v && v.tts_voice_multi_flag;
+    if (f === true  || f === 't' || f === 1 || f === '1') return true;
+    if (f === false || f === 'f' || f === 0 || f === '0') return false;
+    return Array.isArray(v.tts_voice_secondary_locales) && v.tts_voice_secondary_locales.length > 0;
+}
+
+// ── Inline row editing (select a catalog row → edit Style/Lang/Region/Gender/Multi) ──
+function vcToggleSelectRow(v) {
+    var prev = VC_STATE.selectedKey;
+    VC_STATE.selectedKey = (prev === v.tts_voice_key) ? null : v.tts_voice_key;
+    if (prev != null && prev !== v.tts_voice_key) vcRerenderRow(prev);
+    vcRerenderRow(v.tts_voice_key);
+    if (VC_STATE.selectedKey === v.tts_voice_key) {
+        var tr = document.querySelector('#voices-tbody tr[data-voice-key="' + v.tts_voice_key + '"]');
+        var f = tr && tr.querySelector('.vc-edit-lang');
+        if (f) f.focus();
+    }
+}
+
+function vcRerenderRow(key) {
+    var tr = document.querySelector('#voices-tbody tr[data-voice-key="' + key + '"]');
+    if (!tr) return;
+    var vv = null;
+    for (var i = 0; i < VC_STATE.voices.length; i++) {
+        if (String(VC_STATE.voices[i].tts_voice_key) === String(key)) { vv = VC_STATE.voices[i]; break; }
+    }
+    if (vv) tr.replaceWith(buildVoiceRow(vv));
+}
+
+// Persist one or more inline catalog fields for a voice (DB-only metadata).
+function saveVoiceFields(v, patch) {
+    var s = $('vc-status');
+    if (s) { s.textContent = 'Saving…'; s.className = 'status-msg'; }
+    return api('/admin-tts-voices.php', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ action: 'save_fields', tts_voice_key: v.tts_voice_key }, patch)),
+    }).then(function () {
+        if (s) { s.textContent = 'Saved "' + (v.tts_voice_label || v.tts_voice_code) + '"'; s.className = 'status-msg success'; }
+    }).catch(function (e) {
+        if (s) { s.textContent = 'Save failed: ' + (e && e.message || e); s.className = 'status-msg error'; }
+    });
+}
+
+// Engine codes (tts_code) of providers flagged custom-capable in the
+// Providers table. list_providers returns provider_custom_voice_flag +
+// provider_engine_code (provider_settings->>'engine'), cached in
+// VC_STATE.providers by loadProviders().
+function vcCustomCapableCodes() {
+    var set = {};
+    (VC_STATE.providers || []).forEach(function (p) {
+        var cap = (p.provider_custom_voice_flag === true || p.provider_custom_voice_flag === 't' || p.provider_custom_voice_flag === 1);
+        if (cap && p.provider_engine_code) set[p.provider_engine_code] = true;
+    });
+    return set;
+}
+
+// Map the catalog scope dropdown's current value (a tts_key, or 'all') to the
+// provider's tts_code via STATE.systems.
+function vcSelectedProviderCode() {
+    var sel = document.getElementById('vc-refresh-provider');
+    var v = sel ? sel.value : 'all';
+    if (v === 'all' || v === '') return '';
+    var sys = (STATE.systems || []).filter(function (s) { return String(s.tts_key) === String(v); })[0];
+    return sys ? sys.tts_code : '';
+}
+
+// Enable "Add Custom Voice" only when the selected provider is custom-capable.
+function vcUpdateAddCustomBtn() {
+    var btn = document.getElementById('vc-add-custom-btn');
+    if (!btn) return;
+    var code = vcSelectedProviderCode();
+    var capable = !!(code && vcCustomCapableCodes()[code]);
+    btn.disabled = !capable;
+    btn.style.opacity = capable ? '' : '0.5';
+    btn.style.cursor  = capable ? 'pointer' : 'not-allowed';
+    btn.title = capable
+        ? 'Create a new custom voice for ' + code
+        : 'Select a custom-capable provider above to add a custom voice (Chatterbox, CosyVoice 2, Qwen3)';
+}
+
+function openAddCustomVoice() {
+    var code = vcSelectedProviderCode();
+    if (!code || !vcCustomCapableCodes()[code]) return;
+    openCustomVoicePopover({ mode: 'add', engineCode: code });
+}
+
+// ── Unified Add / Edit Custom Voice popover ─────────────────────────────
+// Replaces the old Customize tab. Add mode (from the Add Custom Voice button)
+// creates a voice for the selected provider; edit mode (from a custom row's ✎)
+// edits metadata + reference clips of an existing one. One shared form.
+function openCustomVoicePopover(opts) {
+    opts = opts || {};
+    var mode = opts.mode === 'edit' ? 'edit' : 'add';
+    var v = opts.voice || null;
+    var engineCode = opts.engineCode || (v ? (v.tts_code || '') : '');
+    var meta = CUSTOMIZE_PROVIDERS[engineCode];
+    var noAudio = !!(meta && meta.noAudio);
+    var provLabel = (meta && meta.label) || engineCode;
+    var prefix = (meta && meta.codePrefix) || '';
+
+    var styles = (v && Array.isArray(v.tts_voice_styles) ? v.tts_voice_styles : [])
+        .filter(function (s) { return s && s !== 'general'; });
+
+    var guidance = meta
+        ? '<dl style="margin:0;font-size:0.8rem;line-height:1.4;color:#5b4a00;">'
+            + '<dt style="font-weight:700;">Data needed</dt><dd style="margin:0 0 6px;">' + meta.instructions.data + '</dd>'
+            + '<dt style="font-weight:700;">Workflow</dt><dd style="margin:0 0 6px;">' + meta.instructions.workflow + '</dd>'
+            + '<dt style="font-weight:700;">Time-to-voice</dt><dd style="margin:0;">' + meta.instructions.time + '</dd>'
+            + '</dl>'
+        : '<p style="font-style:italic;margin:0;font-size:0.8rem;color:#5b4a00;">No provider-specific guidance available.</p>';
+
+    var extraHtml = (meta && meta.extraFields || []).map(function (f) {
+        if (f.type === 'select') {
+            var optsH = (f.options || []).map(function (o) {
+                return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>';
+            }).join('');
+            return '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">' + escapeHtml(f.label) + '</label>'
+                 + '<select id="' + f.id + '" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">' + optsH + '</select>';
+        }
+        return '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">' + escapeHtml(f.label) + '</label>'
+             + '<input type="' + (f.type || 'text') + '" id="' + f.id + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">';
+    }).join('');
+
+    // Reference clips section: edit mode lists existing styles (each clip is a
+    // style) with remove buttons; both modes can add a clip (which auto-trains).
+    var clipsListHtml = '';
+    if (mode === 'edit') {
+        clipsListHtml = '<div style="margin-top:6px;font-size:0.82rem;color:#444;"><strong>Reference clips used to train this voice</strong>'
+            + (styles.length
+                ? '<ul style="margin:4px 0 0;padding-left:18px;">' + styles.map(function (s) {
+                    return '<li style="margin:1px 0;">' + escapeHtml(s)
+                        + ' <button type="button" class="cvp-del-style" data-style="' + escapeHtml(s) + '" style="font-size:0.72rem;border:1px solid #c0392b;background:#fff;color:#c0392b;border-radius:3px;cursor:pointer;padding:0 5px;margin-left:6px;">remove</button></li>';
+                  }).join('') + '</ul>'
+                : ' <span style="color:#888;">none yet</span>')
+            + '</div>';
+    }
+
+    var gender = (v && v.tts_voice_gender) || '';
+    var genderOpts = ['', 'Male', 'Female', 'Neutral'].map(function (g) {
+        return '<option value="' + g + '"' + (gender === g ? ' selected' : '') + '>' + (g || '— unspecified —') + '</option>';
+    }).join('');
+
+    var codeInitial = mode === 'edit' ? (v.tts_voice_code || '') : prefix;
+    var styleHint = mode === 'add'
+        ? 'first clip must be <code>default</code>'
+        : 'name for the clip you add below (e.g. <code>happy</code>, <code>stoic</code>)';
+    var styleInitial = mode === 'add' ? 'default' : '';
+    var audioReqNote = mode === 'add'
+        ? (noAudio ? '' : ' (required)')
+        : ' — adding one trains a new style on Save';
+
+    var title = (mode === 'add' ? 'Add Custom Voice — ' : 'Edit Custom Voice — ')
+              + escapeHtml(mode === 'add' ? provLabel : (v.tts_voice_label || v.tts_voice_code));
+
+    var body =
+        '<div style="display:flex;gap:16px;flex-wrap:wrap;">' +
+            '<div style="flex:1 1 320px;min-width:280px;font-size:0.86rem;">' +
+                '<label style="font-weight:600;display:block;margin:0 0 3px;font-size:0.82rem;">Voice code <span style="color:#888;font-weight:normal;">(slug' + (mode === 'edit' ? '; changing it renames the voice + its clip on the box' : '') + ')</span></label>' +
+                '<input id="cvp-code" type="text" value="' + escapeHtml(codeInitial) + '"' +
+                    ' placeholder="e.g. ' + escapeHtml(prefix) + 'craig" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">' +
+                '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Display name</label>' +
+                '<input id="cvp-name" type="text" value="' + escapeHtml((v && v.tts_voice_label) || '') + '" placeholder=\'e.g. "Craig — calm narrator"\' style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">' +
+                '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Gender</label>' +
+                '<select id="cvp-gender" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">' + genderOpts + '</select>' +
+                '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Description <span style="color:#888;font-weight:normal;">(optional)</span></label>' +
+                '<textarea id="cvp-desc" rows="2" placeholder="When to pick this voice over others" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;font-family:inherit;resize:vertical;">' + escapeHtml((v && v.tts_voice_description) || '') + '</textarea>' +
+                extraHtml +
+                (noAudio ? '' :
+                    '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Style <span style="color:#888;font-weight:normal;">(' + styleHint + ')</span></label>' +
+                    '<input id="cvp-style" type="text" value="' + escapeHtml(styleInitial) + '" placeholder="default" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">' +
+                    '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Reference audio' + audioReqNote + '</label>' +
+                    '<input id="cvp-audio" type="file" accept="audio/wav,audio/mp3,audio/x-wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg" style="font-size:0.82rem;width:100%;">' +
+                    '<audio id="cvp-preview" controls style="display:none;width:100%;margin-top:6px;"></audio>'
+                ) +
+                clipsListHtml +
+            '</div>' +
+            '<div style="flex:1 1 240px;min-width:220px;background:#fffbe6;border:1px solid #e4d27a;border-radius:4px;padding:10px 12px;">' +
+                '<div style="font-weight:700;color:#5b4a00;margin-bottom:6px;font-size:0.85rem;">Provider guidance — ' + escapeHtml(provLabel) + '</div>' +
+                guidance +
+            '</div>' +
+        '</div>' +
+        '<div style="margin-top:12px;display:flex;align-items:center;gap:10px;">' +
+            '<button type="button" class="cvp-save" style="padding:6px 16px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.9rem;">Save</button>' +
+            '<button type="button" class="cvp-cancel" style="padding:6px 14px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;font-size:0.9rem;">Cancel</button>' +
+            '<span class="cvp-status" style="font-size:0.82rem;color:#888;"></span>' +
+        '</div>';
+
+    // Overlay + centered panel.
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:10010;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;';
+    var panel = document.createElement('div');
+    panel.style.cssText = 'background:#fff;border-radius:8px;box-shadow:0 10px 40px rgba(0,0,0,0.3);padding:16px 18px;width:680px;max-width:100%;';
+    panel.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+        + '<h3 style="margin:0;font-size:1.02rem;">' + title + '</h3>'
+        + '<button type="button" class="cvp-x" title="Close" style="border:none;background:none;font-size:1.3rem;line-height:1;cursor:pointer;color:#888;">&times;</button>'
+        + '</div>' + body;
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    var statusEl = panel.querySelector('.cvp-status');
+    var close = function () { if (overlay.parentNode) document.body.removeChild(overlay); };
+    panel.querySelector('.cvp-cancel').addEventListener('click', close);
+    panel.querySelector('.cvp-x').addEventListener('click', close);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+
+    // Audio preview.
+    var audioInput = panel.querySelector('#cvp-audio');
+    if (audioInput) {
+        audioInput.addEventListener('change', function () {
+            var prev = panel.querySelector('#cvp-preview');
+            if (!prev) return;
+            if (audioInput.files && audioInput.files[0]) { prev.src = URL.createObjectURL(audioInput.files[0]); prev.style.display = ''; }
+            else prev.style.display = 'none';
+        });
+    }
+
+    // Remove-style buttons (edit mode).
+    panel.querySelectorAll('.cvp-del-style').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+            var style = btn.dataset.style;
+            if (!confirm('Remove style "' + style + '" from "' + v.tts_voice_code + '"? Its reference clip on the box will be deleted.')) return;
+            statusEl.textContent = 'Removing style…'; statusEl.style.color = '#888';
+            try {
+                var r = await fetch(API + '/admin-tts-voice-edit.php', {
+                    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'delete', code: v.tts_voice_code, style: style }),
+                });
+                var d = await r.json();
+                if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                window.location.reload();
+            } catch (e) { statusEl.textContent = 'Failed: ' + e.message; statusEl.style.color = '#c0392b'; }
+        });
+    });
+
+    panel.querySelector('.cvp-save').addEventListener('click', async function () {
+        var code   = (panel.querySelector('#cvp-code').value || '').trim();
+        var name   = (panel.querySelector('#cvp-name').value || '').trim();
+        var genderV= (panel.querySelector('#cvp-gender').value || '').trim();
+        var desc   = (panel.querySelector('#cvp-desc').value || '').trim();
+        var styleEl= panel.querySelector('#cvp-style');
+        var styleV = (styleEl && styleEl.value.trim() ? styleEl.value.trim() : (mode === 'add' ? 'default' : '')).toLowerCase();
+        var fileEl = panel.querySelector('#cvp-audio');
+        var file   = fileEl && fileEl.files ? fileEl.files[0] : null;
+        var qSpeaker = panel.querySelector('#cv-qwen-speaker');
+        var cvPrompt = panel.querySelector('#cv-cosy-prompt');
+
+        if (!code) { statusEl.textContent = 'Voice code is required.'; statusEl.style.color = '#c0392b'; return; }
+        if (!/^[A-Za-z0-9_-]+$/.test(code)) { statusEl.textContent = 'Code must be alphanumeric (dashes/underscores ok).'; statusEl.style.color = '#c0392b'; return; }
+        if (styleV && !/^[a-z0-9_-]+$/.test(styleV)) { statusEl.textContent = 'Style name must be alphanumeric.'; statusEl.style.color = '#c0392b'; return; }
+
+        var saveBtn = panel.querySelector('.cvp-save');
+        saveBtn.disabled = true;
+
+        try {
+            // Validate the create-with-clip / builtin-speaker preconditions.
+            if (mode === 'add' && !noAudio && !file) {
+                throw new Error('Choose a reference audio clip to train the voice.');
+            }
+            if (noAudio && mode === 'add' && qSpeaker && !qSpeaker.value) {
+                throw new Error('Pick a base speaker.');
+            }
+
+            if (mode === 'edit') {
+                // Persist metadata first; if the code field changed, this also
+                // renames the voice (engine clip + voices.json) via new_code.
+                var origCode = v.tts_voice_code;
+                var renaming = code !== origCode;
+                statusEl.textContent = renaming ? 'Renaming + saving…' : 'Saving…'; statusEl.style.color = '#888';
+                var er = await fetch(API + '/admin-tts-voice-edit.php', {
+                    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'edit', code: origCode, new_code: code, label: name, description: desc, gender: genderV }),
+                });
+                var ed = await er.json();
+                if (!ed.ok) throw new Error(ed.error || ('HTTP ' + er.status));
+            }
+
+            // Train a clip if needed (add = first/default clip; edit = new style clip).
+            if ((mode === 'add') || (mode === 'edit' && file)) {
+                if (mode === 'edit' && !styleV) { throw new Error('Enter a Style name for the new clip.'); }
+                statusEl.textContent = noAudio ? 'Registering…' : 'Training… this can take a moment'; statusEl.style.color = '#666';
+                var fd = new FormData();
+                fd.append('provider', engineCode);
+                fd.append('code', code);
+                fd.append('label', name);
+                fd.append('gender', genderV);
+                fd.append('description', desc);
+                fd.append('style_name', styleV || 'default');
+                if (file && !noAudio) fd.append('audio', file, file.name);
+                if (qSpeaker && qSpeaker.value) fd.append('voice_id', qSpeaker.value);
+                if (cvPrompt && cvPrompt.value.trim()) fd.append('prompt_text', cvPrompt.value.trim());
+                var tr2 = await fetch(API + '/admin-tts-customize.php', { method: 'POST', credentials: 'include', body: fd });
+                var ct = tr2.headers.get('content-type') || '';
+                var td = ct.indexOf('json') >= 0 ? await tr2.json() : { error: await tr2.text() };
+                if (!tr2.ok || !td.ok) throw new Error(td.error || ('HTTP ' + tr2.status));
+            }
+
+            statusEl.textContent = '✓ Saved. Reloading…'; statusEl.style.color = '#2e7d32';
+            setTimeout(function () { window.location.reload(); }, 700);
+        } catch (e) {
+            statusEl.textContent = 'Failed: ' + e.message; statusEl.style.color = '#c0392b';
+            saveBtn.disabled = false;
+        }
+    });
 }
 
 async function loadVoiceCatalog() {
@@ -1932,10 +2489,12 @@ function filterVoices() {
     var fRegion   = $('vc-f-region').value;
     var fGender   = $('vc-f-gender').value;
     var fType     = $('vc-f-type').value;
+    var fCustom   = ($('vc-f-custom') && $('vc-f-custom').value) || '';
     var fMulti    = $('vc-f-multi').value;
 
     var rows = VC_STATE.voices.filter(function (v) {
         if (fActive !== '' && (v.tts_voice_active_flag ? 1 : 0) !== Number(fActive)) return false;
+        if (fCustom !== '' && (vcIsCustom(v) ? 1 : 0) !== Number(fCustom)) return false;
         // Match the same field populateVoiceFilterOptions() inserted into
         // the dropdown so the user's selection actually filters something.
         if (fProvider && (v.provider_main || v.tts_name || v.tts_code || '') !== fProvider) return false;
@@ -1946,8 +2505,7 @@ function filterVoices() {
         if (fGender && v.tts_voice_gender   !== fGender) return false;
         if (fType   && v.tts_voice_type     !== fType)   return false;
         if (fMulti !== '') {
-            var isMulti = Array.isArray(v.tts_voice_secondary_locales) && v.tts_voice_secondary_locales.length > 0;
-            if ((isMulti ? 1 : 0) !== Number(fMulti)) return false;
+            if ((vcIsMulti(v) ? 1 : 0) !== Number(fMulti)) return false;
         }
         return true;
     });
@@ -1960,6 +2518,7 @@ function filterVoices() {
         region:     function (v) { return (v.tts_voice_region || '') + '|' + (v.tts_voice_language || ''); },
         gender:     function (v) { return v.tts_voice_gender || ''; },
         type:       function (v) { return v.tts_voice_type || ''; },
+        custom:     function (v) { return vcIsCustom(v) ? 1 : 0; },
         downloaded: function (v) { return v.tts_voice_download_dtime || ''; },
     };
     var keyFn = keyFns[col] || keyFns.language;
@@ -1986,9 +2545,12 @@ function filterVoices() {
 function buildVoiceRow(v) {
     var tr = document.createElement('tr');
     tr.dataset.voiceKey = v.tts_voice_key;
-    var isMulti = Array.isArray(v.tts_voice_secondary_locales) && v.tts_voice_secondary_locales.length > 0;
+    var isMulti = vcIsMulti(v);
     var active = !!v.tts_voice_active_flag;
+    var isCustom = vcIsCustom(v);
+    var isSelected = VC_STATE.selectedKey === v.tts_voice_key;
     tr.classList.toggle('inactive', !active);
+    if (isSelected) { tr.style.background = '#eaf1ff'; tr.style.outline = '2px solid #b9cdfb'; }
 
     // Build the style cell. Only render a dropdown when the voice
     // actually advertises styles other than "general" (which is the
@@ -1996,7 +2558,12 @@ function buildVoiceRow(v) {
     // cell so the row stays visually clean.
     var styles = (Array.isArray(v.tts_voice_styles) ? v.tts_voice_styles : []).filter(function (s) { return s && s !== 'general'; });
     var styleCell;
-    if (styles.length) {
+    if (isSelected) {
+        // Selected → freeform, comma-separated style-name editor.
+        styleCell = '<td style="padding:4px 2px;">'
+                  + '<input type="text" class="vc-edit-style" value="' + escapeHtml(styles.join(', ')) + '" placeholder="styles, comma-sep" title="Comma-separated style names" style="width:100%;box-sizing:border-box;padding:2px 4px;border:1px solid #7f9fd6;border-radius:3px;font-size:0.76rem;">'
+                  + '</td>';
+    } else if (styles.length) {
         var opts = '<option value="">(default)</option>'
                  + styles.map(function (s) { return '<option value="' + escapeHtml(s) + '">' + escapeHtml(s) + '</option>'; }).join('');
         styleCell = '<td style="text-align:center;padding:4px 2px;">'
@@ -2014,37 +2581,133 @@ function buildVoiceRow(v) {
         // Provider (from yy_tts joined in admin-tts-voices.php). Sits in front
         // of the Voice column so cross-provider catalogs are scannable.
         '<td style="padding:4px 6px;color:#444;font-size:0.82rem;">' + escapeHtml(providerLabel) + '</td>' +
-        // Just the label — no voice-code mouseover/subtitle.
-        '<td style="padding:4px 6px;">' + escapeHtml(v.tts_voice_label || v.tts_voice_code || '') + '</td>' +
+        // Voice label + short Note input inline next to it. The Note is a
+        // free-text identifier the admin can use to disambiguate similarly-
+        // named voices ("v3", "post-clean") without renaming the upstream
+        // voice. Saves on blur via the save_note endpoint.
+        '<td style="padding:4px 6px;">'
+            + '<div style="display:flex;align-items:center;gap:6px;">'
+            +   '<span class="vc-voice-label" style="white-space:nowrap;">' + escapeHtml(v.tts_voice_label || v.tts_voice_code || '') + '</span>'
+            +   '<input type="text" class="vc-note-inline" value="' + escapeHtml(v.tts_voice_note || '') + '" placeholder="note…" maxlength="60" title="Short identifier shown next to this voice. Use sparingly — does not rename the voice upstream." style="flex:1;min-width:60px;padding:2px 6px;border:1px solid #e0e0e0;border-radius:3px;font-size:0.78rem;color:#555;background:#fafafa;">'
+            + '</div>'
+        + '</td>' +
         styleCell +
-        '<td style="text-align:center;padding:4px 2px;">' + escapeHtml(v.tts_voice_language || '') + '</td>' +
-        '<td style="text-align:center;padding:4px 2px;">' + escapeHtml(v.tts_voice_region   || '') + '</td>' +
-        '<td style="text-align:center;padding:4px 2px;">' + escapeHtml(v.tts_voice_gender   || '').charAt(0) + '</td>' +
+        (isSelected
+            ? '<td style="padding:4px 2px;"><input type="text" class="vc-edit-lang" value="' + escapeHtml(v.tts_voice_language || '') + '" style="width:100%;box-sizing:border-box;padding:2px 3px;border:1px solid #7f9fd6;border-radius:3px;font-size:0.76rem;text-align:center;"></td>'
+            : '<td style="text-align:center;padding:4px 2px;">' + escapeHtml(v.tts_voice_language || '') + '</td>') +
+        (isSelected
+            ? '<td style="padding:4px 2px;"><input type="text" class="vc-edit-region" value="' + escapeHtml(v.tts_voice_region || '') + '" style="width:100%;box-sizing:border-box;padding:2px 3px;border:1px solid #7f9fd6;border-radius:3px;font-size:0.76rem;text-align:center;"></td>'
+            : '<td style="text-align:center;padding:4px 2px;">' + escapeHtml(v.tts_voice_region || '') + '</td>') +
+        (isSelected
+            ? '<td style="padding:4px 2px;"><select class="vc-edit-gender" style="width:100%;box-sizing:border-box;padding:2px;border:1px solid #7f9fd6;border-radius:3px;font-size:0.74rem;background:#fff;">'
+                + ['', 'Male', 'Female', 'Neutral'].map(function (g) { return '<option value="' + g + '"' + ((v.tts_voice_gender || '') === g ? ' selected' : '') + '>' + (g || '—') + '</option>'; }).join('')
+                + '</select></td>'
+            : '<td style="text-align:center;padding:4px 2px;">' + escapeHtml(v.tts_voice_gender || '').charAt(0) + '</td>') +
         '<td style="text-align:center;padding:4px 2px;">' + escapeHtml(v.tts_voice_type     || '') + '</td>' +
-        '<td style="text-align:center;padding:4px 2px;color:' + (isMulti ? '#2e7d32' : '#aaa') + ';">' + (isMulti ? '✓' : '') + '</td>' +
+        (isSelected
+            ? '<td style="padding:4px 2px;"><select class="vc-edit-multi" style="width:100%;box-sizing:border-box;padding:2px;border:1px solid #7f9fd6;border-radius:3px;font-size:0.74rem;background:#fff;">'
+                + [['', '—'], ['yes', 'yes'], ['no', 'no']].map(function (o) { return '<option value="' + o[0] + '"' + (vcMultiSelectValue(v) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('')
+                + '</select></td>'
+            : '<td style="text-align:center;padding:4px 2px;color:' + (isMulti ? '#2e7d32' : '#aaa') + ';">' + (isMulti ? '✓' : '') + '</td>') +
         '<td style="text-align:center;padding:4px 2px;font-variant-numeric:tabular-nums;color:#666;font-size:0.78rem;" title="' + escapeHtml(vcFmtDtFull(v.tts_voice_download_dtime)) + '">' + (vcFmtDt(v.tts_voice_download_dtime) || '—') + '</td>' +
         // Pen-icon note button — mirrors the Pronunciations table's
         // .t-note-btn so the look + interaction model is consistent.
         '<td style="text-align:center;padding:4px 2px;width:30px;">'
-            + '<input type="hidden" class="vc-note-hidden" value="' + escapeHtml(v.tts_voice_note || '') + '">'
-            + '<button type="button" class="t-note-btn vc-note-btn' + ((v.tts_voice_note || '').trim() ? ' has-note' : '') + '" title="' + escapeHtml((v.tts_voice_note || '').trim() || 'Add a note') + '">'
+            + '<input type="hidden" class="vc-desc-hidden" value="' + escapeHtml(v.tts_voice_description || '') + '">'
+            + '<button type="button" class="t-note-btn vc-desc-btn' + ((v.tts_voice_description || '').trim() ? ' has-note' : '') + '" title="' + escapeHtml((v.tts_voice_description || '').trim() || 'Add a description') + '">'
             + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>'
             + '</button>'
         + '</td>' +
+        // Custom column (right of Description). For custom voices this holds the
+        // edit (✎) button — its presence marks the voice as custom; non-custom
+        // rows leave it empty. Sortable/filterable via the tts_voice_custom_flag.
+        '<td style="text-align:center;padding:4px 2px;">' +
+            (isCustom
+                ? '<button type="button" class="btn-sm btn-sec vc-edit" title="Edit custom voice (code / metadata / reference clips)" style="padding:1px 6px;color:#2e7d32;">✎</button>'
+                : '') +
+        '</td>' +
         '<td style="text-align:center;padding:4px 2px;white-space:nowrap;">' +
             '<button type="button" class="btn-sm btn-sec vc-listen" title="Play preview text with this voice">▶</button>' +
-            (v.tts_voice_type === 'Custom'
-                ? ' <button type="button" class="btn-sm btn-sec vc-edit" title="Edit voice (label / description / language / gender)" style="padding:1px 6px;">✎</button>'
-                + ' <button type="button" class="btn-sm btn-sec vc-delete" title="Delete this voice (or just this style)" style="padding:1px 6px;color:#c0392b;">🗑</button>'
+            (isCustom
+                ? ' <button type="button" class="btn-sm btn-sec vc-delete" title="Delete this voice (or just this style)" style="padding:1px 6px;color:#c0392b;">🗑</button>'
                 : '') +
         '</td>';
     tr.querySelector('.vc-active').addEventListener('change', function () { saveVoiceActive(tr, v); });
     tr.querySelector('.vc-listen').addEventListener('click',  function () { playVoiceTest(tr, v); });
-    tr.querySelector('.vc-note-btn').addEventListener('click', function () { openVoiceNotePopover(tr, v); });
+    tr.querySelector('.vc-desc-btn').addEventListener('click', function () { openVoiceDescriptionPopover(tr, v); });
+    // Save the inline short note on blur (and on Enter).
+    var noteInp = tr.querySelector('.vc-note-inline');
+    if (noteInp) {
+        var saveInlineNote = function () {
+            var val = noteInp.value;
+            if ((v.tts_voice_note || '') === val) return;
+            v.tts_voice_note = val;
+            api('/admin-tts-voices.php', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'save_note', tts_voice_key: v.tts_voice_key, note: val }),
+            }).catch(function (e) { console.error('save_note failed', e); });
+        };
+        noteInp.addEventListener('blur', saveInlineNote);
+        noteInp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); noteInp.blur(); } });
+    }
     var editBtn   = tr.querySelector('.vc-edit');
     var deleteBtn = tr.querySelector('.vc-delete');
-    if (editBtn)   editBtn.addEventListener('click',   function () { openVoiceEditPopover(tr, v); });
+    if (editBtn)   editBtn.addEventListener('click',   function () { openCustomVoicePopover({ mode: 'edit', voice: v, row: tr }); });
     if (deleteBtn) deleteBtn.addEventListener('click', function () { deleteCustomVoice(tr, v); });
+
+    // Row selection → inline edit. Clicking a non-interactive part of the row
+    // toggles selection; the 5 metadata cells swap to editors (rendered above
+    // when isSelected). Interactive controls inside the row are excluded so
+    // they keep working without flipping selection.
+    tr.addEventListener('click', function (e) {
+        if (e.target.closest('input, select, button, textarea, a, label, audio')) return;
+        vcToggleSelectRow(v);
+    });
+
+    if (isSelected) {
+        var bindText = function (sel, field, vkey) {
+            var el = tr.querySelector(sel);
+            if (!el) return;
+            var commit = function () {
+                var val = el.value.trim();
+                if ((v[vkey] || '') === val) return;
+                v[vkey] = val;
+                var patch = {}; patch[field] = val;
+                saveVoiceFields(v, patch);
+            };
+            el.addEventListener('blur', commit);
+            el.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } });
+        };
+        bindText('.vc-edit-lang',   'language', 'tts_voice_language');
+        bindText('.vc-edit-region', 'region',   'tts_voice_region');
+
+        var styleEl = tr.querySelector('.vc-edit-style');
+        if (styleEl) {
+            var commitStyle = function () {
+                var arr = styleEl.value.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s; });
+                // De-dupe, preserve order.
+                var seen = {}, clean = [];
+                arr.forEach(function (s) { if (!seen[s]) { seen[s] = 1; clean.push(s); } });
+                v.tts_voice_styles = clean;
+                saveVoiceFields(v, { styles: clean });
+            };
+            styleEl.addEventListener('blur', commitStyle);
+            styleEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); styleEl.blur(); } });
+        }
+
+        var genderEl = tr.querySelector('.vc-edit-gender');
+        if (genderEl) genderEl.addEventListener('change', function () {
+            v.tts_voice_gender = genderEl.value;
+            saveVoiceFields(v, { gender: genderEl.value });
+        });
+
+        var multiEl = tr.querySelector('.vc-edit-multi');
+        if (multiEl) multiEl.addEventListener('change', function () {
+            var mv = multiEl.value; // '' = auto, 'yes', 'no'
+            v.tts_voice_multi_flag = mv === 'yes' ? true : mv === 'no' ? false : null;
+            saveVoiceFields(v, { multi_flag: mv === 'yes' ? true : mv === 'no' ? false : null });
+        });
+    }
     return tr;
 }
 
@@ -2062,7 +2725,7 @@ function openVoiceEditPopover(tr, v) {
             '<label style="font-weight:600;display:block;margin:0 0 3px;">Label</label>' +
             '<input id="ve-label" type="text" value="' + escapeHtml(v.tts_voice_label || '') + '" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;margin-bottom:6px;">' +
             '<label style="font-weight:600;display:block;margin:0 0 3px;">Description</label>' +
-            '<textarea id="ve-desc" rows="2" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;margin-bottom:6px;resize:vertical;font-family:inherit;">' + escapeHtml(v.tts_voice_note || '') + '</textarea>' +
+            '<textarea id="ve-desc" rows="2" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;margin-bottom:6px;resize:vertical;font-family:inherit;">' + escapeHtml(v.tts_voice_description || '') + '</textarea>' +
             '<div style="display:flex;gap:8px;">' +
                 '<div style="flex:1;"><label style="font-weight:600;display:block;margin:0 0 3px;">Language</label>' +
                     '<input id="ve-lang" type="text" value="' + escapeHtml(v.tts_voice_language || '') + '" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;"></div>' +
@@ -2152,39 +2815,37 @@ async function deleteCustomVoice(tr, v) {
     }
 }
 
-// Singleton popover for voice notes. Mirrors getTuneNotePopover/openTuneNotePopover
-// from the Pronunciations tab — same look, same close-on-outside-click,
-// same debounced autosave on input.
-function getVoiceNotePopover() {
-    var pop = document.getElementById('vc-note-popover');
+// Singleton popover for the voice DESCRIPTION (the long pencil-icon
+// field). The short inline Note next to the voice name has its own
+// save-on-blur path on the row's <input class="vc-note-inline">.
+function getVoiceDescriptionPopover() {
+    var pop = document.getElementById('vc-desc-popover');
     if (pop) return pop;
     pop = document.createElement('div');
-    pop.id = 'vc-note-popover';
-    // Style parity with #tune-note-popover.
+    pop.id = 'vc-desc-popover';
     pop.style.cssText = 'display:none;position:fixed;background:#fff;border:1px solid #ccc;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.18);padding:8px;min-width:280px;max-width:360px;z-index:10005;';
-    pop.innerHTML = '<textarea placeholder="Note about this voice…" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;resize:vertical;min-height:60px;"></textarea>'
+    pop.innerHTML = '<textarea placeholder="Description of this voice…" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;resize:vertical;min-height:60px;"></textarea>'
         + '<div style="display:flex;justify-content:flex-end;margin-top:6px;">'
-        +   '<button type="button" onclick="closeVoiceNotePopover()" style="background:#fff;border:1px solid #ccc;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.8rem;">Close</button>'
+        +   '<button type="button" onclick="closeVoiceDescriptionPopover()" style="background:#fff;border:1px solid #ccc;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:0.8rem;">Close</button>'
         + '</div>';
     document.body.appendChild(pop);
     document.addEventListener('click', function (e) {
-        var p = document.getElementById('vc-note-popover');
+        var p = document.getElementById('vc-desc-popover');
         if (!p || p.style.display === 'none') return;
         if (p.contains(e.target)) return;
-        if (e.target.closest && e.target.closest('.vc-note-btn')) return;
-        closeVoiceNotePopover();
+        if (e.target.closest && e.target.closest('.vc-desc-btn')) return;
+        closeVoiceDescriptionPopover();
     });
     return pop;
 }
 
-function openVoiceNotePopover(tr, v) {
-    var pop    = getVoiceNotePopover();
-    var btn    = tr.querySelector('.vc-note-btn');
-    var hidden = tr.querySelector('.vc-note-hidden');
+function openVoiceDescriptionPopover(tr, v) {
+    var pop    = getVoiceDescriptionPopover();
+    var btn    = tr.querySelector('.vc-desc-btn');
+    var hidden = tr.querySelector('.vc-desc-hidden');
     var ta     = pop.querySelector('textarea');
     ta.value   = hidden.value;
     pop.dataset.voiceKey = v.tts_voice_key;
-    // Anchor under the pen icon. Clamp into the viewport horizontally.
     var r = btn.getBoundingClientRect();
     pop.style.display = 'block';
     var top  = r.bottom + 6;
@@ -2194,31 +2855,30 @@ function openVoiceNotePopover(tr, v) {
     ta.oninput = function () {
         hidden.value = ta.value;
         btn.classList.toggle('has-note', !!ta.value.trim());
-        btn.title = ta.value.trim() || 'Add a note';
-        v.tts_voice_note = ta.value;
-        scheduleAutoSave(hidden, function () { return saveVoiceNote(v); }, 600);
+        btn.title = ta.value.trim() || 'Add a description';
+        v.tts_voice_description = ta.value;
+        scheduleAutoSave(hidden, function () { return saveVoiceDescription(v); }, 600);
     };
     setTimeout(function () { ta.focus(); }, 0);
 }
 
-function closeVoiceNotePopover() {
-    var pop = document.getElementById('vc-note-popover');
+function closeVoiceDescriptionPopover() {
+    var pop = document.getElementById('vc-desc-popover');
     if (!pop) return;
-    // Flush any pending autosave before hiding so a click-away commits.
     var ta = pop.querySelector('textarea');
     if (ta) flushAutoSave(ta, null);
     pop.style.display = 'none';
 }
 
-async function saveVoiceNote(v) {
+async function saveVoiceDescription(v) {
     try {
         await api('/admin-tts-voices.php', {
             method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ action:'save_note', tts_voice_key: v.tts_voice_key, note: v.tts_voice_note || '' }),
+            body: JSON.stringify({ action:'save_description', tts_voice_key: v.tts_voice_key, description: v.tts_voice_description || '' }),
         });
-        var s = $('vc-status'); if (s) { s.textContent = 'Saved note on "' + (v.tts_voice_label || v.tts_voice_code) + '"'; s.className = 'status-msg success'; }
+        var s = $('vc-status'); if (s) { s.textContent = 'Saved description on "' + (v.tts_voice_label || v.tts_voice_code) + '"'; s.className = 'status-msg success'; }
     } catch (e) {
-        var s = $('vc-status'); if (s) { s.textContent = 'Note save failed: ' + e.message; s.className = 'status-msg error'; }
+        var s = $('vc-status'); if (s) { s.textContent = 'Description save failed: ' + e.message; s.className = 'status-msg error'; }
     }
 }
 
@@ -2327,7 +2987,17 @@ async function playVoiceTest(tr, v) {
         });
         var audio = $('vc-audio');
         audio.src = URL.createObjectURL(blob);
-        audio.style.display = 'block';
+        // Show the voice name to the left of the player so it's clear which
+        // row is currently auditioning.
+        var nameEl = $('vc-audio-name');
+        if (nameEl) {
+            var nm = v.tts_voice_label || v.tts_voice_code || '';
+            var prov = v.provider_main || v.tts_name || v.tts_code || '';
+            nameEl.textContent = nm + (style ? ' · ' + style : '');
+            nameEl.title = nm + (prov ? ' (' + prov + ')' : '') + (style ? ' · ' + style : '');
+        }
+        var row = $('vc-audio-row');
+        if (row) row.style.display = 'flex';
         audio.play();
     } catch (e) {
         var s = $('vc-status'); if (s) { s.textContent = 'Play failed: ' + e.message; s.className = 'status-msg error'; }
@@ -3607,6 +4277,11 @@ var CHAPTERS = [];
 var ACTIVE_VOLUME = 0;
 var POLL_TIMER = null;
 
+// Books-tab profile filter — the chapter table's status/audio columns
+// reflect THIS profile. Independent of the Profiles-tab ACTIVE_PROFILE_KEY
+// so an admin can edit one profile while watching another's builds.
+var BOOKS_PROFILE_KEY = 0;
+
 async function loadVolumes() {
     if (VOLUMES.length) return;
     var r = await api('/admin-tts-books.php?action=volumes&tts_key=' + TTS_KEY);
@@ -3621,6 +4296,37 @@ async function loadVolumes() {
         sel.appendChild(o);
     });
     sel.addEventListener('change', () => loadChapters(parseInt(sel.value, 10) || 0));
+    // Populate the Books-tab profile picker. Defaults to the active
+    // profile from the Profiles tab so the user lands consistently.
+    populateBooksProfileSelect();
+}
+
+function populateBooksProfileSelect() {
+    var sel = $('books-profile-select');
+    if (!sel) return;
+    sel.innerHTML = '';
+    PROFILES.forEach(function (p) {
+        var o = document.createElement('option');
+        o.value = String(p.tts_profile_key);
+        o.textContent = p.tts_profile_label + (p.tts_profile_default_flag ? ' (default)' : '');
+        sel.appendChild(o);
+    });
+    if (!BOOKS_PROFILE_KEY) {
+        // Default to the saved value, then the Profiles-tab active, then the default profile.
+        var saved = (window.sessionState && sessionState.load) ? parseInt(sessionState.load('booksProfileKey_' + TTS_KEY, 0), 10) || 0 : 0;
+        BOOKS_PROFILE_KEY = saved
+            || ACTIVE_PROFILE_KEY
+            || (PROFILES.find(function (p) { return p.tts_profile_default_flag; }) || {}).tts_profile_key
+            || (PROFILES[0] || {}).tts_profile_key
+            || 0;
+    }
+    if (BOOKS_PROFILE_KEY) sel.value = String(BOOKS_PROFILE_KEY);
+}
+
+function onBooksProfileChange() {
+    BOOKS_PROFILE_KEY = parseInt($('books-profile-select').value, 10) || 0;
+    if (window.sessionState && sessionState.save) sessionState.save('booksProfileKey_' + TTS_KEY, BOOKS_PROFILE_KEY);
+    if (ACTIVE_VOLUME) loadChapters(ACTIVE_VOLUME);
 }
 
 var ACTIVE_VOLUME_CODE = '';   // URL slug like "YY-s02v03-Yada-Yahowah-Beyth-In-the-Family"
@@ -3667,7 +4373,39 @@ function _isPollLeader() {
 setInterval(_heartbeatTabs, 5000); // even non-leader tabs keep their heartbeat fresh
 _heartbeatTabs();
 
+// ── Concurrency guard for loadChapters ────────────────────────────────
+// Without this, two overlapping calls (e.g. the 5 s poll timer firing
+// while a Start-Build click also triggers one) both ran clearInterval +
+// await + setInterval. The FIRST call's freshly-set interval was then
+// overwritten by the SECOND call's, but the FIRST timer's underlying
+// browser handle stayed alive — orphaned with no JS reference. Each
+// orphan tick at +5 s could race the next loadChapters again, so the
+// orphan count DOUBLED every 5 s until the page was hammering itself at
+// 20+ req/s. Symptom: "Loading..." spinner never resolved; chapter rows
+// took forever to repaint after Start Build because the JS event loop
+// was saturated with parallel fetches.
+//
+// Strategy: SERIALIZE. If another loadChapters is in flight when we're
+// called, await it first, THEN run ours. No racing setInterval calls
+// (only one in-flight at a time), and no stale-result hazard either —
+// a Start-Build click that fires loadChapters after the API returns
+// will see the post-Start server state because its fetch runs AFTER
+// the prior (pre-Start) call resolves.
+var _LC_INFLIGHT = null;        // active loadChapters promise, or null
 async function loadChapters(volumeKey) {
+    // Wait for any in-flight call to finish before starting ours. Treat
+    // its failure as a non-event — we run fresh either way.
+    if (_LC_INFLIGHT) {
+        try { await _LC_INFLIGHT; } catch (e) {}
+    }
+    _LC_INFLIGHT = (async function () {
+        try { return await _loadChaptersImpl(volumeKey); }
+        finally { _LC_INFLIGHT = null; }
+    })();
+    return _LC_INFLIGHT;
+}
+
+async function _loadChaptersImpl(volumeKey) {
     if (POLL_TIMER) { clearInterval(POLL_TIMER); POLL_TIMER = null; }
     ACTIVE_VOLUME = volumeKey;
     var allBtn = $('build-all-btn');
@@ -3695,7 +4433,7 @@ async function loadChapters(volumeKey) {
     _PREV_VOLUME_KEY = volumeKey;
     var r;
     try {
-        r = await api('/admin-tts-books.php?action=chapters&volume_key=' + volumeKey + '&tts_key=' + TTS_KEY);
+        r = await api('/admin-tts-books.php?action=chapters&volume_key=' + volumeKey + '&tts_key=' + TTS_KEY + '&profile_key=' + (BOOKS_PROFILE_KEY || 0));
     } catch (e) {
         $('chapters-tbody').innerHTML =
             '<tr><td colspan="7" style="padding:18px;color:#b73d3d;text-align:center;font-size:0.9rem;line-height:1.5;">' +
@@ -3757,12 +4495,124 @@ async function loadChapters(volumeKey) {
     // the existing 'running' poll will catch the transition.
     if (CHAPTERS.some(c => c.tts_audio_status === 'running' || c.tts_audio_status === 'pending')) {
         // Only the leader tab polls. Non-leader tabs go silent.
-        if (_isPollLeader()) {
+        // Polling is the FALLBACK — when the SSE stream is open and
+        // healthy we never reach this branch (sseEnsureStream returns
+        // true on success). If SSE fails or the browser doesn't support
+        // EventSource, we fall back to the 5s HTTP poll so the page
+        // still works.
+        if (_isPollLeader() && !sseEnsureStream(volumeKey)) {
             POLL_TIMER = setInterval(function () {
-                if (_isPollLeader()) loadChapters(ACTIVE_VOLUME);
+                if (_isPollLeader() && !sseHealthy()) loadChapters(ACTIVE_VOLUME);
             }, 5000);
         }
     }
+}
+
+// ── SSE: live progress push from admin-tts-sse.php ────────────────────
+// One EventSource per (leader-)tab while a chapter is running/pending.
+// On 'tts_progress' events we patch the matching CHAPTERS row in memory
+// and call renderChapters + _paraSurgicalFromChapters — the same
+// surgical update path the HTTP poll uses, so the open paragraph panel
+// flips audio cells in place without losing playback state. On the
+// terminal 'reconnect' event (10-min server-side lifetime cap) we
+// reconnect; on errors we close + fall back to HTTP polling.
+var _SSE = null;            // active EventSource, or null
+var _SSE_VOLUME = null;     // volume_key the SSE stream is bound to
+var _SSE_LAST_EVENT_AT = 0; // wall-clock ms of last received event; powers sseHealthy()
+
+function sseHealthy() {
+    // SSE is healthy if the connection is open AND we've heard something
+    // within the last 60s (well under the 25s server-side ping cadence).
+    return !!_SSE
+        && _SSE.readyState === 1 /* OPEN */
+        && (Date.now() - _SSE_LAST_EVENT_AT) < 60000;
+}
+
+function sseClose() {
+    if (_SSE) { try { _SSE.close(); } catch (e) {} }
+    _SSE = null;
+    _SSE_VOLUME = null;
+    _SSE_LAST_EVENT_AT = 0;
+}
+
+// Open (or reuse) an EventSource for $volumeKey. Returns true when the
+// stream is already healthy for THIS volume so the caller can skip the
+// HTTP poll setup. A fresh connection always returns false on the FIRST
+// call (and HTTP poll runs alongside) until the connection opens; the
+// next poll-guard run will see sseHealthy() == true and stand down.
+function sseEnsureStream(volumeKey) {
+    if (typeof EventSource === 'undefined') return false;
+    if (!_isPollLeader()) {
+        // Non-leader tabs don't open their own stream — they piggyback
+        // via the localStorage signal the leader broadcasts after each
+        // event (see _SSE_LAST_EVENT_AT update below). Keeps DB+PHP
+        // connection count to ONE per concurrent user, not per tab.
+        sseClose();
+        return false;
+    }
+    if (_SSE && _SSE_VOLUME === volumeKey && sseHealthy()) return true;
+    sseClose();
+    _SSE_VOLUME = volumeKey;
+    try {
+        _SSE = new EventSource('/api/admin-tts-sse.php?volume_key=' + encodeURIComponent(volumeKey) + '&tts_key=' + encodeURIComponent(TTS_KEY));
+    } catch (e) { return false; }
+    _SSE_LAST_EVENT_AT = Date.now();
+    _SSE.addEventListener('snapshot', function (ev) {
+        _SSE_LAST_EVENT_AT = Date.now();
+        try {
+            var snap = JSON.parse(ev.data);
+            if (!snap || snap.volume_key !== ACTIVE_VOLUME) return;
+            CHAPTERS = snap.chapters || [];
+            if (snap.volume && snap.volume.volume_label) {
+                $('volume-summary').textContent = (snap.volume.volume_label || '') + ' — ' + CHAPTERS.length + ' chapters';
+            }
+            if (snap.volume && snap.volume.volume_code) ACTIVE_VOLUME_CODE = snap.volume.volume_code;
+            $('chapters-table').style.display = '';
+            renderChapters();
+            _paraSurgicalFromChapters();
+        } catch (e) { console.error('sse snapshot parse error', e); }
+    });
+    _SSE.addEventListener('tts_progress', function (ev) {
+        _SSE_LAST_EVENT_AT = Date.now();
+        try {
+            var p = JSON.parse(ev.data);
+            if (!p || !p.chapter_key) return;
+            // Patch the matching chapter row in CHAPTERS in place. Most
+            // tts_progress events only touch progress/message/status —
+            // patch those fields and let renderChapters + the surgical
+            // paragraph path do the visual update. When the audio_key
+            // changes (a restart created a new row) we'd ideally want
+            // the full row but the SSE snapshot already loaded it; a
+            // 'reconnect' event will refresh on the next stream cycle.
+            var c = (CHAPTERS || []).find(function (x) { return x.chapter_key === p.chapter_key; });
+            if (!c) return;
+            if (p.audio_key) c.tts_audio_key   = p.audio_key;
+            if (p.status   != null) c.tts_audio_status   = p.status;
+            if (p.progress != null) c.tts_audio_progress = p.progress;
+            if (p.message  != null) c.tts_audio_message  = p.message;
+            renderChapters();
+            _paraSurgicalFromChapters();
+            if (typeof updatePauseAllVisibility === 'function') updatePauseAllVisibility();
+        } catch (e) { console.error('sse tts_progress parse error', e); }
+    });
+    _SSE.addEventListener('ping', function () { _SSE_LAST_EVENT_AT = Date.now(); });
+    _SSE.addEventListener('reconnect', function () {
+        // Server-side lifetime cap reached. EventSource will auto-reconnect
+        // on the default retry timer; force it now so we don't gap.
+        _SSE_LAST_EVENT_AT = Date.now();
+        sseClose();
+        if (ACTIVE_VOLUME) sseEnsureStream(ACTIVE_VOLUME);
+    });
+    _SSE.onerror = function () {
+        // Browser will auto-retry by default. If the stream stays broken
+        // for >60s, sseHealthy() flips false and the HTTP-poll guard
+        // takes over until the stream recovers. Close on terminal CLOSED
+        // state so a fresh sseEnsureStream call can open a new one.
+        if (_SSE && _SSE.readyState === 2 /* CLOSED */) sseClose();
+    };
+    // First call always returns false so the HTTP poll runs once
+    // alongside — covers the brief gap before the snapshot arrives.
+    return false;
 }
 
 // Show the full error text for a failed TTS chapter build. Opens a
@@ -3963,6 +4813,31 @@ function renderChapters() {
             } else if (!newExpandRow && prevExpandRow) {
                 prevExpandRow.parentNode.removeChild(prevExpandRow);
                 prevExpandRow = null;
+            }
+            // audio_key changed (cancel+restart or new build replacing an
+            // old one): the expand row's data-ak, every part URL inside
+            // its <audio src=...>, and the baked-in audio_key in the
+            // "Refresh list" link all still reference the OLD job. Rewire
+            // _expandedAudioKeys to the new key and force a fresh full
+            // re-render of the panel via loadParagraphRows. Without this,
+            // _paraSurgicalFromChapters keeps no-op'ing because it can't
+            // find a chapter with the stale audio_key.
+            var newAk = c.tts_audio_key || 0;
+            if (prevExpandRow && newAk && +prevExpandRow.dataset.ak !== newAk) {
+                var oldAk = +prevExpandRow.dataset.ak;
+                if (oldAk && window._expandedAudioKeys) window._expandedAudioKeys.delete(oldAk);
+                prevExpandRow.dataset.ak = String(newAk);
+                var caret = prevTr.querySelector('.expand-caret');
+                if (caret) caret.dataset.ak = String(newAk);
+                if (prevPanelOpen) {
+                    if (window._expandedAudioKeys) window._expandedAudioKeys.add(newAk);
+                    var grid = prevExpandRow.querySelector('.paragraph-grid');
+                    if (grid) {
+                        grid.dataset.rendered = '';
+                        grid.innerHTML = 'Loading paragraphs…';
+                        loadParagraphRows(newAk, grid);
+                    }
+                }
             }
             // Restore caret state to match the actual panel visibility.
             if (prevPanelOpen) {
@@ -4435,8 +5310,8 @@ async function renderBuildCategoryRows(root) {
         var saved = STATE.categories[cat.code] || {};
         var row = document.createElement('div');
         row.className = 'voice-row';
-        // 5 columns: label | provider | voice | style | prosody  (matches Defaults tab minus the ▶)
-        row.style.gridTemplateColumns = '240px 130px 1fr 160px auto';
+        // 6 columns: read | label | provider | voice | style | prosody  (matches Defaults tab minus the ▶)
+        row.style.gridTemplateColumns = '32px 240px 130px 1fr 160px auto';
         var isParent = !cat.parent;
         if (isParent) row.style.cssText += 'border-top:1px solid #ccd;margin-top:8px;padding-top:6px;';
         var labelStyle = isParent
@@ -4445,7 +5320,13 @@ async function renderBuildCategoryRows(root) {
         var voiceTitle = isParent
             ? 'Voice for ' + cat.code
             : 'Voice for ' + cat.code + ' (inherits ' + cat.parent + ' if unset)';
+        // Pre-checked unless the Defaults-tab row says otherwise. The build
+        // modal lets the user override per-build without changing the saved
+        // default.
+        var readChecked = (saved.tts_category_voice_read_flag === false || saved.tts_category_voice_read_flag === 'f' || saved.tts_category_voice_read_flag === 0)
+            ? '' : 'checked';
         row.innerHTML =
+            '<input type="checkbox" data-cat="' + cat.code + '" data-field="read" ' + readChecked + ' title="Read this category. Uncheck to skip — text in this category will be omitted from this build entirely (no audio AND no pause).">' +
             '<label style="' + labelStyle + '">' + escapeHtml(cat.label) + '</label>' +
             '<select data-cat="' + cat.code + '" data-field="provider" title="TTS provider — filters the Voice dropdown to its active voices."></select>' +
             '<select data-cat="' + cat.code + '" data-field="voice" title="' + escapeHtml(voiceTitle) + '"></select>' +
@@ -4529,15 +5410,55 @@ function collectBuildOverrides(root) {
         var rate = row.querySelector('input[data-field="rate"]');
         var pitch = row.querySelector('input[data-field="pitch"]');
         var vol = row.querySelector('input[data-field="volume"]');
+        var readChk = row.querySelector('input[data-field="read"]');
         overrides[sel.dataset.cat] = {
             voice_code: sel.value,
             style:      styleSel && styleSel.value ? styleSel.value : null,
             rate_pct:   rate  ? parseInt(rate.value, 10)    || 0   : 0,
             pitch_st:   pitch ? parseFloat(pitch.value)     || 0   : 0,
             volume:     vol   ? parseInt(vol.value, 10)     || 100 : 100,
+            read_flag:  readChk ? !!readChk.checked : true,
         };
     });
     return overrides;
+}
+
+// Populate a profile <select> with the PROFILES list (loaded at bootstrap).
+// Defaults the picker to ACTIVE_PROFILE_KEY so the build modal opens to
+// the same profile the user is currently viewing on the Profiles tab.
+function populateBuildProfileSelect(selectId) {
+    var sel = $(selectId);
+    if (!sel) return;
+    sel.innerHTML = '';
+    PROFILES.forEach(function (p) {
+        var o = document.createElement('option');
+        o.value = String(p.tts_profile_key);
+        o.textContent = p.tts_profile_label + (p.tts_profile_default_flag ? ' (default)' : '');
+        sel.appendChild(o);
+    });
+    if (ACTIVE_PROFILE_KEY) sel.value = String(ACTIVE_PROFILE_KEY);
+}
+
+// When the user switches profile in the build modal, re-pull that
+// profile's category voices and re-render the override grid so the
+// admin sees the profile's defaults (and can tweak from there).
+async function onBuildProfileChange() {
+    var pk = parseInt($('build-profile').value, 10) || 0;
+    await reloadCategoriesForProfile(pk);
+    renderBuildCategoryRows($('build-category-rows'));
+}
+async function onBuildAllProfileChange() {
+    var pk = parseInt($('build-all-profile').value, 10) || 0;
+    await reloadCategoriesForProfile(pk);
+    renderBuildCategoryRows($('build-all-category-rows'));
+}
+async function reloadCategoriesForProfile(profileKey) {
+    if (!profileKey) return;
+    var ov = await api('/admin-tts-config.php?action=overview&tts_key=' + TTS_KEY + '&profile_key=' + profileKey);
+    if (ov.current) {
+        STATE.categories = {};
+        (ov.current.categories || []).forEach(c => { STATE.categories[c.tts_category] = c; });
+    }
 }
 
 function openBuildModal(chapterKey, audioKey) {
@@ -4545,6 +5466,12 @@ function openBuildModal(chapterKey, audioKey) {
     if (!ch) return;
     $('build-modal-title').textContent = 'Build audio — chapter ' + ch.chapter_number;
     populateBuildFormat($('build-format'));
+    populateBuildProfileSelect('build-profile');
+    // If this chapter already has audio for a specific profile, the
+    // build defaults to THAT profile (so Restart/Rebuild stays on the
+    // same profile by default). Otherwise the picker keeps the global
+    // ACTIVE_PROFILE_KEY chosen on the Profiles tab.
+    if (ch.tts_profile_key) $('build-profile').value = String(ch.tts_profile_key);
     // Same cascading Provider → Voice rows as the Build All modal — kicks
     // off async; the Loading… status is replaced when voices arrive.
     renderBuildCategoryRows($('build-category-rows'));
@@ -4562,6 +5489,7 @@ function openBuildAllModal() {
     var label = vol ? vol.volume_label : ('volume ' + ACTIVE_VOLUME);
     $('build-all-modal-title').textContent = 'Build all chapters — ' + label;
     populateBuildFormat($('build-all-format'));
+    populateBuildProfileSelect('build-all-profile');
     renderBuildCategoryRows($('build-all-category-rows'));
     $('build-all-status').textContent = '';
     $('build-all-status').className = 'status-msg';
@@ -4582,6 +5510,7 @@ async function startBuildAll() {
                 action:'start_all',
                 tts_key: TTS_KEY,
                 volume_key: ACTIVE_VOLUME,
+                profile_key: parseInt($('build-all-profile').value, 10) || 0,
                 scope: $('build-all-scope').value,
                 output_format: $('build-all-format').value,
                 voice_overrides: overrides,
@@ -4591,6 +5520,27 @@ async function startBuildAll() {
         if (res.queued === 0) msg = res.message || 'No chapters matched the scope filter.';
         $('build-all-status').textContent = msg;
         $('build-all-status').className = 'status-msg success';
+        // Optimistic update — flip eligible rows to "pending" so the UI
+        // reflects the queue immediately, ahead of the loadChapters fetch.
+        // We can't know exactly which chapter_keys the server picked under
+        // the scope filter, so we mirror the same filter client-side:
+        // 'all' touches every chapter without a complete audio; 'missing'
+        // only chapters with no audio row; 'failed' only failed ones.
+        // Anything we mis-flip resolves on the loadChapters refetch.
+        var scope = $('build-all-scope').value;
+        (CHAPTERS || []).forEach(function (c) {
+            var elig = (scope === 'all'     && c.tts_audio_status !== 'complete' && c.tts_audio_status !== 'running')
+                    || (scope === 'missing' && !c.tts_audio_status)
+                    || (scope === 'failed'  && c.tts_audio_status === 'failed');
+            if (!elig) return;
+            c.tts_audio_status   = 'pending';
+            c.tts_audio_progress = 0;
+            c.tts_audio_message  = 'queued';
+            c.tts_audio_error    = null;
+            c.tts_audio_completed_dtime = null;
+            c.tts_audio_started_dtime   = null;
+        });
+        if (typeof renderChapters === 'function') renderChapters();
         setTimeout(closeBuildAllModal, 900);
         loadChapters(ACTIVE_VOLUME);
     } catch (e) {
@@ -4614,14 +5564,17 @@ async function startBuild() {
         var rate = row.querySelector('input[data-field="rate"]');
         var pitch = row.querySelector('input[data-field="pitch"]');
         var vol = row.querySelector('input[data-field="volume"]');
+        var readChk = row.querySelector('input[data-field="read"]');
         overrides[sel.dataset.cat] = {
             voice_code: sel.value,
             style:      styleSel && styleSel.value ? styleSel.value : null,
             rate_pct:   rate  ? parseInt(rate.value, 10)    || 0   : 0,
             pitch_st:   pitch ? parseFloat(pitch.value)     || 0   : 0,
             volume:     vol   ? parseInt(vol.value, 10)     || 100 : 100,
+            read_flag:  readChk ? !!readChk.checked : true,
         };
     });
+    var chapterKey = parseInt($('build-modal').dataset.chapter, 10);
     try {
         var res = await api('/admin-tts-build.php?action=start', {
             method:'POST', headers:{'Content-Type':'application/json'},
@@ -4629,13 +5582,29 @@ async function startBuild() {
                 action:'start',
                 tts_key: TTS_KEY,
                 volume_key: parseInt($('build-modal').dataset.volume, 10),
-                chapter_key: parseInt($('build-modal').dataset.chapter, 10),
+                chapter_key: chapterKey,
+                profile_key: parseInt($('build-profile').value, 10) || 0,
                 output_format: $('build-format').value,
                 voice_overrides: overrides,
             }),
         });
         $('build-status').textContent = 'Started (job ' + res.tts_audio_key + '). Polling…';
         $('build-status').className = 'status-msg success';
+        // Optimistic local update so the row visibly flips to "pending"
+        // RIGHT NOW — the loadChapters fetch below confirms with the
+        // server but takes ~80 ms, and the user shouldn't have to stare
+        // at a stale row in the meantime.
+        var ch = (CHAPTERS || []).find(function (c) { return c.chapter_key === chapterKey; });
+        if (ch) {
+            ch.tts_audio_key      = res.tts_audio_key || ch.tts_audio_key;
+            ch.tts_audio_status   = 'pending';
+            ch.tts_audio_progress = 0;
+            ch.tts_audio_message  = 'queued';
+            ch.tts_audio_error    = null;
+            ch.tts_audio_completed_dtime = null;
+            ch.tts_audio_started_dtime   = null;
+            if (typeof renderChapters === 'function') renderChapters();
+        }
         setTimeout(closeBuildModal, 600);
         loadChapters(ACTIVE_VOLUME);
     } catch (e) {

@@ -13,6 +13,7 @@
  *                     audio_size_bytes, audio_completed_dtime, audio_settings }] }
  */
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/admin-tts-helpers.php';  // for ttsResolveProfileKey()
 
 $user = requireAuth();
 $db = getDb();
@@ -48,7 +49,12 @@ if ($action === 'volumes') {
 if ($action === 'chapters') {
     $volumeKey = (int)($_GET['volume_key'] ?? 0);
     $ttsKey    = (int)($_GET['tts_key']    ?? 0);
+    // Profile filter — when set, the chapter row's audio fields show the
+    // status for THIS profile only. The full multi-profile inventory
+    // arrives in the per-chapter `audios` array regardless of this filter.
+    $profileKey = (int)($_GET['profile_key'] ?? 0) ?: null;
     if (!$volumeKey || !$ttsKey) errorResponse('volume_key and tts_key required');
+    $profileKey = ttsResolveProfileKey($db, $ttsKey, $profileKey);
 
     $vStmt = $db->prepare("
         SELECT v.volume_key, v.series_key, v.volume_number, v.volume_label,
@@ -71,22 +77,55 @@ if ($action === 'chapters') {
     // every 3-second poll was pulling 2.8 MB of unused JSON. The Books-tab
     // UI never reads it; the build modal pulls a fresh snapshot from the
     // /catalog endpoint instead.
+    // The primary join is profile-scoped — the chapter row's audio fields
+    // describe THIS profile's build. The Build button label and Play
+    // button on the row reflect the currently-selected profile.
     $cStmt = $db->prepare("
         SELECT c.chapter_key, c.chapter_number, c.chapter_label, c.chapter_page,
                a.tts_audio_status, a.tts_audio_progress, a.tts_audio_message,
                a.tts_audio_path, a.tts_audio_duration_secs, a.tts_audio_size_bytes,
                a.tts_audio_completed_dtime, a.tts_audio_started_dtime,
                a.tts_audio_error, a.tts_audio_key, a.tts_audio_failed_paragraphs,
+               a.tts_profile_key,
                COALESCE(a.tts_audio_active_flag, TRUE) AS tts_audio_active_flag
           FROM yy_chapter c
           LEFT JOIN yy_tts_audio a
             ON a.chapter_key = c.chapter_key
            AND a.tts_key = ?
+           AND a.tts_profile_key = ?
          WHERE c.volume_key = ?
          ORDER BY c.chapter_number
     ");
-    $cStmt->execute([$ttsKey, $volumeKey]);
-    jsonResponse(['volume' => $volume, 'chapters' => $cStmt->fetchAll()]);
+    $cStmt->execute([$ttsKey, $profileKey, $volumeKey]);
+    $chapters = $cStmt->fetchAll();
+
+    // Fetch the per-chapter multi-profile inventory — every (chapter,
+    // profile) audio row in the volume — and attach as `audios` to each
+    // chapter so the UI can render a profile dropdown when N>1. One
+    // query for the whole volume (idx covers it), not N per row.
+    $allStmt = $db->prepare("
+        SELECT a.chapter_key, a.tts_audio_key, a.tts_profile_key, a.tts_audio_status,
+               a.tts_audio_path, a.tts_audio_duration_secs, a.tts_audio_size_bytes,
+               COALESCE(a.tts_audio_active_flag, TRUE) AS tts_audio_active_flag,
+               p.tts_profile_code, p.tts_profile_label, p.tts_profile_default_flag
+          FROM yy_tts_audio a
+          JOIN yy_chapter c ON c.chapter_key = a.chapter_key
+          LEFT JOIN yy_tts_profile p ON p.tts_profile_key = a.tts_profile_key
+         WHERE c.volume_key = ?
+           AND a.tts_key = ?
+         ORDER BY a.chapter_key, p.tts_profile_default_flag DESC NULLS LAST, p.tts_profile_label NULLS LAST
+    ");
+    $allStmt->execute([$volumeKey, $ttsKey]);
+    $byChapter = [];
+    foreach ($allStmt->fetchAll() as $a) {
+        $byChapter[(int)$a['chapter_key']][] = $a;
+    }
+    foreach ($chapters as &$c) {
+        $c['audios'] = $byChapter[(int)$c['chapter_key']] ?? [];
+    }
+    unset($c);
+
+    jsonResponse(['volume' => $volume, 'chapters' => $chapters, 'profile_key' => $profileKey]);
 }
 
 // One-shot per-volume paragraph-count rollup. Returns {chapter_key: count}

@@ -5,6 +5,13 @@
 
 set -u
 umask 0002
+
+# HARD GUARANTEE: this fixer authenticates ONLY via the Max subscription
+# (CLAUDE_CODE_OAUTH_TOKEN, below). Strip any Anthropic API-key env vars so it
+# can NEVER spend pay-per-token API credits — even if a key ever leaks into
+# this user's environment. Pay-per-token billing is reserved for Ask Yada.
+unset ANTHROPIC_API_KEY CLAUDE_USE_API_KEY
+
 LOG=/var/log/yada-claude-fix.log
 LOCK=/tmp/yada-claude-fix.lock
 

@@ -546,17 +546,10 @@ writeStatus($STATUS_FILE, [
 
 echo "[" . date('c') . "] Done. Triaged: " . count($errors) . " errors\n";
 
-// ── Helper: read env key ──
-function _readEnvKey(string $name): string {
-    $val = getenv($name);
-    if ($val) return $val;
-    $envFile = dirname(__DIR__) . '/.env';
-    if (file_exists($envFile)) {
-        foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
-            if (strpos($line, '#') === 0) continue;
-            if (strpos($line, $name . '=') === 0) return trim(substr($line, strlen($name) + 1));
-        }
-    }
-    return '';
-}
+// NOTE: This script NEVER calls the Anthropic API directly. It only triages
+// errors with local pattern-matching and enqueues hard cases for the on-host
+// Claude Code agent (claude-fix.sh), which authenticates via the Max
+// subscription with the API key stripped. The former _readEnvKey() helper
+// (which read ANTHROPIC_API_KEY) was removed deliberately: there must be no
+// code path here that can touch the pay-per-token API key.
 

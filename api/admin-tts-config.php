@@ -62,17 +62,132 @@ if ($method === 'GET' && $action === 'catalog') {
 if ($method === 'GET' && $action === 'overview') {
     $systems = $db->query("SELECT * FROM yy_tts WHERE tts_active_flag = TRUE ORDER BY tts_sort, tts_key")->fetchAll();
     $ttsKey = (int)($_GET['tts_key'] ?? ($systems[0]['tts_key'] ?? 0));
+    // Optional profile selection — UI passes the profile_key the user is
+    // viewing/editing. Omitted = default profile for this tts_key.
+    $profileKey = (int)($_GET['profile_key'] ?? 0) ?: null;
     $current = null;
+    $profiles = [];
     if ($ttsKey) {
-        $cfg = loadTtsConfig($db, $ttsKey);
+        $cfg = loadTtsConfig($db, $ttsKey, $profileKey);
+        // Profile list for the UI Profile picker.
+        $pStmt = $db->prepare("SELECT tts_profile_key, tts_profile_code, tts_profile_label, tts_profile_default_flag FROM yy_tts_profile WHERE tts_key = ? AND tts_profile_active_flag = TRUE ORDER BY tts_profile_default_flag DESC, tts_profile_label");
+        $pStmt->execute([$ttsKey]);
+        $profiles = $pStmt->fetchAll();
         $current = [
             'system'       => $cfg['system'],
             'categories'   => array_values($cfg['categories']),
+            'profile_key'  => $cfg['profile_key'],
+            'profiles'     => $profiles,
             'tunes_count'  => (int)$db->query("SELECT COUNT(*) FROM yy_tts_tune  WHERE tts_key = $ttsKey")->fetchColumn(),
             'pauses_count' => (int)$db->query("SELECT COUNT(*) FROM yy_tts_pause WHERE tts_key = $ttsKey")->fetchColumn(),
         ];
     }
     jsonResponse(['systems' => $systems, 'current' => $current]);
+}
+
+// ── Profile management ─────────────────────────────────────────────────
+// CRUD on yy_tts_profile. A profile is a named bundle of category-voice
+// mappings (different voices per category). The build modal lets you pick
+// which profile a chapter audio is rendered with; a chapter can have one
+// audio file per profile.
+if ($method === 'GET' && $action === 'list_profiles') {
+    $ttsKey = (int)($_GET['tts_key'] ?? 0);
+    if (!$ttsKey) errorResponse('tts_key required');
+    $stmt = $db->prepare("SELECT tts_profile_key, tts_profile_code, tts_profile_label, tts_profile_default_flag FROM yy_tts_profile WHERE tts_key = ? AND tts_profile_active_flag = TRUE ORDER BY tts_profile_default_flag DESC, tts_profile_label");
+    $stmt->execute([$ttsKey]);
+    jsonResponse(['profiles' => $stmt->fetchAll()]);
+}
+
+if ($action === 'create_profile') {
+    $ttsKey  = (int)($data['tts_key'] ?? 0);
+    $label   = trim((string)($data['label'] ?? ''));
+    $cloneFrom = (int)($data['clone_from'] ?? 0);  // optional source profile to copy from
+    if (!$ttsKey)  errorResponse('tts_key required');
+    if ($label === '') errorResponse('label required');
+    if (mb_strlen($label) > 120) errorResponse('label too long (120 char limit)');
+    // Derive a slug from the label; append numeric suffix on collision.
+    $base = preg_replace('/[^a-z0-9_]+/i', '_', strtolower($label));
+    $base = trim($base, '_') ?: 'profile';
+    $code = $base;
+    $i = 2;
+    while (true) {
+        $st = $db->prepare("SELECT 1 FROM yy_tts_profile WHERE tts_key = ? AND tts_profile_code = ?");
+        $st->execute([$ttsKey, $code]);
+        if (!$st->fetchColumn()) break;
+        $code = $base . '_' . $i++;
+        if ($i > 99) errorResponse('cannot derive unique code');
+    }
+    $db->prepare("INSERT INTO yy_tts_profile (tts_key, tts_profile_code, tts_profile_label) VALUES (?, ?, ?) RETURNING tts_profile_key")
+       ->execute([$ttsKey, $code, $label]);
+    $newKey = (int)$db->lastInsertId('yy_tts_profile_tts_profile_key_seq');
+    // Optional clone — copy every category row from $cloneFrom into the
+    // new profile so the user starts from a known-good baseline rather
+    // than an empty profile that routes every segment to a fallback.
+    if ($cloneFrom > 0) {
+        $st = $db->prepare("SELECT 1 FROM yy_tts_profile WHERE tts_profile_key = ? AND tts_key = ?");
+        $st->execute([$cloneFrom, $ttsKey]);
+        if ($st->fetchColumn()) {
+            $db->prepare("
+                INSERT INTO yy_tts_category_voice
+                    (tts_key, tts_profile_key, tts_category, tts_voice_code, tts_voice_style, tts_voice_style_degree,
+                     tts_voice_rate_pct, tts_voice_pitch_st, tts_voice_volume, tts_category_voice_read_flag)
+                SELECT tts_key, ?, tts_category, tts_voice_code, tts_voice_style, tts_voice_style_degree,
+                       tts_voice_rate_pct, tts_voice_pitch_st, tts_voice_volume, tts_category_voice_read_flag
+                  FROM yy_tts_category_voice
+                 WHERE tts_profile_key = ?
+            ")->execute([$newKey, $cloneFrom]);
+        }
+    }
+    jsonResponse(['tts_profile_key' => $newKey, 'tts_profile_code' => $code, 'tts_profile_label' => $label]);
+}
+
+if ($action === 'rename_profile') {
+    $key   = (int)($data['tts_profile_key'] ?? 0);
+    $label = trim((string)($data['label'] ?? ''));
+    if (!$key)  errorResponse('tts_profile_key required');
+    if ($label === '') errorResponse('label required');
+    if (mb_strlen($label) > 120) errorResponse('label too long');
+    $stmt = $db->prepare("UPDATE yy_tts_profile SET tts_profile_label = ?, tts_profile_revision_dtime = NOW() WHERE tts_profile_key = ?");
+    $stmt->execute([$label, $key]);
+    jsonResponse(['ok' => true]);
+}
+
+if ($action === 'set_default_profile') {
+    $key = (int)($data['tts_profile_key'] ?? 0);
+    if (!$key) errorResponse('tts_profile_key required');
+    // Look up the tts_key so we can clear the prior default in the same tx.
+    $row = $db->prepare("SELECT tts_key FROM yy_tts_profile WHERE tts_profile_key = ?");
+    $row->execute([$key]);
+    $ttsKey = (int)$row->fetchColumn();
+    if (!$ttsKey) errorResponse('profile not found', 404);
+    $db->beginTransaction();
+    try {
+        $db->prepare("UPDATE yy_tts_profile SET tts_profile_default_flag = FALSE WHERE tts_key = ? AND tts_profile_default_flag = TRUE")
+           ->execute([$ttsKey]);
+        $db->prepare("UPDATE yy_tts_profile SET tts_profile_default_flag = TRUE, tts_profile_revision_dtime = NOW() WHERE tts_profile_key = ?")
+           ->execute([$key]);
+        $db->commit();
+    } catch (Throwable $e) {
+        $db->rollBack();
+        errorResponse('failed: ' . $e->getMessage(), 500);
+    }
+    jsonResponse(['ok' => true]);
+}
+
+if ($action === 'delete_profile') {
+    $key = (int)($data['tts_profile_key'] ?? 0);
+    if (!$key) errorResponse('tts_profile_key required');
+    // Refuse to delete the default — user must promote another first.
+    $row = $db->prepare("SELECT tts_profile_default_flag FROM yy_tts_profile WHERE tts_profile_key = ?");
+    $row->execute([$key]);
+    $isDefault = (bool)$row->fetchColumn();
+    if ($isDefault) errorResponse('cannot delete the default profile — set another as default first');
+    // Soft-delete via active_flag so existing audio rows that reference
+    // this profile_key keep their link (we set ON DELETE SET NULL on the
+    // audio FK, but soft-delete preserves the historical mapping).
+    $db->prepare("UPDATE yy_tts_profile SET tts_profile_active_flag = FALSE, tts_profile_revision_dtime = NOW() WHERE tts_profile_key = ?")
+       ->execute([$key]);
+    jsonResponse(['ok' => true]);
 }
 
 if ($method === 'GET' && $action === 'tunes') {
@@ -155,14 +270,23 @@ if ($method === 'GET' && $action === 'category_voices') {
 // gate below. See the matching save_provider POST handler near the
 // bottom.
 if ($method === 'GET' && $action === 'list_providers') {
+    // The Providers table in the Voices tab passes include_inactive=1 so it can
+    // still render (and re-enable) providers that have been switched off; the
+    // active-flag filter is what the toggle controls, so an inactive provider
+    // must not disappear from the very list used to flip it back on. All other
+    // callers (Defaults/Pronunciations dropdowns, catalog refresh scope) omit
+    // the flag and keep getting active-only providers.
+    $includeInactive = !empty($_GET['include_inactive']);
+    $activeClause = $includeInactive ? '' : 'p.provider_active_flag = TRUE AND ';
     $rows = $db->query("
         SELECT p.provider_key, p.provider_label, p.provider_main,
                p.provider_phonetic_type, p.provider_active_flag,
+               p.provider_custom_voice_flag,
+               p.provider_settings ->> 'engine' AS provider_engine_code,
                (SELECT COUNT(*) FROM yy_tts_voice v
                  WHERE v.provider_key = p.provider_key) AS voice_count
           FROM yy_provider p
-         WHERE p.provider_active_flag = TRUE
-           AND (
+         WHERE " . $activeClause . "(
                 p.provider_key IN (SELECT DISTINCT provider_key FROM yy_tts_voice)
              OR p.provider_key IN (
                     SELECT fp.provider_key
@@ -195,36 +319,47 @@ if ($action === 'save_category_voice') {
     $ttsKey   = (int)($data['tts_key'] ?? 0);
     $category = trim((string)($data['tts_category'] ?? ''));
     $voice    = trim((string)($data['voice_code'] ?? ''));
+    // Profile: omitted = default profile for the tts_key. The Defaults
+    // tab passes the user's currently-selected profile_key.
+    $profileKey = ttsResolveProfileKey($db, $ttsKey, (int)($data['profile_key'] ?? 0) ?: null);
     if (!$ttsKey || $category === '') errorResponse('tts_key, tts_category required');
+    if (!$profileKey) errorResponse('no profile resolved for tts_key (run profile migration?)');
     // Blank voice_code means "inherit from parent" — drop any existing
-    // row for this (tts_key, category) so buildVoiceBlock's parent walk
-    // resolves to the parent's voice. No row = no override.
+    // row for this (tts_key, profile, category) so buildVoiceBlock's
+    // parent walk resolves to the parent's voice. No row = no override.
     if ($voice === '') {
-        $db->prepare("DELETE FROM yy_tts_category_voice WHERE tts_key = ? AND tts_category = ?")
-           ->execute([$ttsKey, $category]);
+        $db->prepare("DELETE FROM yy_tts_category_voice WHERE tts_key = ? AND tts_profile_key = ? AND tts_category = ?")
+           ->execute([$ttsKey, $profileKey, $category]);
         jsonResponse(['ok' => true, 'cleared' => true]);
     }
+    // read_flag controls whether content tagged with this category is
+    // synthesised at all. When false, the build/preview pipeline skips
+    // the segment entirely — no audio AND no inter-segment pause. Default
+    // true keeps old callers that don't post the field behaving the same.
+    $readFlag = array_key_exists('read_flag', $data) ? (bool)$data['read_flag'] : true;
     $stmt = $db->prepare("
         INSERT INTO yy_tts_category_voice
-            (tts_key, tts_category, tts_voice_code, tts_voice_style, tts_voice_style_degree,
-             tts_voice_rate_pct, tts_voice_pitch_st, tts_voice_volume)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (tts_key, tts_category) DO UPDATE SET
+            (tts_key, tts_profile_key, tts_category, tts_voice_code, tts_voice_style, tts_voice_style_degree,
+             tts_voice_rate_pct, tts_voice_pitch_st, tts_voice_volume, tts_category_voice_read_flag)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (tts_key, tts_profile_key, tts_category) DO UPDATE SET
             tts_voice_code = EXCLUDED.tts_voice_code,
             tts_voice_style = EXCLUDED.tts_voice_style,
             tts_voice_style_degree = EXCLUDED.tts_voice_style_degree,
             tts_voice_rate_pct = EXCLUDED.tts_voice_rate_pct,
             tts_voice_pitch_st = EXCLUDED.tts_voice_pitch_st,
             tts_voice_volume = EXCLUDED.tts_voice_volume,
+            tts_category_voice_read_flag = EXCLUDED.tts_category_voice_read_flag,
             tts_category_voice_revision_dtime = NOW()
     ");
     $stmt->execute([
-        $ttsKey, $category, $voice,
+        $ttsKey, $profileKey, $category, $voice,
         $data['style'] ?? null,
         $data['style_degree'] ?? 1.0,
         (int)($data['rate_pct'] ?? 0),
         (float)($data['pitch_st'] ?? 0),
         (int)($data['volume'] ?? 100),
+        (int)$readFlag,
     ]);
     jsonResponse(['ok' => true]);
 }
@@ -485,11 +620,25 @@ if ($action === 'save_provider') {
     // Whitelist of editable fields. New fields can be added here
     // without changing the calling JS, which sends only the fields it
     // wants to update.
+    // Bool → int 0/1. PDO renders PHP bool false as '' which Postgres boolean
+    // columns reject (see project rule), so we never bind a raw bool. Accepts
+    // JSON true/false, 1/0, "true"/"false". Never returns null (no invalid case).
+    $boolToInt = function ($v) {
+        if (is_string($v)) {
+            $lv = strtolower(trim($v));
+            return ($lv === 'false' || $lv === '0' || $lv === '') ? 0 : 1;
+        }
+        return $v ? 1 : 0;
+    };
     $allowed = [
         'provider_phonetic_type' => function ($v) {
             $v = strtolower(trim((string)$v));
             return in_array($v, ['sub', 'ipa'], true) ? $v : null;
         },
+        // Active/Inactive toggle.
+        'provider_active_flag' => $boolToInt,
+        // Whether custom voices can be trained/cloned for this provider.
+        'provider_custom_voice_flag' => $boolToInt,
     ];
     $sets = [];
     $params = [];

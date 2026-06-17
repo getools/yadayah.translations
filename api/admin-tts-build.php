@@ -99,12 +99,18 @@ if ($action === 'start') {
     $ttsKey     = (int)($data['tts_key']     ?? 0);
     $volumeKey  = (int)($data['volume_key']  ?? 0);
     $chapterKey = (int)($data['chapter_key'] ?? 0);
+    // Profile selection — omitted = default profile. The build modal
+    // passes the profile_key from its Profile picker so each chapter can
+    // have one audio file per profile (Roger-default, Charlie-warm,
+    // etc.). The audio row records which profile produced the file.
+    $profileKey = (int)($data['profile_key'] ?? 0) ?: null;
     if (!$ttsKey || !$volumeKey || !$chapterKey) errorResponse('tts_key, volume_key, chapter_key required');
 
-    // Snapshot the current category-voice config so the worker uses a
-    // stable picture even if admin edits voices mid-build.
-    $cfg = loadTtsConfig($db, $ttsKey);
+    // Snapshot the current category-voice config (for the chosen profile)
+    // so the worker uses a stable picture even if admin edits voices mid-build.
+    $cfg = loadTtsConfig($db, $ttsKey, $profileKey);
     if (!$cfg['system']) errorResponse('unknown tts_key', 404);
+    $profileKey = (int)$cfg['profile_key'];  // resolved to actual key (default if not supplied)
 
     $outputFormat = !empty($data['output_format']) ? (string)$data['output_format'] : $cfg['system']['tts_output_format'];
 
@@ -117,14 +123,36 @@ if ($action === 'start') {
             'rate_pct'     => (int)$row['tts_voice_rate_pct'],
             'pitch_st'     => (float)$row['tts_voice_pitch_st'],
             'volume'       => (int)$row['tts_voice_volume'],
+            // read_flag governs whether this category gets synthesised at
+            // all. Picked up by ttsCategoryReadable() in the build worker.
+            // Default to TRUE for rows that pre-date the column.
+            'read_flag'    => array_key_exists('tts_category_voice_read_flag', $row) ? (bool)$row['tts_category_voice_read_flag'] : true,
         ];
     }
     // Caller-supplied per-category overrides win over the saved defaults.
     foreach ((array)($data['voice_overrides'] ?? []) as $cat => $over) {
         if (!is_array($over)) continue;
+        $voice    = (string)($over['voice_code'] ?? '');
+        $readFlag = array_key_exists('read_flag', $over) ? (bool)$over['read_flag'] : true;
+        // Skip pure-pass-through overrides — the build modal emits a row for
+        // EVERY category in the registry (yada, main, translation, ..., nt,
+        // paul, lv, kjv, …). Most of those categories are unconfigured
+        // (voice='', read_flag=true) and don't deserve a snapshot row.
+        // Persisting them anyway BLOCKS the parent-chain walk in the worker:
+        // for cat='nt' the walker would see cfg['categories']['nt'] exists
+        // (just with empty voice) and stop there instead of inheriting the
+        // bible voice — silently routing the segment to provider 1 (Azure)
+        // with an empty voice name. Only persist when the override actually
+        // configures something (a voice picked, OR an explicit skip).
+        if (!isset($catSnapshot[$cat]) && $voice === '' && $readFlag === true) {
+            continue;
+        }
         $catSnapshot[$cat] = array_merge($catSnapshot[$cat] ?? [], array_intersect_key($over, [
-            'voice_code' => 1, 'style' => 1, 'style_degree' => 1, 'rate_pct' => 1, 'pitch_st' => 1, 'volume' => 1,
+            'voice_code' => 1, 'style' => 1, 'style_degree' => 1, 'rate_pct' => 1, 'pitch_st' => 1, 'volume' => 1, 'read_flag' => 1,
         ]));
+        if (array_key_exists('read_flag', $over)) {
+            $catSnapshot[$cat]['read_flag'] = (bool)$over['read_flag'];
+        }
     }
 
     $settings = [
@@ -132,17 +160,21 @@ if ($action === 'start') {
         'region'        => $cfg['system']['tts_region'] ?? null,
         'categories'    => $catSnapshot,
         'tts_code'      => $cfg['system']['tts_code'],
+        'profile_key'   => $profileKey,
     ];
 
-    // Cancel any existing pending/running build for this slot before queuing.
+    // Cancel any existing pending/running build for this slot+profile before queuing.
+    // Scope by profile_key so a build of "Default" profile doesn't kill a
+    // running "Warm" profile build on the same chapter — multi-track is
+    // the whole point.
     $db->prepare("
         UPDATE yy_tts_audio
            SET tts_audio_status = 'failed',
                tts_audio_error  = 'superseded by new build',
                tts_audio_completed_dtime = NOW()
-         WHERE tts_key = ? AND volume_key = ? AND chapter_key = ?
+         WHERE tts_key = ? AND volume_key = ? AND chapter_key = ? AND tts_profile_key = ?
            AND tts_audio_status IN ('pending', 'running')
-    ")->execute([$ttsKey, $volumeKey, $chapterKey]);
+    ")->execute([$ttsKey, $volumeKey, $chapterKey, $profileKey]);
 
     // INSERT … ON CONFLICT reuses the existing row when a (tts_key,
     // volume_key, chapter_key) record already exists from a prior build
@@ -158,10 +190,10 @@ if ($action === 'start') {
     // treats this pending row as a fresh build, not a retry.
     $insStmt = $db->prepare("
         INSERT INTO yy_tts_audio
-            (tts_key, volume_key, chapter_key, tts_audio_status, tts_audio_progress,
+            (tts_key, volume_key, chapter_key, tts_profile_key, tts_audio_status, tts_audio_progress,
              tts_audio_message, tts_audio_settings, tts_audio_started_dtime)
-        VALUES (?, ?, ?, 'pending', 0, 'Queued', ?::jsonb, NOW())
-        ON CONFLICT (tts_key, volume_key, chapter_key) WHERE chapter_key IS NOT NULL
+        VALUES (?, ?, ?, ?, 'pending', 0, 'Queued', ?::jsonb, NOW())
+        ON CONFLICT (tts_key, volume_key, chapter_key, tts_profile_key) WHERE chapter_key IS NOT NULL
         DO UPDATE SET
             tts_audio_status             = 'pending',
             tts_audio_progress           = 0,
@@ -175,7 +207,7 @@ if ($action === 'start') {
             tts_audio_revision_dtime     = NOW()
         RETURNING tts_audio_key
     ");
-    $insStmt->execute([$ttsKey, $volumeKey, $chapterKey, json_encode($settings)]);
+    $insStmt->execute([$ttsKey, $volumeKey, $chapterKey, $profileKey, json_encode($settings)]);
     $audioKey = (int)$insStmt->fetchColumn();
 
     // Fresh build / rebuild — wipe the per-paragraph parts cache so the
@@ -222,11 +254,13 @@ if ($action === 'start_all') {
     $ttsKey    = (int)($data['tts_key']    ?? 0);
     $volumeKey = (int)($data['volume_key'] ?? 0);
     $scope     = (string)($data['scope']   ?? 'all');
+    $profileKey = (int)($data['profile_key'] ?? 0) ?: null;
     if (!$ttsKey || !$volumeKey) errorResponse('tts_key and volume_key required');
     if (!in_array($scope, ['all', 'missing', 'failed'], true)) errorResponse('scope must be all|missing|failed');
 
-    $cfg = loadTtsConfig($db, $ttsKey);
+    $cfg = loadTtsConfig($db, $ttsKey, $profileKey);
     if (!$cfg['system']) errorResponse('unknown tts_key', 404);
+    $profileKey = (int)$cfg['profile_key'];
 
     $outputFormat = !empty($data['output_format']) ? (string)$data['output_format'] : $cfg['system']['tts_output_format'];
     $catSnapshot = [];
@@ -238,31 +272,48 @@ if ($action === 'start_all') {
             'rate_pct'     => (int)$row['tts_voice_rate_pct'],
             'pitch_st'     => (float)$row['tts_voice_pitch_st'],
             'volume'       => (int)$row['tts_voice_volume'],
+            'read_flag'    => array_key_exists('tts_category_voice_read_flag', $row) ? (bool)$row['tts_category_voice_read_flag'] : true,
         ];
     }
     foreach ((array)($data['voice_overrides'] ?? []) as $cat => $over) {
         if (!is_array($over)) continue;
+        $voice    = (string)($over['voice_code'] ?? '');
+        $readFlag = array_key_exists('read_flag', $over) ? (bool)$over['read_flag'] : true;
+        // Same parent-walk preservation as the single-chapter path above —
+        // don't persist empty-voice overrides for unconfigured categories,
+        // they'd otherwise block the registry parent chain in the worker.
+        if (!isset($catSnapshot[$cat]) && $voice === '' && $readFlag === true) {
+            continue;
+        }
         $catSnapshot[$cat] = array_merge($catSnapshot[$cat] ?? [], array_intersect_key($over, [
-            'voice_code' => 1, 'style' => 1, 'style_degree' => 1, 'rate_pct' => 1, 'pitch_st' => 1, 'volume' => 1,
+            'voice_code' => 1, 'style' => 1, 'style_degree' => 1, 'rate_pct' => 1, 'pitch_st' => 1, 'volume' => 1, 'read_flag' => 1,
         ]));
+        if (array_key_exists('read_flag', $over)) {
+            $catSnapshot[$cat]['read_flag'] = (bool)$over['read_flag'];
+        }
     }
     $settings = [
         'output_format' => $outputFormat,
         'region'        => $cfg['system']['tts_region'] ?? null,
         'categories'    => $catSnapshot,
         'tts_code'      => $cfg['system']['tts_code'],
+        'profile_key'   => $profileKey,
     ];
 
-    // Resolve chapter list to enqueue.
+    // Resolve chapter list to enqueue. JOIN on tts_profile_key so the
+    // status returned is THIS profile's status (a chapter may have a
+    // completed audio for the default profile and still need a build for
+    // a new profile).
     $chStmt = $db->prepare("
         SELECT c.chapter_key, c.chapter_number, a.tts_audio_status
           FROM yy_chapter c
      LEFT JOIN yy_tts_audio a
             ON a.tts_key = ? AND a.volume_key = c.volume_key AND a.chapter_key = c.chapter_key
+           AND a.tts_profile_key = ?
          WHERE c.volume_key = ?
          ORDER BY c.chapter_sort, c.chapter_number
     ");
-    $chStmt->execute([$ttsKey, $volumeKey]);
+    $chStmt->execute([$ttsKey, $profileKey, $volumeKey]);
     $chapters = $chStmt->fetchAll();
     if (!$chapters) errorResponse('volume has no chapters', 404);
 
@@ -284,15 +335,15 @@ if ($action === 'start_all') {
            SET tts_audio_status = 'failed',
                tts_audio_error  = 'superseded by new build',
                tts_audio_completed_dtime = NOW()
-         WHERE tts_key = ? AND volume_key = ? AND chapter_key = ?
+         WHERE tts_key = ? AND volume_key = ? AND chapter_key = ? AND tts_profile_key = ?
            AND tts_audio_status IN ('pending', 'running')
     ");
     $insStmt = $db->prepare("
         INSERT INTO yy_tts_audio
-            (tts_key, volume_key, chapter_key, tts_audio_status, tts_audio_progress,
+            (tts_key, volume_key, chapter_key, tts_profile_key, tts_audio_status, tts_audio_progress,
              tts_audio_message, tts_audio_settings, tts_audio_started_dtime)
-        VALUES (?, ?, ?, 'pending', 0, 'Queued (build-all)', ?::jsonb, NOW())
-        ON CONFLICT (tts_key, volume_key, chapter_key) WHERE chapter_key IS NOT NULL
+        VALUES (?, ?, ?, ?, 'pending', 0, 'Queued (build-all)', ?::jsonb, NOW())
+        ON CONFLICT (tts_key, volume_key, chapter_key, tts_profile_key) WHERE chapter_key IS NOT NULL
         DO UPDATE SET
             tts_audio_status             = 'pending',
             tts_audio_progress           = 0,
@@ -308,8 +359,8 @@ if ($action === 'start_all') {
     ");
     $audioKeys = [];
     foreach ($filtered as $c) {
-        $cancel->execute([$ttsKey, $volumeKey, (int)$c['chapter_key']]);
-        $insStmt->execute([$ttsKey, $volumeKey, (int)$c['chapter_key'], json_encode($settings)]);
+        $cancel->execute([$ttsKey, $volumeKey, (int)$c['chapter_key'], $profileKey]);
+        $insStmt->execute([$ttsKey, $volumeKey, (int)$c['chapter_key'], $profileKey, json_encode($settings)]);
         $ak = (int)$insStmt->fetchColumn();
         $audioKeys[] = $ak;
         // Fresh build per chapter — wipe parts so the worker re-synthesises

@@ -104,18 +104,40 @@ $settings   = json_decode($job['tts_audio_settings'] ?? 'null', true) ?: [];
 
 // Build a config struct compatible with admin-tts-helpers — we splice the
 // per-build snapshot in over the saved defaults so concurrent admin edits
-// to yy_tts_category_voice don't disturb the in-flight run.
-$cfg = loadTtsConfig($db, $ttsKey);
+// to yy_tts_category_voice don't disturb the in-flight run. Profile-aware
+// load: the audio row records which profile the build was queued under,
+// so we hydrate THAT profile's category voices, not the default.
+$jobProfileKey = (int)($job['tts_profile_key'] ?? 0)
+              ?: (int)($settings['profile_key'] ?? 0)
+              ?: null;
+$cfg = loadTtsConfig($db, $ttsKey, $jobProfileKey);
 if (!$cfg['system']) bail($db, $audioKey, "tts_key $ttsKey not found");
 if (!empty($settings['categories'])) {
     foreach ($settings['categories'] as $cat => $snap) {
+        // Preserve the prior read_flag if the snapshot doesn't carry one
+        // (snapshots written before this column existed). TRUE = read; the
+        // build worker's segment loops gate on ttsCategoryReadable().
+        $priorReadFlag = $cfg['categories'][$cat]['tts_category_voice_read_flag'] ?? true;
+        $snapReadFlag  = array_key_exists('read_flag', $snap) ? (bool)$snap['read_flag'] : (bool)$priorReadFlag;
+        $snapVoice     = (string)($snap['voice_code'] ?? '');
+        // Defence against stale snapshots that captured every registry
+        // category (yada, main, …, nt, paul, lv) with empty voice codes.
+        // Persisting an empty-voice row here would block buildVoiceBlock's
+        // parent walk for cat='nt' (cfg has nt → stop walking → voice='').
+        // Skip when the snapshot row carries no voice AND no skip-flag —
+        // let the registry parent chain decide. If the user explicitly
+        // marked the row as skip, keep it so the skip still applies.
+        if ($snapVoice === '' && $snapReadFlag === true && !isset($cfg['categories'][$cat])) {
+            continue;
+        }
         $cfg['categories'][$cat] = [
-            'tts_voice_code'         => $snap['voice_code']   ?? ($cfg['categories'][$cat]['tts_voice_code'] ?? 'en-US-BrianMultilingualNeural'),
-            'tts_voice_style'        => $snap['style']        ?? null,
-            'tts_voice_style_degree' => $snap['style_degree'] ?? 1.0,
-            'tts_voice_rate_pct'     => (int)($snap['rate_pct'] ?? 0),
-            'tts_voice_pitch_st'     => (int)($snap['pitch_st'] ?? 0),
-            'tts_voice_volume'       => (int)($snap['volume']   ?? 100),
+            'tts_voice_code'              => $snap['voice_code']   ?? ($cfg['categories'][$cat]['tts_voice_code'] ?? 'en-US-BrianMultilingualNeural'),
+            'tts_voice_style'             => $snap['style']        ?? null,
+            'tts_voice_style_degree'      => $snap['style_degree'] ?? 1.0,
+            'tts_voice_rate_pct'          => (int)($snap['rate_pct'] ?? 0),
+            'tts_voice_pitch_st'          => (int)($snap['pitch_st'] ?? 0),
+            'tts_voice_volume'            => (int)($snap['volume']   ?? 100),
+            'tts_category_voice_read_flag'=> $snapReadFlag,
         ];
     }
 }
@@ -141,6 +163,7 @@ $snapshot = [
             'rate_pct'     => (int)($row['tts_voice_rate_pct']  ?? 0),
             'pitch_st'     => (int)($row['tts_voice_pitch_st']  ?? 0),
             'volume'       => (int)($row['tts_voice_volume']    ?? 100),
+            'read_flag'    => array_key_exists('tts_category_voice_read_flag', $row) ? (bool)$row['tts_category_voice_read_flag'] : true,
         ];
     }, array_keys($cfg['categories'] ?? []), $cfg['categories'] ?? [])),
     'tunes' => array_values(array_map(function($t) {
@@ -213,9 +236,48 @@ $relPath   = '/u/tts-audio/' . $baseName;
 // Load paragraphs. paragraph_page is included so we can emit a row in
 // yy_tts_audio_marker tying each paragraph's audio offset to its page
 // — flipbook-tts.js uses these to auto-turn pages as playback advances.
-$pStmt = $db->prepare("SELECT paragraph_key, paragraph_number, paragraph_page, paragraph_text_html, paragraph_text_plain, paragraph_is_table FROM yy_paragraph WHERE chapter_key = ? ORDER BY paragraph_number");
+$pStmt = $db->prepare("SELECT paragraph_key, paragraph_number, paragraph_page, paragraph_text_html, paragraph_text_plain, paragraph_is_table, paragraph_is_continuation FROM yy_paragraph WHERE chapter_key = ? ORDER BY paragraph_number");
 $pStmt->execute([$chapterKey]);
 $paragraphs = $pStmt->fetchAll();
+
+// ── Coalesce page-break continuations ────────────────────────────────
+// A paragraph with paragraph_is_continuation=true is the tail of a
+// single logical paragraph that wrapped across a page break in the
+// rendered PDF. The parser (bundle_paragraphs.py) detected the wrap
+// and flagged the tail row. We append its text into the preceding
+// "head" paragraph's text_html / text_plain, then drop the tail from
+// the working list so synthesis treats the whole logical paragraph
+// as one block (one audio file, one marker).
+//
+// The tail row stays in the DB — display/search/translations still
+// see it. Only the TTS worker opts into the coalesce.
+$coalesced = 0;
+$mergedList = [];
+foreach ($paragraphs as $p) {
+    $isCont = !empty($p['paragraph_is_continuation']);
+    if ($isCont && !empty($mergedList)) {
+        $headIdx = count($mergedList) - 1;
+        $head =& $mergedList[$headIdx];
+        $tailHtml  = (string)($p['paragraph_text_html']  ?? '');
+        $tailPlain = (string)($p['paragraph_text_plain'] ?? '');
+        // Single-space separator preserves natural spacing without
+        // letting two spaces double up.
+        if ($tailHtml !== '') {
+            $head['paragraph_text_html']  = rtrim((string)$head['paragraph_text_html'])  . ' ' . ltrim($tailHtml);
+        }
+        if ($tailPlain !== '') {
+            $head['paragraph_text_plain'] = rtrim((string)$head['paragraph_text_plain']) . ' ' . ltrim($tailPlain);
+        }
+        unset($head);
+        $coalesced++;
+        continue;
+    }
+    $mergedList[] = $p;
+}
+if ($coalesced > 0) {
+    fwrite(STDERR, "coalesced $coalesced page-break continuation paragraph(s) into their heads\n");
+}
+$paragraphs = $mergedList;
 
 // Skip filters:
 //   • paragraph_is_table — auto-flagged at parse time by PyMuPDF's
@@ -744,6 +806,13 @@ foreach ($paragraphs as $idx => $p) {
         if (!ttsProviderUsesSsml($cfg, ttsResolveProviderKey($cfg, $seg['category']))) { $allSsml = false; break; }
     }
 
+    // Drop skipped categories AND merge any adjacent same-category survivors
+    // into a single segment. Without the merge, dropping interleaved word
+    // definitions ((kai), (en), (hemera) ...) would leave 6+ tiny translation
+    // fragments per paragraph; ElevenLabs hallucinates / fails on short
+    // fragments and individual paragraphs would lose all their audio.
+    $segs = ttsCollapseSkippedSegments($cfg, $segs);
+    if (!$segs) continue;
     $paraBytes = '';
     if ($allSsml) {
         $blocks = '';
@@ -761,6 +830,7 @@ foreach ($paragraphs as $idx => $p) {
                 if ($b === '') {
                     $failures[] = "para {$p['paragraph_number']} seg: $err";
                     $failureCount++;
+                    error_log("[tts-build $audioKey] para {$p['paragraph_number']} (idx $idx) SEG-AZURE failure: $err | text(120)=" . substr($seg['text'], 0, 120));
                     continue;
                 }
                 $paraBytes .= $b;
@@ -772,10 +842,13 @@ foreach ($paragraphs as $idx => $p) {
             if ($b === '') {
                 $failures[] = "para {$p['paragraph_number']}: $err";
                 $failureCount++;
+                error_log("[tts-build $audioKey] para {$p['paragraph_number']} (idx $idx) AZURE failure: $err | ssml(200)=" . substr($ssml, 0, 200));
                 continue;
             }
             $paraBytes = $b;
-            foreach ($segs as $seg) $charsBilled += mb_strlen($seg['text']);
+            foreach ($segs as $seg) {
+                $charsBilled += mb_strlen($seg['text']);
+            }
         }
     } else {
         // Mixed / local path — synth each segment on its own engine and concat.
@@ -795,7 +868,10 @@ foreach ($paragraphs as $idx => $p) {
                 // local engines (Chatterbox / CosyVoice) that don't speak SSML.
                 $elSeg = buildElevenLabsSegment($seg['text'], $cfg, $seg['category']);
                 $elSeg['provider_key'] = $pk;
-                $b = elevenlabsTtsSynthesize($cfg, $elSeg, $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3', $err);
+                // Retry transient 429/5xx/network errors — long-form runs
+                // routinely hit ElevenLabs' per-minute rate limit and would
+                // otherwise leak ~10% of paragraphs to permanent failure.
+                $b = elevenlabsTtsSynthesizeRetry($cfg, $elSeg, $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3', $err);
             } elseif ($transport === 'inworld-cloud') {
                 // Inworld accepts plain text with inline /IPA/ slash notation.
                 // buildInworldSegment emits /IPA/ for tunes typed 'ipa' (more
@@ -815,6 +891,7 @@ foreach ($paragraphs as $idx => $p) {
             if ($b === '') {
                 $failures[] = "para {$p['paragraph_number']} seg: $err";
                 $failureCount++;
+                error_log("[tts-build $audioKey] para {$p['paragraph_number']} (idx $idx) LOCAL/EL/IW failure: $err | cat={$seg['category']} transport=$transport text(120)=" . substr($seg['text'], 0, 120));
                 continue;
             }
             $paraBytes .= $b;

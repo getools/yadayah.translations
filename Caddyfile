@@ -9,7 +9,7 @@ yadayah.com, www.yadayah.com {
     header @fonts Access-Control-Allow-Origin *
     header @fonts Cache-Control "public, max-age=31536000"
 
-    @sse path /api/ask.php /api/community-sse.php
+    @sse path /api/ask.php /api/community-sse.php /api/admin-tts-sse.php
     reverse_proxy @sse web:80 {
         flush_interval -1
         transport http {

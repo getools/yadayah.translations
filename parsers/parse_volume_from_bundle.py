@@ -246,6 +246,7 @@ def reparse_volume(vol_key, dry_run=False, verbose=False):
             p["page"], p["paragraph_number"],
             text_raw, text_html, text_plain,
             bool(p.get("is_table", False)),
+            bool(p.get("is_continuation", False)),
         ))
 
     # ── Build translation rows ─────────────────────────────────────────
@@ -301,17 +302,22 @@ def reparse_volume(vol_key, dry_run=False, verbose=False):
                 series_key, volume_key, chapter_key,
                 paragraph_page, paragraph_number,
                 paragraph_text_raw, paragraph_text_html, paragraph_text_plain,
-                paragraph_is_table
+                paragraph_is_table,
+                paragraph_is_continuation
             ) VALUES %s
         """, para_rows, page_size=500)
         conn.commit()
 
-    # Same junk-row deactivation as the old parser, kept for parity.
+    # Junk-row deactivation. EXCLUDES paragraphs flagged is_continuation —
+    # those are legitimate tails of a logical paragraph (e.g. "62:2)" — no
+    # letters but it's the closing fragment of the previous citation) and
+    # must stay active so the TTS worker can coalesce them into the head.
     cur.execute("""
         UPDATE yy_paragraph
            SET paragraph_active_flag = false
          WHERE volume_key = %s
            AND paragraph_active_flag = true
+           AND paragraph_is_continuation = false
            AND (
                 paragraph_text_plain IS NULL
              OR trim(paragraph_text_plain) = ''

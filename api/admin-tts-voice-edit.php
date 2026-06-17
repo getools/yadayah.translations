@@ -31,7 +31,7 @@ if ($code === '') errorResponse('code required');
 // Look up the voice + its engine. We allow editing any custom voice; deletion
 // is restricted to non-Azure (Azure rows are managed by the refresh button).
 $voiceStmt = $db->prepare("
-    SELECT v.tts_voice_key, v.tts_voice_label, v.tts_voice_styles, v.tts_voice_type,
+    SELECT v.tts_voice_key, v.tts_key, v.tts_voice_label, v.tts_voice_styles, v.tts_voice_type,
            t.tts_code AS engine
       FROM yy_tts_voice v JOIN yy_tts t ON v.tts_key = t.tts_key
      WHERE v.tts_voice_code = ?
@@ -43,6 +43,31 @@ $engine = (string)$voice['engine'];
 $isLocal = in_array($engine, ['chatterbox', 'cosyvoice', 'qwen3', 'kokoro'], true);
 
 if ($action === 'edit') {
+    // ── Optional rename: change the voice's code ────────────────────────
+    // The engine keys clips + voices.json by code, so a rename must succeed
+    // on the box BEFORE we touch the DB (otherwise the new code can't synth).
+    // gpuRenameVoice moves the clip(s) + rewrites voices.json on the box.
+    $newCode = isset($data['new_code']) ? trim((string)$data['new_code']) : '';
+    if ($newCode !== '' && $newCode !== $code) {
+        if (!preg_match('/^[A-Za-z0-9_-]+$/', $newCode)) {
+            errorResponse('new code must be alphanumeric (dashes/underscores ok)');
+        }
+        // Uniqueness within the same TTS system (matches the DB constraint).
+        $dup = $db->prepare("SELECT 1 FROM yy_tts_voice WHERE tts_key = ? AND tts_voice_code = ? AND tts_voice_key <> ?");
+        $dup->execute([(int)$voice['tts_key'], $newCode, (int)$voice['tts_voice_key']]);
+        if ($dup->fetchColumn()) errorResponse("a voice with code '$newCode' already exists for this provider", 409);
+        if (!$isLocal) errorResponse('only self-hosted voices can be renamed');
+        $rr = gpuRenameVoice($code, $newCode, 60);
+        if (!($rr['ok'] ?? false)) {
+            errorResponse('engine rename failed (voice unchanged): ' . ($rr['error'] ?? 'unknown'),
+                          ($rr['status'] ?? 0) >= 400 ? $rr['status'] : 502);
+        }
+        // Box renamed — now mirror in the DB and use the new code downstream.
+        $db->prepare("UPDATE yy_tts_voice SET tts_voice_code = ?, tts_voice_revision_dtime = NOW() WHERE tts_voice_key = ?")
+           ->execute([$newCode, (int)$voice['tts_voice_key']]);
+        $code = $newCode;
+    }
+
     $label       = isset($data['label'])       ? trim((string)$data['label'])       : null;
     $description = isset($data['description']) ? trim((string)$data['description']) : null;
     $language    = isset($data['language'])    ? trim((string)$data['language'])    : null;
@@ -52,7 +77,7 @@ if ($action === 'edit') {
     $sets = [];
     $args = [];
     if ($label !== null)       { $sets[] = 'tts_voice_label = ?';    $args[] = $label; }
-    if ($description !== null) { $sets[] = 'tts_voice_note = ?';     $args[] = $description ?: null; }
+    if ($description !== null) { $sets[] = 'tts_voice_description = ?'; $args[] = $description ?: null; }
     if ($language !== null)    { $sets[] = 'tts_voice_language = ?'; $args[] = $language ?: null;
                                  $sets[] = 'tts_voice_locale = ?';   $args[] = $language ?: null; }
     if ($gender !== null)      { $sets[] = 'tts_voice_gender = ?';   $args[] = $gender ?: null; }

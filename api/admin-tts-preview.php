@@ -160,6 +160,11 @@ try {
         if ($hasFormat) {
             $segs = segmentParagraph($text);
             if (!$segs) errorResponse('no audible content after segmentation');
+            // Drop skipped categories + merge adjacent same-category runs so
+            // the preview matches the build worker's per-paragraph behaviour
+            // (one fluent translation read, not 6 chopped fragments).
+            $segs = ttsCollapseSkippedSegments($cfg, $segs);
+            if (!$segs) errorResponse('every segment was marked skip; nothing to synthesise');
             $voiceBlock = '';
             foreach ($segs as $seg) {
                 $voiceBlock .= buildVoiceBlock($seg['text'], $cfg, $seg['category']);

@@ -383,7 +383,64 @@ def parse_pdf(pdf_path, bundle_dir=None):
                     "_runs": runs,
                     "warning": warning,
                     "is_table": is_table,
+                    "is_continuation": False,
                 })
+    mark_page_break_continuations(out)
+    return out
+
+
+# ── Page-break continuation detection ────────────────────────────────────
+#
+# PyMuPDF emits one block per page, so a single logical paragraph that
+# wraps across a page break ends up as TWO yy_paragraph rows: the head on
+# page N and a "tail" fragment on page N+1. The tail is usually:
+#   • a mid-sentence wrap (starts with a lowercase letter), or
+#   • a citation fragment like "(Yashaʿyah / Isaiah 57:10)" or "62:2)",
+#   • an orphan close-paren.
+#
+# We flag the tail with is_continuation=True; the TTS worker coalesces
+# flagged tails into their preceding head before synthesis, so a logical
+# paragraph reads as one block. Display / search / translations see the
+# rows individually — only TTS opts into the coalesce.
+_CONT_CITATION_FRAG_RE = re.compile(
+    r'^\([A-Za-zʿʾ][A-Za-zʿʾ\s/]+\s+\d+:\d+(?:-\d+)?\)|'   # (Book ch:v) or (Book ch:v-end)
+    r'^\d+:\d+(?:-\d+)?\)|'                                                    # bare 'ch:v)' tail
+    r'^\)'                                                                      # orphan close paren
+)
+
+
+def _is_page_continuation(prev, cur):
+    """True iff `cur` looks like a page-wrap continuation of `prev`.
+    Heuristics intentionally conservative — we'd rather miss a continuation
+    than incorrectly merge two real paragraphs."""
+    if cur["page"] - prev["page"] != 1:
+        return False
+    prev_text = (prev.get("text_plain") or "").rstrip()
+    cur_text  = (cur.get("text_plain")  or "").lstrip()
+    if not prev_text or not cur_text:
+        return False
+    # Lone-digit chapter-heading "5" paragraphs are NOT continuations.
+    if cur_text.strip().isdigit():
+        return False
+    cur_first = cur_text[0]
+    # Mid-sentence wrap (current paragraph starts mid-clause).
+    if cur_first.islower():
+        return True
+    # Citation fragment patterns.
+    if _CONT_CITATION_FRAG_RE.match(cur_text):
+        return True
+    # Orphan close paren as first character.
+    if cur_first == ')':
+        return True
+    return False
+
+
+def mark_page_break_continuations(out):
+    """Walks `out` and sets is_continuation=True on detected page-wrap
+    continuations. The head paragraph's flag stays False. Mutates in place."""
+    for i in range(1, len(out)):
+        if _is_page_continuation(out[i-1], out[i]):
+            out[i]["is_continuation"] = True
     return out
 
 

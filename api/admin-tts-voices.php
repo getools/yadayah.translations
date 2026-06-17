@@ -111,13 +111,80 @@ if ($action === 'save_active') {
     jsonResponse(['ok' => true]);
 }
 
+// Description — the long free-form field opened via the pencil icon in
+// the catalog. Schema column tts_voice_description (was tts_voice_note
+// pre-rename; the popover semantically was always a description).
+if ($action === 'save_description') {
+    $voiceKey = (int)($data['tts_voice_key'] ?? 0);
+    if (!$voiceKey) errorResponse('tts_voice_key required');
+    $description = trim((string)($data['description'] ?? $data['note'] ?? ''));
+    $db->prepare("UPDATE yy_tts_voice SET tts_voice_description = ?, tts_voice_revision_dtime = NOW() WHERE tts_voice_key = ?")
+       ->execute([$description === '' ? null : $description, $voiceKey]);
+    jsonResponse(['ok' => true]);
+}
+
+// Note — the short inline tag shown next to the voice's label in the
+// catalog. Use for short admin-facing identifiers ("v3", "post-clean")
+// without renaming the upstream voice.
 if ($action === 'save_note') {
     $voiceKey = (int)($data['tts_voice_key'] ?? 0);
     if (!$voiceKey) errorResponse('tts_voice_key required');
     $note = trim((string)($data['note'] ?? ''));
+    if (mb_strlen($note) > 60) errorResponse('note too long (60 char limit)');
     $db->prepare("UPDATE yy_tts_voice SET tts_voice_note = ?, tts_voice_revision_dtime = NOW() WHERE tts_voice_key = ?")
        ->execute([$note === '' ? null : $note, $voiceKey]);
     jsonResponse(['ok' => true]);
+}
+
+// Inline catalog edits (row-select): language / region / gender / styles /
+// multilingual override. Works for ANY voice (builtin included). DB-only —
+// these are catalog metadata used for display, filtering and preview; the
+// engine-synced edit path for custom voices is admin-tts-voice-edit.php.
+if ($action === 'save_fields') {
+    $voiceKey = (int)($data['tts_voice_key'] ?? 0);
+    if (!$voiceKey) errorResponse('tts_voice_key required');
+    $sets = [];
+    $args = [];
+    if (array_key_exists('language', $data)) {
+        $v = trim((string)$data['language']);
+        $sets[] = 'tts_voice_language = ?'; $args[] = $v === '' ? null : $v;
+    }
+    if (array_key_exists('region', $data)) {
+        $v = trim((string)$data['region']);
+        $sets[] = 'tts_voice_region = ?'; $args[] = $v === '' ? null : $v;
+    }
+    if (array_key_exists('gender', $data)) {
+        $v = trim((string)$data['gender']);
+        $sets[] = 'tts_voice_gender = ?'; $args[] = $v === '' ? null : $v;
+    }
+    if (array_key_exists('styles', $data)) {
+        // Accept an array or a comma-separated string; store a clean JSONB array.
+        $raw = $data['styles'];
+        if (!is_array($raw)) $raw = explode(',', (string)$raw);
+        $clean = [];
+        foreach ($raw as $s) {
+            $s = trim((string)$s);
+            if ($s !== '' && !in_array($s, $clean, true)) $clean[] = $s;
+        }
+        $sets[] = 'tts_voice_styles = ?::jsonb';
+        $args[] = json_encode($clean, JSON_UNESCAPED_UNICODE);
+    }
+    if (array_key_exists('multi_flag', $data)) {
+        $mf = $data['multi_flag'];
+        if ($mf === null || $mf === '') {
+            $sets[] = 'tts_voice_multi_flag = NULL';   // clear override → derived
+        } else {
+            // bool → int 0/1 (PDO renders PHP false as '' which Postgres bool rejects).
+            $sets[] = 'tts_voice_multi_flag = ?';
+            $args[] = ($mf === true || $mf === 1 || $mf === '1' || $mf === 'true') ? 1 : 0;
+        }
+    }
+    if (!$sets) errorResponse('no editable fields supplied');
+    $sets[] = 'tts_voice_revision_dtime = NOW()';
+    $args[] = $voiceKey;
+    $db->prepare("UPDATE yy_tts_voice SET " . implode(', ', $sets) . " WHERE tts_voice_key = ?")
+       ->execute($args);
+    jsonResponse(['ok' => true, 'tts_voice_key' => $voiceKey]);
 }
 
 if ($action === 'bulk_save') {
@@ -202,7 +269,7 @@ if ($action === 'refresh') {
                 INSERT INTO yy_tts_voice
                     (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
                      tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_type,
-                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_note,
+                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_description,
                      tts_voice_download_dtime)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, NOW())
                 ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
@@ -216,7 +283,7 @@ if ($action === 'refresh') {
                     tts_voice_styles            = EXCLUDED.tts_voice_styles,
                     tts_voice_status            = EXCLUDED.tts_voice_status,
                     provider_key                = EXCLUDED.provider_key,
-                    tts_voice_note              = EXCLUDED.tts_voice_note,
+                    tts_voice_description       = EXCLUDED.tts_voice_description,
                     tts_voice_download_dtime    = NOW()
                 RETURNING (xmax = 0) AS is_insert
             ");
@@ -284,6 +351,97 @@ if ($action === 'refresh') {
             continue;
         }
 
+        // ── Coqui xtts + coqui adapters (Puget box, /catalog endpoint) ──
+        // gpuProviderCatalog() returns the FULL voice/model pool the box
+        // can serve (XTTS built-in speakers, or every Coqui TTS model);
+        // upserted with active_flag defaulted to false so admins flip on
+        // only the ones they actually want. ON CONFLICT preserves the
+        // active_flag on subsequent refreshes.
+        if ($provCode === 'xtts' || $provCode === 'coqui') {
+            require_once __DIR__ . '/gpu-client.php';
+            if (!gpuConfigured()) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'GPU_BASE_URL / GPU_API_TOKEN not set in .env'];
+                continue;
+            }
+            $engineLabel = $provCode === 'xtts' ? 'XTTS v2' : 'TTS toolkit';
+            $coquiProvKey = (int)$db->query(
+                "SELECT provider_key FROM yy_provider
+                  WHERE provider_main='Coqui' AND provider_engine="
+                . $db->quote($engineLabel)
+                . " ORDER BY provider_key LIMIT 1"
+            )->fetchColumn();
+            if ($coquiProvKey <= 0) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => "no Coqui $engineLabel yy_provider row"];
+                continue;
+            }
+            try {
+                $resp = gpuProviderCatalog($provCode);
+            } catch (Throwable $e) {
+                errorResponse("Puget /catalog failed for $provCode: " . $e->getMessage());
+            }
+            // gpuRequest wraps the engine's JSON under 'data'.
+            $voices = is_array($resp['data']['voices'] ?? null) ? $resp['data']['voices'] : [];
+
+            $upsert = $db->prepare("
+                INSERT INTO yy_tts_voice
+                    (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
+                     tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_type,
+                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_note,
+                     tts_voice_download_dtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]'::jsonb, ?, ?, ?, NOW())
+                ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
+                    tts_voice_label             = EXCLUDED.tts_voice_label,
+                    tts_voice_locale            = EXCLUDED.tts_voice_locale,
+                    tts_voice_locale_name       = EXCLUDED.tts_voice_locale_name,
+                    tts_voice_language          = EXCLUDED.tts_voice_language,
+                    tts_voice_region            = EXCLUDED.tts_voice_region,
+                    tts_voice_gender            = EXCLUDED.tts_voice_gender,
+                    tts_voice_type              = EXCLUDED.tts_voice_type,
+                    tts_voice_status            = EXCLUDED.tts_voice_status,
+                    provider_key                = EXCLUDED.provider_key,
+                    tts_voice_note              = EXCLUDED.tts_voice_note,
+                    tts_voice_download_dtime    = NOW()
+                RETURNING (xmax = 0) AS is_insert
+            ");
+            $added = 0; $updated = 0;
+            $db->beginTransaction();
+            try {
+                foreach ($voices as $v) {
+                    $code = (string)($v['code'] ?? '');
+                    if ($code === '') continue;
+                    // Truncate fields with tight varchar caps so a long
+                    // model-path segment can't poison the whole refresh.
+                    $upsert->execute([
+                        $provKey,
+                        $code,
+                        substr((string)($v['label'] ?? $code), 0, 250),
+                        $v['locale']      !== null ? substr((string)$v['locale'],      0, 20)  : null,
+                        $v['locale_name'] !== null ? substr((string)$v['locale_name'], 0, 120) : null,
+                        $v['language']    !== null ? substr((string)$v['language'],    0, 8)   : null,
+                        $v['region']      !== null ? substr((string)$v['region'],      0, 8)   : null,
+                        $v['gender']      !== null ? substr((string)$v['gender'],      0, 20)  : null,
+                        $v['type']        !== null ? substr((string)$v['type'],        0, 60)  : null,
+                        'active',
+                        $coquiProvKey,
+                        (string)($v['note'] ?? ''),
+                    ]);
+                    $row = $upsert->fetch(PDO::FETCH_ASSOC);
+                    if ($row && $row['is_insert']) $added++; else $updated++;
+                }
+                $db->commit();
+            } catch (Throwable $e) {
+                if ($db->inTransaction()) $db->rollBack();
+                errorResponse("yy_tts_voice upsert failed for $provCode: " . $e->getMessage());
+            }
+            $totalAdded   += $added;
+            $totalUpdated += $updated;
+            $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                              'added' => $added, 'updated' => $updated, 'total' => count($voices)];
+            continue;
+        }
+
         // ── ElevenLabs adapter ───────────────────────────────────────────
         if ($provCode === 'elevenlabs') {
             $apiKey = readEnv('ELEVENLABS_API_KEY');
@@ -336,7 +494,7 @@ if ($action === 'refresh') {
                 INSERT INTO yy_tts_voice
                     (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
                      tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_type,
-                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_note,
+                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_description,
                      tts_voice_download_dtime)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, NOW())
                 ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
@@ -350,7 +508,7 @@ if ($action === 'refresh') {
                     tts_voice_styles            = EXCLUDED.tts_voice_styles,
                     tts_voice_status            = EXCLUDED.tts_voice_status,
                     provider_key                = EXCLUDED.provider_key,
-                    tts_voice_note              = EXCLUDED.tts_voice_note,
+                    tts_voice_description       = EXCLUDED.tts_voice_description,
                     tts_voice_download_dtime    = NOW()
                 RETURNING (xmax = 0) AS is_insert
             ");
