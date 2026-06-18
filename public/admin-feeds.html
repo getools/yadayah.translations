@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781704811">
+    <meta name="page-version" content="1781768734">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
@@ -1623,6 +1623,12 @@ var _activeRowIdx = -1;
 
 function openTranscript(itemKey) {
     _transcriptItemKey = itemKey;
+    // Always open on the live editable transcript — never a left-over read-only
+    // model snapshot (_transcriptView) from a previous open. A stale view would
+    // show, and let the user try to edit, the wrong non-saving copy. The view
+    // dropdown is rebuilt by populateViewSelect() below, which reads this back.
+    _transcriptView = '';
+    _transcriptReadonly = false;
     var ov = document.getElementById('transcript-overlay');
     if (!ov) {
         ov = document.createElement('div');
@@ -1685,7 +1691,7 @@ function openTranscript(itemKey) {
             + '</div>'
             + '<div style="flex:1;display:flex;flex-direction:column;gap:10px;min-width:0;">'
             + '<div id="t-table-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
-            + '<select id="t-view-select" onchange="onTranscriptViewChange(this.value)" title="Switch between the live editable transcript and any per-model _auto snapshot. Picking a model with no rows offers to generate it." style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;max-width:320px;background:#fff;"><option value="">Current (editable)</option></select>'
+            + '<select id="t-view-select" autocomplete="off" onchange="onTranscriptViewChange(this.value)" title="Switch between the live editable transcript and any per-model _auto snapshot. Picking a model with no rows offers to generate it." style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;max-width:320px;background:#fff;"><option value="">Current (editable)</option></select>'
             + '<button id="t-rerun-btn" onclick="rerunCurrentView()" title="Re-run the currently selected model. Writes to _auto only — live transcript is never touched." style="display:none;background:#27ae60;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Re-run</button>'
             + '<button id="t-init-btn" onclick="openInitializeModal()" title="Pick one of the auto-transcribed model versions, apply the YadaYah correction pass, and copy it into the live transcript for editing" style="background:#31345A;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Initialize Transcript</button>'
             + '<button onclick="document.getElementById(\'t-upload-input\').click()" title="Upload an MP3 (or M4A/WAV/VTT/SRT) — used as the audio source for transcription instead of downloading from YouTube" style="background:#31345A;color:#fff;border:1px solid #31345A;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">↑ Upload MP3</button>'
@@ -1702,7 +1708,10 @@ function openTranscript(itemKey) {
             // table now insert AND split, which covers the same need
             // without forcing the user to type a timestamp by hand.
             + '<span id="t-status" style="font-size:0.8rem;color:#888;margin-left:auto;"></span>'
-            + '<span style="border-left:1px solid #ddd;height:24px;margin:0 4px;"></span>'
+            + '<button id="t-download-btn" onclick="downloadTranscript()" title="Download this transcript as .vtt, .csv, or plain text" style="background:#31345A;color:#fff;border:1px solid #31345A;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">↓ Download</button>'
+            // Force the remaining buttons onto a second toolbar row (full-width
+            // flex break) so row one holds the view + upload/download actions.
+            + '<div style="flex-basis:100%;height:0;"></div>'
             + '<button onclick="openTranscriptDict()" style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;" title="Whisper glossary + correction dictionary">Transcript Dictionary</button>'
             + '<button onclick="openTranscriptFind()" style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;" title="Find text within this transcript">Find</button>'
             + '<button onclick="openBookmarksModal()" style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;" title="All notes / bookmarks on this transcript">Bookmarks</button>'
@@ -1750,6 +1759,20 @@ function openTranscript(itemKey) {
         ov.onclick = function(e) { if (e.target === ov) closeTranscript(); };
     }
     ov.style.display = 'flex';
+    // The overlay is created once and reused, so #t-rows still holds the
+    // PREVIOUS open's rows (possibly a different item, or pre-edit text) until
+    // the fetch in loadTranscript() resolves. Blank it first so the user never
+    // sees stale text flash before the fresh rows load — a confirmed "Yada"
+    // edit briefly showing "Yadda" again on reopen was exactly this.
+    var _tb = document.getElementById('t-rows');
+    if (_tb) _tb.innerHTML = '<tr><td colspan="5" style="padding:16px;text-align:center;color:#999;">Loading…</td></tr>';
+    // Reset the view dropdown to "Current (editable)" *immediately*. The overlay
+    // is reused, so its <select> still holds the previous open's options with a
+    // model (e.g. "elevenlabs-scribe") selected until populateViewSelect()
+    // finishes its async rebuild. Collapse it to just the Current option now so
+    // the user never sees a stale model selected on open.
+    var _vs = document.getElementById('t-view-select');
+    if (_vs) _vs.innerHTML = '<option value="">Current (editable)</option>';
     loadTranscript();
     populateViewSelect();
 }
@@ -3781,9 +3804,22 @@ function markRecRow(itemKey, state, err) {
 }
 
 function loadTranscript() {
+    // If a manual edit is still unsaved, persist it BEFORE re-fetching —
+    // otherwise the fetch returns the pre-edit DB text and renderTranscriptRows
+    // paints over the user's change, which looks like the edit "reverted" on a
+    // refresh. saveTranscript() clears _savePending, so the re-entry here (after
+    // the save resolves) falls through to the fetch and won't loop.
+    if (_savePending && !_transcriptReadonly && _transcriptItemKey) {
+        saveTranscript().then(loadTranscript);
+        return;
+    }
     var url = API + '/admin-transcript.php?item_key=' + encodeURIComponent(_transcriptItemKey);
     if (_transcriptView) url += '&view=' + encodeURIComponent(_transcriptView);
-    fetch(url, {credentials:'include'})
+    // Cache-bust: without this the browser/CDN can serve a stale row set after
+    // a bulk search-replace (or any external edit), so the textfields show old
+    // text even though the DB is correct. Matches srLoadCommon's no-store GET.
+    url += '&_=' + Date.now();
+    fetch(url, {credentials:'include', cache:'no-store'})
         .then(function(r){return safeJson(r);})
         .then(function(d) {
             if (d.error) { alert(d.error); return; }
@@ -3997,15 +4033,26 @@ function saveValidation() {
 // otherwise; cells with text longer than 2 rows scroll internally.
 function transcriptRowCells(seg, secs, text, speaker) {
     var s = (speaker === null || speaker === undefined) ? '' : String(speaker);
+    // When viewing a read-only model snapshot (the "view" dropdown is on a
+    // model, not "Current (editable)"), the text field must be genuinely
+    // non-editable. Otherwise the user can type into it, see the change, and
+    // believe it saved — but saveTranscript() bails out on _transcriptReadonly,
+    // so the edit is silently discarded and the snapshot's original text
+    // (e.g. an un-corrected "Yadda") reappears on every reload. Mark the
+    // textarea readonly + grey it, and drop the split/delete buttons.
+    var roAttr  = _transcriptReadonly ? ' readonly' : '';
+    var roStyle = _transcriptReadonly ? 'background:#f3f3f3;color:#777;cursor:default;' : '';
+    var rowActions = _transcriptReadonly ? ''
+        : '<button onmousedown="event.preventDefault()" onclick="splitTranscriptRow(this)" title="Insert a new row after this one — splits text at the cursor if you have one in this row" style="background:none;border:none;color:#27ae60;cursor:pointer;font-size:1.15rem;padding:0 4px;font-weight:700;">+</button>'
+            + '<button onclick="this.closest(\'tr\').remove(); scheduleAutoSave();" title="Delete this row" style="background:none;border:none;color:#c00;cursor:pointer;font-size:1rem;padding:0 4px;">&times;</button>';
     return bookmarkCellForRow(seg)
         + '<td style="padding:6px 2px;border-top:1px solid #eee;vertical-align:top;text-align:center;white-space:nowrap;">'
         +   speakerChipForRow(s)
         + '</td>'
         + '<td class="t-time-cell" data-secs="' + secs + '" title="Click to jump video here · double-click to edit" style="padding:6px;border-top:1px solid #eee;vertical-align:top;"><input type="text" value="' + esc(displaySegment(seg)) + '" data-field="segment" readonly style="width:100%;font-size:0.82rem;font-family:monospace;border:1px solid #ddd;border-radius:3px;padding:3px 6px;background:transparent;cursor:pointer;"></td>'
-        + '<td style="padding:6px;border-top:1px solid #eee;"><textarea data-field="text" rows="1" style="width:100%;font-size:0.85rem;font-family:inherit;line-height:1.4;border:1px solid #ddd;border-radius:3px;padding:3px 6px;resize:none;overflow-y:hidden;box-sizing:border-box;display:block;">' + esc(text || '') + '</textarea></td>'
+        + '<td style="padding:6px;border-top:1px solid #eee;"><textarea data-field="text" rows="1"' + roAttr + ' style="width:100%;font-size:0.85rem;font-family:inherit;line-height:1.4;border:1px solid #ddd;border-radius:3px;padding:3px 6px;resize:none;overflow-y:hidden;box-sizing:border-box;display:block;' + roStyle + '">' + esc(text || '') + '</textarea></td>'
         + '<td style="padding:6px;border-top:1px solid #eee;text-align:center;white-space:nowrap;vertical-align:top;">'
-        +   '<button onmousedown="event.preventDefault()" onclick="splitTranscriptRow(this)" title="Insert a new row after this one — splits text at the cursor if you have one in this row" style="background:none;border:none;color:#27ae60;cursor:pointer;font-size:1.15rem;padding:0 4px;font-weight:700;">+</button>'
-        +   '<button onclick="this.closest(\'tr\').remove(); scheduleAutoSave();" title="Delete this row" style="background:none;border:none;color:#c00;cursor:pointer;font-size:1rem;padding:0 4px;">&times;</button>'
+        +   rowActions
         + '</td>';
 }
 
@@ -4049,7 +4096,7 @@ function renderTranscriptRows(rows) {
         var seg = r.feed_item_transcript_segment || '00:00:00';
         var secs = parseSegmentToSeconds(seg);
         _segmentSeconds.push(secs);
-        html += '<tr data-idx="' + i + '">'
+        html += '<tr data-idx="' + i + '" data-tkey="' + (r.feed_item_transcript_key != null ? r.feed_item_transcript_key : '') + '">'
             + transcriptRowCells(seg, secs, r.feed_item_transcript_text || '', r.feed_item_transcript_speaker || '')
             + '</tr>';
     });
@@ -5453,12 +5500,17 @@ function saveTranscript() {
         var seg = tr.querySelector('[data-field="segment"]');
         var txt = tr.querySelector('[data-field="text"]');
         if (seg && txt && txt.value.trim()) {
-            rows.push({segment: seg.value.trim(), text: txt.value.trim()});
+            // Carry the row's primary key so the server UPDATEs it in place.
+            // Rows added/split in the editor have no data-tkey → key null →
+            // the server INSERTs them as new rows.
+            var k = tr.getAttribute('data-tkey');
+            rows.push({key: (k ? parseInt(k, 10) : null), segment: seg.value.trim(), text: txt.value.trim()});
         }
     });
     rows.sort(function(a, b) {
         return parseSegmentToSeconds(a.segment) - parseSegmentToSeconds(b.segment);
     });
+    rows.forEach(function(rw, i) { rw.sort = i; }); // sort follows segment order
     var statusEl = document.getElementById('t-status');
     if (statusEl) statusEl.textContent = 'Saving…';
     return fetch(API + '/admin-transcript.php', {
@@ -5472,10 +5524,102 @@ function saveTranscript() {
             statusEl.textContent = '✓ Saved (' + d.count + ')';
             setTimeout(function() { if (statusEl.textContent.indexOf('Saved') === 0) statusEl.textContent = ''; }, 2000);
         }
+        // A structural change (rows added or removed) means the new rows in the
+        // DOM have no key yet — reload so they pick up their primary keys and a
+        // follow-up save UPDATEs them instead of re-INSERTing. Pure text/timestamp
+        // edits keep their keys, so no reload (and no focus disruption) is needed.
+        if ((d.inserted || d.deleted) && _transcriptItemKey && !_savePending) {
+            loadTranscript();
+        }
     }).catch(function(err) {
         _savePending = false;
         if (statusEl) statusEl.textContent = '✗ Save failed';
     });
+}
+
+// ── Download transcript (VTT / CSV / text-only) ─────────────────────────────
+// Reads the currently displayed rows (segment + text), asks for a format, and
+// downloads a generated file. Works on whatever's on screen — the live editable
+// rows or a read-only model snapshot.
+function downloadTranscript() {
+    var rows = [];
+    document.querySelectorAll('#t-rows tr').forEach(function(tr) {
+        var seg = tr.querySelector('[data-field="segment"]');
+        var txt = tr.querySelector('[data-field="text"]');
+        if (seg && txt && txt.value.trim()) {
+            rows.push({segment: seg.value.trim(), text: txt.value.trim()});
+        }
+    });
+    if (!rows.length) { alert('No transcript rows to download.'); return; }
+    rows.sort(function(a, b) { return parseSegmentToSeconds(a.segment) - parseSegmentToSeconds(b.segment); });
+
+    var ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10002;display:flex;justify-content:center;align-items:center;';
+    var btn = 'display:block;width:100%;text-align:left;background:#fff;border:1px solid #ccc;border-radius:6px;padding:10px 12px;cursor:pointer;font-size:0.9rem;color:#222;';
+    var sub = 'color:#888;font-weight:400;font-size:0.78rem;';
+    ov.innerHTML = '<div style="background:#fff;border-radius:10px;padding:22px;max-width:430px;width:90%;box-shadow:0 8px 30px rgba(0,0,0,0.25);">'
+        + '<h3 style="margin:0 0 4px 0;color:#31345A;font-size:1.05rem;">Download transcript as…</h3>'
+        + '<div style="font-size:0.82rem;color:#666;margin-bottom:14px;">' + rows.length + ' lines</div>'
+        + '<div style="display:flex;flex-direction:column;gap:8px;">'
+        + '<button data-fmt="vtt"  style="' + btn + '"><strong>VTT</strong> &nbsp;<span style="' + sub + '">standard .vtt subtitle file</span></button>'
+        + '<button data-fmt="csv"  style="' + btn + '"><strong>CSV</strong> &nbsp;<span style="' + sub + '">timestamp, text — one line each</span></button>'
+        + '<button data-fmt="text" style="' + btn + '"><strong>Text only</strong> &nbsp;<span style="' + sub + '">just the text, one line each</span></button>'
+        + '</div>'
+        + '<div style="text-align:right;margin-top:14px;"><button data-fmt="cancel" style="background:none;border:none;color:#666;cursor:pointer;font-size:0.85rem;">Cancel</button></div>'
+        + '</div>';
+    ov.addEventListener('click', function(e) {
+        if (e.target === ov) { document.body.removeChild(ov); return; }
+        var b = e.target.closest('button'); if (!b) return;
+        var fmt = b.getAttribute('data-fmt');
+        if (!fmt || fmt === 'cancel') { document.body.removeChild(ov); return; }
+        document.body.removeChild(ov);
+        doDownloadTranscript(rows, fmt);
+    });
+    document.body.appendChild(ov);
+}
+
+function doDownloadTranscript(rows, fmt) {
+    var tEl = document.getElementById('t-title');
+    var base = (tEl ? tEl.textContent : 'transcript').replace(/^Transcript:\s*/, '').trim() || 'transcript';
+    base = base.replace(/[^\w.\- ]+/g, '').replace(/\s+/g, '_').slice(0, 80) || 'transcript';
+    if (fmt === 'vtt')      _dlBlob(base + '.vtt', _buildVtt(rows), 'text/vtt');
+    else if (fmt === 'csv') _dlBlob(base + '.csv', _buildCsv(rows), 'text/csv');
+    else                    _dlBlob(base + '.txt', rows.map(function(r){ return r.text; }).join('\r\n') + '\r\n', 'text/plain');
+}
+
+// HH:MM:SS.mmm for VTT cue times.
+function _fmtVttTime(sec) {
+    if (!(sec >= 0)) sec = 0;
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    var s = Math.floor(sec % 60), ms = Math.round((sec - Math.floor(sec)) * 1000);
+    var p = function(n, w) { n = String(n); while (n.length < w) n = '0' + n; return n; };
+    return p(h, 2) + ':' + p(m, 2) + ':' + p(s, 2) + '.' + p(ms, 3);
+}
+function _buildVtt(rows) {
+    var out = 'WEBVTT\n\n';
+    for (var i = 0; i < rows.length; i++) {
+        var start = parseSegmentToSeconds(rows[i].segment);
+        // End = next cue's start; last cue gets a 5s tail. Guard against a
+        // non-increasing end.
+        var end = (i + 1 < rows.length) ? parseSegmentToSeconds(rows[i + 1].segment) : start + 5;
+        if (!(end > start)) end = start + 2;
+        out += _fmtVttTime(start) + ' --> ' + _fmtVttTime(end) + '\n' + rows[i].text + '\n\n';
+    }
+    return out;
+}
+function _buildCsv(rows) {
+    // timestamp,"text" — text is CSV-quoted (it routinely contains commas).
+    return rows.map(function(r) {
+        return r.segment + ',"' + r.text.replace(/"/g, '""') + '"';
+    }).join('\r\n') + '\r\n';
+}
+function _dlBlob(filename, content, mime) {
+    var blob = new Blob([content], {type: mime + ';charset=utf-8'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
 }
 
 // Done = flush any pending row save (focused field hasn't blurred yet), save
@@ -6422,13 +6566,33 @@ function srApply() {
         document.getElementById('sr-preview-list').innerHTML = '';
         srLoadCommon();
         srRefreshHistory();
-        // Refresh the open transcript popover so row text reflects the new state
-        if (_transcriptItemKey) loadTranscript();
+        // Refresh the open transcript popover so row text reflects the new state.
+        // Force it back to the live editable view first: a bulk replace only
+        // writes the live table (yy_feed_item_transcript); if the window were
+        // left on a read-only model snapshot (_transcriptView != ''), it loads
+        // from yy_feed_item_transcript_auto and would keep showing the
+        // pre-replace text forever. Snapping to '' guarantees the reload pulls
+        // the rows we just edited. Also cancel any pending autosave so a stale
+        // textarea can't write the old text back over the change.
+        if (_transcriptItemKey) {
+            _savePending = false;
+            _transcriptView = '';
+            _transcriptReadonly = false;
+            var _vsel = document.getElementById('t-view-select');
+            if (_vsel) _vsel.value = '';
+            loadTranscript();
+        }
         // Optional post-apply: persist the find/replace pair as a Whisper
         // correction so future transcripts auto-apply it. Reuses the
         // same dictionary endpoint that the old "+ Add to Corrections"
         // button called — just gated on the checkbox now.
         if (addCorrection) srAddCorrection();
+        // Auto-close the modal after a successful apply so the user lands back
+        // on the (just-refreshed) transcript instead of a stale-looking field.
+        // The brief delay lets the green "✓ Updated N rows" confirmation register
+        // first. Reopening resets summary/preview/apply state (openSearchReplace),
+        // so nothing stale is left behind.
+        setTimeout(closeSearchReplace, 1200);
     });
 }
 // Save the current Find / Replace pair as a permanent correction so future

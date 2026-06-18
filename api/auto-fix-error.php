@@ -38,6 +38,28 @@ function writeStatus(string $file, array $data): void {
     @file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT), LOCK_EX);
 }
 
+// ── Pause flag: skip auto-fix while a developer is editing prod from VS Code. ──
+// A SessionStart hook on the dev machine touches this file; we honor it for a
+// bounded window so a forgotten resume self-heals instead of killing auto-fix.
+$PAUSE_FLAG = "$STATUS_DIR/PAUSED";
+$PAUSE_TTL  = 7200; // 2h
+if (is_file($PAUSE_FLAG)) {
+    $age = time() - (int)@filemtime($PAUSE_FLAG);
+    if ($age >= 0 && $age < $PAUSE_TTL) {
+        $reason = sprintf('Auto-fix paused by dev flag (age %ds < %ds). Skipping.', $age, $PAUSE_TTL);
+        echo "[" . date('c') . "] $reason\n";
+        if ($STATUS_FILE) {
+            writeStatus($STATUS_FILE, [
+                'state' => 'paused',
+                'started' => $STARTED_AT, 'finished' => date('c'),
+                'total' => 0, 'processed' => 0,
+                'log_tail' => $reason,
+            ]);
+        }
+        exit(0);
+    }
+}
+
 // ── Concurrency lock: refuse to run if another auto-fix is already in progress ──
 $LOCK_FILE = '/tmp/autofix.lock';
 $lockFp = fopen($LOCK_FILE, 'c');

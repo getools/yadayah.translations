@@ -275,19 +275,28 @@ $tStmt = $pdo->prepare(sprintf($transcriptSql, 'plainto_tsquery', 'plainto_tsque
 $tStmt->execute([$cleanQ, $cleanQ, $cleanQ]);
 $transcriptRows = $tStmt->fetchAll();
 
-// If AND search returns < 5 transcript results, supplement with OR matches
+// If AND search returns < 5 transcript results, supplement with OR matches.
+// OR tsquery on 259K+ rows can be slow; use a tighter local timeout so a
+// slow OR expansion degrades gracefully instead of canceling the whole request.
 if (count($transcriptRows) < 5 && $orQuery) {
-    $tOrStmt = $pdo->prepare(sprintf($transcriptSql, 'to_tsquery', 'to_tsquery', 'to_tsquery'));
-    $tOrStmt->execute([$orQuery, $orQuery, $orQuery]);
-    $tOrRows = $tOrStmt->fetchAll();
-    $seenKeys = [];
-    foreach ($transcriptRows as $r) $seenKeys[$r['feed_item_key']] = true;
-    foreach ($tOrRows as $r) {
-        if (!isset($seenKeys[$r['feed_item_key']])) {
-            $transcriptRows[] = $r;
-            $seenKeys[$r['feed_item_key']] = true;
+    try {
+        $pdo->exec("SET statement_timeout = '20s'");
+        $tOrStmt = $pdo->prepare(sprintf($transcriptSql, 'to_tsquery', 'to_tsquery', 'to_tsquery'));
+        $tOrStmt->execute([$orQuery, $orQuery, $orQuery]);
+        $tOrRows = $tOrStmt->fetchAll();
+        $pdo->exec("SET statement_timeout = '120s'");
+        $seenKeys = [];
+        foreach ($transcriptRows as $r) $seenKeys[$r['feed_item_key']] = true;
+        foreach ($tOrRows as $r) {
+            if (!isset($seenKeys[$r['feed_item_key']])) {
+                $transcriptRows[] = $r;
+                $seenKeys[$r['feed_item_key']] = true;
+            }
+            if (count($transcriptRows) >= 10) break;
         }
-        if (count($transcriptRows) >= 10) break;
+    } catch (Exception $e) {
+        // OR expansion timed out or failed — proceed with AND-only results.
+        $pdo->exec("SET statement_timeout = '120s'");
     }
 }
 

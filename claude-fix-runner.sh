@@ -39,6 +39,20 @@ flock -n 9 || exit 0
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*"; }
 
+# ── Pause flag: skip while a developer is editing prod from VS Code. ──
+# Mirrors the check in auto-fix-error.php. A SessionStart hook on the dev
+# machine touches this file; honored for a bounded window so a forgotten
+# resume self-heals instead of permanently disabling auto-fix.
+PAUSE_FLAG=/opt/yada-www/public/jobs/autofix/PAUSED
+PAUSE_TTL=7200
+if [ -f "$PAUSE_FLAG" ]; then
+    flag_age=$(( $(date +%s) - $(stat -c %Y "$PAUSE_FLAG" 2>/dev/null || echo 0) ))
+    if [ "$flag_age" -ge 0 ] && [ "$flag_age" -lt "$PAUSE_TTL" ]; then
+        log "Skip: auto-fix paused by dev flag (age ${flag_age}s < ${PAUSE_TTL}s)"
+        exit 0
+    fi
+fi
+
 # Pre-flight: don't spawn Claude when host is busy. Same gate as the cron-
 # claude-fix-gated wrapper.
 free_mb=$(awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo)

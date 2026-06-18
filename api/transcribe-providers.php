@@ -425,8 +425,11 @@ function providerNativeModel(string $code): string {
  * Self-hosted faster-whisper on the Puget box (gpu-* models). Calls
  * gpuTranscribe() via the tailnet gateway and converts the engine's
  * {segments[{start,end,text,words[]}]} response into the worker's canonical
- * row shape. On transport failure, transparently falls back to OpenAI's
- * whisper-1 with the matching granularity (when OPENAI_API_KEY is set).
+ * row shape. On transport / engine failure this fails loudly — it does NOT
+ * fall back to any other service. The operator selected the self-hosted
+ * (free) engine; silently re-running on a paid API (OpenAI) behind their
+ * back is not allowed. If the Puget box is down, the job fails with an
+ * actionable error and the operator can re-pick a provider deliberately.
  *
  *   $model: 'gpu-whisper-large-v3'      → segment-level rows
  *           'gpu-whisper-large-v3-word' → word-level rows (sub-second)
@@ -443,31 +446,14 @@ function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offse
         'timeout'         => 1800,                 // long audio fine on Blackwell
     ]);
     if (!$r['ok']) {
-        // Transport / engine failure — fall back to OpenAI when configured so
-        // the job still completes. Map the model 1:1 by granularity.
-        $apiKey = readEnv('OPENAI_API_KEY');
-        if ($apiKey !== '') {
-            $fallbackModel = $wantWord ? 'whisper-1-word' : 'whisper-1-segment';
-            error_log("gpu whisper failed (" . ($r['error'] ?? 'unknown') . ") — falling back to OpenAI $fallbackModel");
-            $fbErr = '';
-            // OpenAI's audio endpoint rejects files > 25 MB with HTTP 413.
-            // When the audio exceeds 24 MB use the chunked variant — same
-            // ffmpeg-segment-then-stitch path the primary OpenAI provider
-            // uses. Item 1752108 hit this: GPU timed out at 30 min, then
-            // the unchunked fallback failed with "413: Maximum content
-            // size limit (26214400) exceeded" on a 26 MB file.
-            $audioSize = is_file($audioPath) ? filesize($audioPath) : 0;
-            $needsChunked = $audioSize > 24 * 1024 * 1024;
-            if ($needsChunked && $db !== null && $jobKey > 0 && function_exists('whisperApiTranscribeChunked')) {
-                $rows = whisperApiTranscribeChunked($db, $jobKey, $audioPath, $apiKey, $prompt, $fbErr, $fallbackModel);
-            } else {
-                $rows = whisperApiTranscribe($audioPath, $apiKey, $prompt, $offsetSecs, $fbErr, $fallbackModel);
-            }
-            if ($rows) return $rows;
-            $err = 'gpu failed (' . ($r['error'] ?? 'unknown') . '); OpenAI fallback also failed' . ($fbErr ? ": $fbErr" : '');
-            return [];
-        }
-        $err = 'gpu transcribe failed: ' . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)));
+        // Transport / engine failure. Do NOT fall back to OpenAI (or any other
+        // service) — the operator deliberately chose the self-hosted free
+        // engine, and silently switching to a paid API behind their back is
+        // forbidden. Fail loudly with an actionable error so the box can be
+        // brought back up or a different provider chosen on purpose.
+        $err = 'gpu transcribe failed (Puget box unreachable / engine error): '
+             . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)))
+             . ' — no automatic fallback (selected self-hosted gpu engine); retry when the box is up or pick another provider.';
         return [];
     }
     $data = $r['data'] ?? [];

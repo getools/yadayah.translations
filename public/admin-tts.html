@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781728999">
+    <meta name="page-version" content="1781790917">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -122,6 +122,12 @@
         .tts-table .btn-sm.btn-del { background:#c0392b; }
         .tts-table .btn-sm.btn-sec { background:#888; }
         .tts-table .btn-sm:hover { opacity:0.85; }
+        /* Custom-voice row edit action — bordered gear button. Reads as
+           "manage this voice" (code / metadata / reference clips), visually
+           distinct from the Description column's pencil. */
+        .tts-table .vc-edit { display:inline-flex; align-items:center; justify-content:center; width:26px; height:24px; padding:0; background:#888; color:#fff; border:none; border-radius:4px; cursor:pointer; line-height:1; }
+        .tts-table .vc-edit:hover { opacity:0.85; }
+        .tts-table .vc-edit svg { width:15px; height:15px; fill:currentColor; display:block; }
         .tts-table .col-toggle { width:60px; text-align:center; }
         .tts-table tr.inactive td { color:#aaa; }
 
@@ -284,12 +290,16 @@
                     <select id="pv-chapter" onchange="pvOnChapterChange()" disabled style="min-width:220px;padding:3px 4px;border:1px solid #ccc;border-radius:3px;font-size:0.82rem;">
                         <option value="">Chapter…</option>
                     </select>
-                    <select id="pv-page" onchange="pvOnPageChange()" disabled style="min-width:100px;padding:3px 4px;border:1px solid #ccc;border-radius:3px;font-size:0.82rem;" title="Both Chapter and Page filter the Paragraph list when set; either can be left blank.">
+                    <select id="pv-page" onchange="pvOnPageChange()" disabled style="min-width:100px;padding:3px 4px;border:1px solid #ccc;border-radius:3px;font-size:0.82rem;" title="Only pages within the selected chapter. Leave blank to keep the whole chapter; pick a page to narrow the Paragraph list to that page.">
                         <option value="">Page…</option>
                     </select>
                     <select id="pv-paragraph" onchange="pvOnParagraphChange()" disabled style="min-width:260px;flex:1 1 260px;padding:3px 4px;border:1px solid #ccc;border-radius:3px;font-size:0.82rem;">
                         <option value="">Paragraph…</option>
                     </select>
+                    <!-- Load brings in the text at the most-refined level chosen:
+                         a picked Paragraph wins, else the picked Page, else the
+                         whole Chapter (paragraphs concatenated). -->
+                    <button type="button" id="pv-load" onclick="pvLoadSelected()" disabled title="Bring the selected chapter / page / paragraph text into the preview field above" style="padding:4px 12px;border:1px solid #31345A;border-radius:4px;background:#31345A;color:#fff;cursor:pointer;font-size:0.82rem;">Load</button>
                     <span id="pv-pick-status" style="color:#888;font-size:0.78rem;"></span>
                 </div>
                 <div class="preview-controls">
@@ -768,6 +778,45 @@ var CUSTOMIZE_PROVIDERS = {
               ]
             },
         ],
+    },
+    moss: {
+        label: 'MOSS-TTS-Nano',
+        codePrefix: 'moss-',
+        instructions: {
+            data:     'One clean 5–15 s clip, single speaker, no music/noise. 48 kHz output.',
+            workflow: 'Zero-shot clone — the clip registers as a voice on submit. An optional reference transcript (the exact words spoken in the clip) sharpens the clone.',
+            time:     'Instant; the first synth downloads the ~0.1B model once.',
+        },
+        extraFields: [
+            // Same id as CosyVoice's so the shared save handler forwards it as prompt_text.
+            { id: 'cv-cosy-prompt', type: 'text', label: 'Reference transcript (optional)', placeholder: 'Exact words spoken in the clip — improves clone fidelity' },
+        ],
+    },
+    xtts: {
+        label: 'Coqui XTTS v2',
+        codePrefix: 'xtts-',
+        // Add mode uses the dedicated two-method flow (openXttsAddVoice); these
+        // generic instructions are shown when editing an existing XTTS voice.
+        instructions: {
+            data:     '1–5 clean clips, single speaker, no music, 6–20 s each. Multiple clips improve the match.',
+            workflow: 'Zero-shot clone, or fine-tune for a closer match (chosen when adding).',
+            time:     'Clone: instant. Fine-tune: minutes to ~1 hr.',
+        },
+        // Drives the Add flow's method toggle + guidance panels.
+        methods: {
+            clone: {
+                label: 'Zero-shot clone',
+                data:     '1–5 clean clips of one speaker, no music/noise, 6–20 s each.',
+                workflow: 'Clips register immediately as a cloned voice — XTTS averages the speaker characteristics across all the clips you upload.',
+                time:     'Instant (first synth ~a few seconds).',
+            },
+            finetune: {
+                label: 'Fine-tune',
+                data:     '5–30+ clips of the same speaker (a few minutes up to ~30 min total). More and cleaner audio = a closer match.',
+                workflow: 'Each clip is auto-transcribed (you can correct the text), then a GPT fine-tune runs on the GPU. The voice turns active when training finishes.',
+                time:     'Fast ~10–15 min · Balanced ~30–45 min · Thorough ~1 hr+. The box runs one training job at a time.',
+            },
+        },
     },
 };
 
@@ -1626,21 +1675,27 @@ function pvFillSelect(sel, rows, placeholder) {
     });
 }
 function pvResetDownstream(level) {
-    // level = 'volume' | 'chapter-and-page' | 'paragraph' — clears that
-    // level and below. Chapter and Page are siblings populated from
-    // Volume, so 'chapter-and-page' clears both at once before
-    // re-populating them in parallel.
-    var groups;
-    if (level === 'volume')           groups = ['volume', 'chapter', 'page', 'paragraph'];
-    else if (level === 'chapter-and-page') groups = ['chapter', 'page', 'paragraph'];
-    else if (level === 'paragraph')   groups = ['paragraph'];
-    else return;
-    for (var i = 0; i < groups.length; i++) {
-        var sel = $('pv-' + groups[i]);
+    // Cascade is strictly linear now: Series → Volume → Chapter → Page →
+    // Paragraph. Page and Paragraph are both children of the selected
+    // Chapter, so clearing a level wipes it and everything after it.
+    var order = ['volume', 'chapter', 'page', 'paragraph'];
+    var start = order.indexOf(level);
+    if (start < 0) return;
+    for (var i = start; i < order.length; i++) {
+        var sel = $('pv-' + order[i]);
         if (!sel) continue;
-        pvFillSelect(sel, [], groups[i].charAt(0).toUpperCase() + groups[i].slice(1) + '…');
+        pvFillSelect(sel, [], order[i].charAt(0).toUpperCase() + order[i].slice(1) + '…');
         sel.disabled = true;
     }
+    pvUpdateLoadBtn();
+}
+// The Load button is usable as soon as a Chapter is chosen (chapter-level
+// load); Page / Paragraph just refine what it brings in.
+function pvUpdateLoadBtn() {
+    var btn = $('pv-load');
+    if (!btn) return;
+    var chKey = $('pv-chapter') ? $('pv-chapter').value : '';
+    btn.disabled = !chKey;
 }
 function pvSetStatus(msg) {
     var el = $('pv-pick-status');
@@ -1677,33 +1732,21 @@ async function pvOnSeriesChange() {
     }
 }
 async function pvOnVolumeChange() {
-    pvResetDownstream('chapter-and-page');
+    pvResetDownstream('chapter');
     var key = $('pv-volume').value;
     if (!key) return;
-    pvSetStatus('loading chapters + pages…');
+    pvSetStatus('loading chapters…');
     try {
-        // Chapter and Page are siblings — both populate from the volume so
-        // the operator can pick whichever they think in (chapter title vs
-        // physical page).
-        var results = await Promise.all([
-            pvFetchRows('mode=chapters&volume_key=' + encodeURIComponent(key)),
-            pvFetchRows('mode=pages&volume_key='    + encodeURIComponent(key)),
-        ]);
-        pvFillSelect($('pv-chapter'), results[0], 'Chapter…');
+        var rows = await pvFetchRows('mode=chapters&volume_key=' + encodeURIComponent(key));
+        pvFillSelect($('pv-chapter'), rows, 'Chapter…');
         $('pv-chapter').disabled = false;
-        pvFillSelect($('pv-page'), results[1], 'Page…');
-        $('pv-page').disabled = false;
-        pvSetStatus((results[0].length || results[1].length) ? '' : 'no chapters or paragraphs parsed for this volume yet');
+        pvSetStatus(rows.length ? '' : 'no chapters parsed for this volume yet');
     } catch (e) {
         pvSetStatus('error: ' + e.message);
     }
 }
-// Build the paragraphs query string from whichever of chapter/page are
-// currently selected. The endpoint accepts either or both and ANDs them
-// together — picking Chapter alone lists the chapter's paragraphs,
-// picking Page alone lists that page's paragraphs, picking both shows
-// only paragraphs that are simultaneously in that chapter AND on that
-// page.
+// Build the paragraphs query string. Chapter is the required scope; Page
+// (when chosen) narrows the list to that single page within the chapter.
 function pvParagraphsQuery() {
     var volKey  = $('pv-volume').value;
     var chKey   = $('pv-chapter').value;
@@ -1715,41 +1758,89 @@ function pvParagraphsQuery() {
     if (volKey)  parts.push('volume_key='  + encodeURIComponent(volKey));
     return 'mode=paragraphs&' + parts.join('&');
 }
-async function pvLoadParagraphs() {
-    // Clear paragraph list before reloading so the prior selection can't
-    // linger after Chapter / Page changes.
+// Picking a Chapter loads BOTH the pages within that chapter and the
+// chapter's full paragraph list, so the operator can refine to a page or
+// a single paragraph — or just hit Load for the whole chapter.
+async function pvOnChapterChange() {
+    pvResetDownstream('page');
+    var chKey  = $('pv-chapter').value;
+    var volKey = $('pv-volume').value;
+    if (!chKey) return;
+    pvSetStatus('loading pages + paragraphs…');
+    try {
+        var results = await Promise.all([
+            pvFetchRows('mode=pages&chapter_key=' + encodeURIComponent(chKey)
+                        + (volKey ? '&volume_key=' + encodeURIComponent(volKey) : '')),
+            pvFetchRows(pvParagraphsQuery()),
+        ]);
+        pvFillSelect($('pv-page'), results[0], 'Page…');
+        $('pv-page').disabled = false;
+        pvFillSelect($('pv-paragraph'), results[1], 'Paragraph…');
+        $('pv-paragraph').disabled = false;
+        pvSetStatus('');
+        pvUpdateLoadBtn();
+    } catch (e) {
+        pvSetStatus('error: ' + e.message);
+    }
+}
+// Picking a Page just re-narrows the Paragraph list to that page.
+async function pvOnPageChange() {
     pvResetDownstream('paragraph');
     var qs = pvParagraphsQuery();
-    if (!qs) return;
+    if (!qs) { pvUpdateLoadBtn(); return; }
     pvSetStatus('loading paragraphs…');
     try {
         var rows = await pvFetchRows(qs);
         pvFillSelect($('pv-paragraph'), rows, 'Paragraph…');
         $('pv-paragraph').disabled = false;
-        pvSetStatus(rows.length ? '' : 'no paragraphs match this Chapter+Page combination');
+        pvSetStatus(rows.length ? '' : 'no paragraphs on this page');
+        pvUpdateLoadBtn();
     } catch (e) {
         pvSetStatus('error: ' + e.message);
     }
 }
-function pvOnChapterChange() { pvLoadParagraphs(); }
-function pvOnPageChange()    { pvLoadParagraphs(); }
-async function pvOnParagraphChange() {
-    var key = $('pv-paragraph').value;
-    if (!key) return;
-    pvSetStatus('loading paragraph…');
+// Selecting a paragraph no longer auto-loads — the Load button is the
+// single entry point so chapter/page/paragraph all behave the same way.
+function pvOnParagraphChange() {
+    pvUpdateLoadBtn();
+    pvSetStatus($('pv-paragraph').value ? 'click Load to bring in this paragraph.' : '');
+}
+// Load the text at the most-refined level the operator has chosen:
+// Paragraph > Page > Chapter. Paragraph uses the single-row endpoint;
+// Page / Chapter concatenate every paragraph in scope server-side.
+async function pvLoadSelected() {
+    var paraKey = $('pv-paragraph') ? $('pv-paragraph').value : '';
+    var chKey   = $('pv-chapter')   ? $('pv-chapter').value   : '';
+    var pgValue = $('pv-page')      ? $('pv-page').value      : '';
+    var volKey  = $('pv-volume')    ? $('pv-volume').value    : '';
+    var el = $('preview-text');
+    if (!el) return;
     try {
-        var r = await fetch(API + '/admin-tts-content-picker.php?mode=paragraph_text&paragraph_key=' + encodeURIComponent(key),
-                            { credentials: 'include' });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        var d = await r.json();
-        var el = $('preview-text');
-        if (el) {
-            // Trust the stored HTML — it's the same shape (b/i runs) the
-            // build worker already accepts and the preview endpoint already
-            // segments. Anything else would diverge from production.
+        if (paraKey) {
+            pvSetStatus('loading paragraph…');
+            var r = await fetch(API + '/admin-tts-content-picker.php?mode=paragraph_text&paragraph_key=' + encodeURIComponent(paraKey),
+                                { credentials: 'include' });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            var d = await r.json();
+            // Trust the stored HTML — same b/i shape the build worker accepts
+            // and the preview endpoint already segments.
             el.innerHTML = d.html || d.plain || '';
+            pvSetStatus('loaded paragraph — click ▶ on any voice to hear it.');
+            return;
         }
-        pvSetStatus('loaded — click ▶ on any voice to hear it.');
+        if (!chKey && !pgValue) { pvSetStatus('pick a chapter, page, or paragraph first.'); return; }
+        var level = pgValue ? 'page' : 'chapter';
+        var parts = [];
+        if (chKey)   parts.push('chapter_key=' + encodeURIComponent(chKey));
+        if (pgValue) parts.push('page='        + encodeURIComponent(pgValue));
+        if (volKey)  parts.push('volume_key='  + encodeURIComponent(volKey));
+        pvSetStatus('loading ' + level + ' text…');
+        var r2 = await fetch(API + '/admin-tts-content-picker.php?mode=combined_text&' + parts.join('&'),
+                             { credentials: 'include' });
+        if (!r2.ok) throw new Error('HTTP ' + r2.status);
+        var d2 = await r2.json();
+        el.innerHTML = d2.html || d2.plain || '';
+        pvSetStatus('loaded ' + level + ' (' + (d2.count || 0) + ' paragraphs) — click ▶ on any voice to hear it.');
     } catch (e) {
         pvSetStatus('error: ' + e.message);
     }
@@ -2151,13 +2242,412 @@ function vcUpdateAddCustomBtn() {
     btn.style.cursor  = capable ? 'pointer' : 'not-allowed';
     btn.title = capable
         ? 'Create a new custom voice for ' + code
-        : 'Select a custom-capable provider above to add a custom voice (Chatterbox, CosyVoice 2, Qwen3)';
+        : 'Select a custom-capable provider above to add a custom voice (Chatterbox, CosyVoice 2, Qwen3, Coqui XTTS v2)';
 }
 
 function openAddCustomVoice() {
     var code = vcSelectedProviderCode();
     if (!code || !vcCustomCapableCodes()[code]) return;
     openCustomVoicePopover({ mode: 'add', engineCode: code });
+}
+
+// ── XTTS Add Custom Voice — zero-shot clone OR fine-tune, multi-clip ─────
+// XTTS supports two ways to make a custom voice; this dedicated modal lets the
+// admin pick either and uploads multiple clips that work together (averaged
+// for clone, used as the training set for fine-tune). The generic popover
+// below still handles every other provider + all edit-mode flows.
+function openXttsAddVoice(opts) {
+    opts = opts || {};
+    var meta = CUSTOMIZE_PROVIDERS.xtts;
+    var prefix = meta.codePrefix || 'xtts-';
+    var INP = 'width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;';
+    function field(lab, ctrl) {
+        return '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">' + lab + '</label>' + ctrl;
+    }
+
+    var genderOpts = ['', 'Male', 'Female', 'Neutral'].map(function (g) {
+        return '<option value="' + g + '">' + (g || '— unspecified —') + '</option>';
+    }).join('');
+
+    var body =
+        '<div style="display:flex;gap:16px;flex-wrap:wrap;">' +
+          '<div style="flex:1 1 340px;min-width:300px;font-size:0.86rem;">' +
+            field('Voice code <span style="color:#888;font-weight:normal;">(slug)</span>',
+                  '<input id="xv-code" type="text" value="' + escapeHtml(prefix) + '" placeholder="e.g. ' + escapeHtml(prefix) + 'craig" style="' + INP + '">') +
+            field('Display name', '<input id="xv-name" type="text" placeholder=\'e.g. "Craig — calm narrator"\' style="' + INP + '">') +
+            '<div style="display:flex;gap:10px;">' +
+              '<div style="flex:1;">' + field('Gender', '<select id="xv-gender" style="' + INP + 'background:#fff;">' + genderOpts + '</select>') + '</div>' +
+              '<div style="flex:1;">' + field('Language', '<input id="xv-lang" type="text" value="en" maxlength="5" style="' + INP + '">') + '</div>' +
+            '</div>' +
+            field('Description <span style="color:#888;font-weight:normal;">(optional)</span>',
+                  '<textarea id="xv-desc" rows="2" placeholder="When to pick this voice over others" style="' + INP + 'font-family:inherit;resize:vertical;"></textarea>') +
+            '<div style="margin:12px 0 4px;font-weight:700;font-size:0.82rem;">Method</div>' +
+            '<label style="display:block;margin:2px 0;font-size:0.85rem;cursor:pointer;"><input type="radio" name="xv-method" value="clone" checked> <strong>Zero-shot clone</strong> — instant, no training</label>' +
+            '<label style="display:block;margin:2px 0;font-size:0.85rem;cursor:pointer;"><input type="radio" name="xv-method" value="fast"> <strong>Fine-tune · Fast</strong> — ~10–15 min</label>' +
+            '<label style="display:block;margin:2px 0;font-size:0.85rem;cursor:pointer;"><input type="radio" name="xv-method" value="balanced"> <strong>Fine-tune · Balanced</strong> — ~30–45 min (recommended)</label>' +
+            '<label style="display:block;margin:2px 0;font-size:0.85rem;cursor:pointer;"><input type="radio" name="xv-method" value="thorough"> <strong>Fine-tune · Thorough</strong> — ~1 hr+</label>' +
+            field('Reference audio <span style="color:#888;font-weight:normal;">(one or more clips)</span>',
+                  '<input id="xv-files" type="file" multiple accept="audio/wav,audio/mp3,audio/x-wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg" style="font-size:0.82rem;width:100%;">') +
+            '<div id="xv-filelist" style="font-size:0.8rem;color:#555;margin-top:4px;"></div>' +
+            '<div id="xv-transcripts" style="display:none;margin-top:10px;"></div>' +
+          '</div>' +
+          '<div style="flex:1 1 240px;min-width:220px;background:#fffbe6;border:1px solid #e4d27a;border-radius:4px;padding:10px 12px;">' +
+            '<div style="font-weight:700;color:#5b4a00;margin-bottom:6px;font-size:0.85rem;">Coqui XTTS v2 — <span id="xv-method-label">Zero-shot clone</span></div>' +
+            '<dl id="xv-guidance" style="margin:0;font-size:0.8rem;line-height:1.4;color:#5b4a00;"></dl>' +
+          '</div>' +
+        '</div>' +
+        '<div style="margin-top:12px;display:flex;align-items:center;gap:10px;">' +
+          '<button type="button" id="xv-go" style="padding:6px 16px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.9rem;">Create voice</button>' +
+          '<button type="button" id="xv-cancel" style="padding:6px 14px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;font-size:0.9rem;">Cancel</button>' +
+          '<span id="xv-status" style="font-size:0.82rem;color:#888;"></span>' +
+        '</div>' +
+        '<div id="xv-progress" style="display:none;position:relative;margin-top:10px;height:10px;background:#eee;border-radius:5px;overflow:hidden;">' +
+          '<div id="xv-progress-bar" style="height:100%;width:0%;background:#31345A;border-radius:5px;transition:width .12s linear;"></div>' +
+        '</div>';
+
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:10010;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;';
+    var panel = document.createElement('div');
+    panel.style.cssText = 'background:#fff;border-radius:8px;box-shadow:0 10px 40px rgba(0,0,0,0.3);padding:16px 18px;width:720px;max-width:100%;';
+    panel.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+        + '<h3 style="margin:0;font-size:1.02rem;">Add Custom Voice — Coqui XTTS v2</h3>'
+        + '<button type="button" id="xv-x" title="Close" style="border:none;background:none;font-size:1.3rem;line-height:1;cursor:pointer;color:#888;">&times;</button>'
+        + '</div>' + body;
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    var statusEl = panel.querySelector('#xv-status');
+    var goBtn    = panel.querySelector('#xv-go');
+    var progWrap = panel.querySelector('#xv-progress');
+    var progBar  = panel.querySelector('#xv-progress-bar');
+    var stagedJob = null, prepared = [], pollTimer = null;
+
+    // Indeterminate-bar keyframes (one sliding stripe) for phases with no
+    // measurable progress, e.g. building a clone on the box.
+    if (!document.getElementById('xv-progress-style')) {
+        var _ps = document.createElement('style');
+        _ps.id = 'xv-progress-style';
+        _ps.textContent = '#xv-progress-bar.xv-indet{position:absolute;top:0;left:0;width:35%!important;transition:none!important;animation:xvIndet 1.05s ease-in-out infinite;}@keyframes xvIndet{0%{left:-35%}50%{left:55%}100%{left:100%}}';
+        document.head.appendChild(_ps);
+    }
+    function fmtMB(n) { return (n / 1048576).toFixed(1) + ' MB'; }
+    function showProgress() { if (progWrap) { progWrap.style.display = ''; progBar.classList.remove('xv-indet'); progBar.style.width = '0%'; } }
+    function hideProgress() { if (progWrap) { progWrap.style.display = 'none'; progBar.classList.remove('xv-indet'); } }
+    // Drive the bar through a named phase. frac null ⇒ animated indeterminate
+    // stripe (unknown duration); 0..1 ⇒ a real percentage.
+    function setPhase(label, frac, color) {
+        if (!progWrap) { if (label != null) setStatus(label, color); return; }
+        progWrap.style.display = '';
+        if (frac == null) {
+            progBar.classList.add('xv-indet');
+            progBar.style.width = '';
+        } else {
+            progBar.classList.remove('xv-indet');
+            progBar.style.width = Math.max(0, Math.min(100, Math.round(frac * 100))) + '%';
+        }
+        if (label != null) setStatus(label, color || '#666');
+    }
+    // Overall % across all clips: each completed clip is one full slice, the
+    // in-flight clip contributes its own upload fraction.
+    function setProgress(idx, total, loaded, totalBytes) {
+        var frac    = totalBytes ? (loaded / totalBytes) : 0;
+        var overall = total ? Math.round(((idx + frac) / total) * 100) : 0;
+        if (progBar) { progBar.classList.remove('xv-indet'); progBar.style.width = overall + '%'; }
+        var sz = totalBytes ? (' · ' + fmtMB(loaded) + ' / ' + fmtMB(totalBytes)) : '';
+        setStatus('Uploading clip ' + (idx + 1) + '/' + total + sz + ' — ' + overall + '%', '#666');
+    }
+
+    function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+    var close = function () { stopPoll(); if (overlay.parentNode) document.body.removeChild(overlay); };
+    panel.querySelector('#xv-cancel').addEventListener('click', close);
+    panel.querySelector('#xv-x').addEventListener('click', close);
+    // Deliberately NOT closing on backdrop click — an in-progress upload,
+    // transcription or training would be lost on a stray click. Close only
+    // via the × or Cancel button.
+
+    function rawMethod() { var r = panel.querySelector('input[name="xv-method"]:checked'); return r ? r.value : 'clone'; }
+    function method() { return rawMethod() === 'clone' ? 'clone' : 'finetune'; }
+    function presetVal() { var v = rawMethod(); return v === 'clone' ? '' : v; }
+    function setStatus(msg, color) { statusEl.textContent = msg || ''; statusEl.style.color = color || '#888'; }
+    function resetPrepared() {
+        stagedJob = null; prepared = [];
+        var t = panel.querySelector('#xv-transcripts'); t.style.display = 'none'; t.innerHTML = '';
+        stopPoll();
+    }
+    var lastMethod = null;
+    function renderGuidance() {
+        var g = meta.methods[method()];
+        panel.querySelector('#xv-method-label').textContent = g.label;
+        panel.querySelector('#xv-guidance').innerHTML =
+            '<dt style="font-weight:700;">Data needed</dt><dd style="margin:0 0 6px;">' + g.data + '</dd>' +
+            '<dt style="font-weight:700;">Workflow</dt><dd style="margin:0 0 6px;">' + g.workflow + '</dd>' +
+            '<dt style="font-weight:700;">Time-to-voice</dt><dd style="margin:0;">' + g.time + '</dd>';
+        // Only discard staged clips when the clone↔finetune category changes —
+        // switching effort (Fast/Balanced/Thorough) keeps any prepared transcripts.
+        if (method() !== lastMethod) { resetPrepared(); lastMethod = method(); }
+        goBtn.textContent = (method() === 'finetune') ? 'Transcribe & review' : 'Create voice';
+        goBtn.disabled = false;
+    }
+    function listFiles() {
+        var inp = panel.querySelector('#xv-files');
+        var n = inp.files ? inp.files.length : 0, names = [];
+        for (var i = 0; i < n; i++) names.push(inp.files[i].name);
+        panel.querySelector('#xv-filelist').textContent = n ? (n + ' file' + (n > 1 ? 's' : '') + ': ' + names.join(', ')) : '';
+        resetPrepared();
+        goBtn.textContent = (method() === 'finetune') ? 'Transcribe & review' : 'Create voice';
+    }
+    function renderTranscripts() {
+        var wrap = panel.querySelector('#xv-transcripts');
+        if (!prepared.length) { wrap.style.display = 'none'; return; }
+        wrap.style.display = '';
+        wrap.innerHTML = '<div style="font-weight:700;font-size:0.82rem;margin-bottom:4px;">Transcripts <span style="color:#888;font-weight:normal;">(auto-generated — correct any mistakes)</span></div>'
+            + prepared.map(function (c, idx) {
+                var secs = c.seconds ? (' · ' + c.seconds + 's') : '';
+                var note = c._filled ? '✓ transcribed' : '⏳ transcribing…';
+                return '<div style="margin-bottom:6px;">'
+                    + '<div style="font-size:0.76rem;color:#666;">' + escapeHtml(c.filename || c.stub || ('clip ' + (idx + 1))) + secs
+                    + ' <span id="xv-tn-' + idx + '" style="color:#999;">' + note + '</span></div>'
+                    + '<textarea id="xv-tx-' + idx + '" rows="2"' + (c._filled ? '' : ' disabled placeholder="Transcribing… fills in automatically"') + ' style="' + INP + 'font-family:inherit;resize:vertical;">' + escapeHtml(c.text || '') + '</textarea>'
+                    + '</div>';
+            }).join('');
+    }
+    function beginTranscribePoll(job) {
+        stopPoll();
+        pollTimer = setInterval(async function () {
+            try {
+                var fd = new FormData();
+                fd.append('action', 'ft_transcribe_status');
+                fd.append('job', job);
+                var r = await fetch(API + '/admin-tts-customize.php', { method: 'POST', credentials: 'include', body: fd });
+                var d = await r.json();
+                if (!d.ok) throw new Error(d.error || 'status error');
+                var st = d.status || {}, clips = st.clips || [], done = 0;
+                clips.forEach(function (sc) {
+                    var idx = -1;
+                    for (var k = 0; k < prepared.length; k++) { if (prepared[k].stub === sc.stub) { idx = k; break; } }
+                    if (idx < 0) return;
+                    if (sc.done) {
+                        done++;
+                        if (!prepared[idx]._filled) {
+                            prepared[idx].text = sc.text || '';
+                            prepared[idx].segments = sc.segments || [];
+                            prepared[idx]._filled = true;
+                            // Populate unconditionally on first arrival — this is
+                            // gated to once by _filled, and the box is disabled
+                            // until now, so there is no user edit to clobber. (An
+                            // empty-guard here dropped the transcript whenever a
+                            // stray char landed in the box during the long wait.)
+                            var ta = panel.querySelector('#xv-tx-' + idx);
+                            if (ta) { ta.value = sc.text || ''; ta.disabled = false; ta.placeholder = ''; }
+                            var nt = panel.querySelector('#xv-tn-' + idx);
+                            if (nt) { nt.textContent = sc.error ? ('⚠ ' + sc.error) : '✓ transcribed'; nt.style.color = sc.error ? '#c0392b' : '#2e7d32'; }
+                        }
+                    }
+                });
+                setPhase('Transcribing… ' + done + '/' + clips.length + ' done', clips.length ? (done / clips.length) : null);
+                if (st.state === 'done' || (clips.length && done === clips.length)) {
+                    stopPoll();
+                    hideProgress();
+                    goBtn.textContent = 'Start fine-tune';
+                    goBtn.disabled = false;
+                    setStatus('Review the transcripts, then start training.', '#2e7d32');
+                } else if (st.state === 'error') {
+                    stopPoll();
+                    hideProgress();
+                    setStatus('Transcription failed: ' + (st.message || 'unknown'), '#c0392b');
+                }
+            } catch (e) {
+                setStatus('Transcribing… (waiting on status)', '#999');
+            }
+        }, 4000);
+    }
+
+    panel.querySelectorAll('input[name="xv-method"]').forEach(function (r) { r.addEventListener('change', renderGuidance); });
+    panel.querySelector('#xv-files').addEventListener('change', listFiles);
+    renderGuidance();
+
+    function validBasics() {
+        var code = (panel.querySelector('#xv-code').value || '').trim();
+        if (!code) { setStatus('Voice code is required.', '#c0392b'); return null; }
+        if (!/^[A-Za-z0-9_-]+$/.test(code)) { setStatus('Code must be alphanumeric (dashes/underscores ok).', '#c0392b'); return null; }
+        var inp = panel.querySelector('#xv-files');
+        if (!inp.files || !inp.files.length) { setStatus('Choose at least one reference clip.', '#c0392b'); return null; }
+        return {
+            code: code,
+            label: (panel.querySelector('#xv-name').value || '').trim(),
+            gender: (panel.querySelector('#xv-gender').value || '').trim(),
+            language: ((panel.querySelector('#xv-lang').value || 'en').trim()) || 'en',
+            description: (panel.querySelector('#xv-desc').value || '').trim(),
+            files: inp.files,
+        };
+    }
+    function baseForm(b, extra) {
+        var fd = new FormData();
+        fd.append('provider', 'xtts');
+        fd.append('code', b.code);
+        fd.append('label', b.label);
+        fd.append('gender', b.gender);
+        fd.append('language', b.language);
+        fd.append('description', b.description);
+        Object.keys(extra || {}).forEach(function (k) { fd.append(k, extra[k]); });
+        return fd;
+    }
+    // XHR (not fetch) so we can report upload progress via xhr.upload.onprogress.
+    // onProgress(loaded, total) is optional — status polls/clone/start omit it.
+    function postCustomize(fd, onProgress) {
+        return new Promise(function (resolve, reject) {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', API + '/admin-tts-customize.php', true);
+            xhr.withCredentials = true;
+            if (onProgress && xhr.upload) {
+                xhr.upload.onprogress = function (e) { if (e.lengthComputable) onProgress(e.loaded, e.total); };
+            }
+            xhr.onload = function () {
+                var ct = (xhr.getResponseHeader('content-type') || '');
+                var d;
+                try { d = ct.indexOf('json') >= 0 ? JSON.parse(xhr.responseText) : { error: xhr.responseText }; }
+                catch (err) { d = { error: xhr.responseText || ('HTTP ' + xhr.status) }; }
+                if (xhr.status < 200 || xhr.status >= 300 || !d || !d.ok) {
+                    reject(new Error((d && d.error) || ('HTTP ' + xhr.status)));
+                } else { resolve(d); }
+            };
+            xhr.onerror   = function () { reject(new Error('network error during upload')); };
+            xhr.ontimeout = function () { reject(new Error('upload timed out')); };
+            xhr.send(fd);
+        });
+    }
+    // Upload clips ONE PER REQUEST (avoids the CF 524 from batching) with a
+    // per-file progress bar; accumulates the job id + staged clip metadata.
+    // Poll a background staging worker (spawned by ft_stage_one) until the
+    // clip has been pushed to the GPU box. The push runs off the edge-timed
+    // request, so this can take a while for a big clip over the slow link.
+    function pollStage(token, label) {
+        return new Promise(function (resolve, reject) {
+            var tries = 0;
+            var iv = setInterval(async function () {
+                tries++;
+                try {
+                    var fd = new FormData();
+                    fd.append('action', 'ft_stage_status');
+                    fd.append('token', token);
+                    var d = await postCustomize(fd);
+                    if (d.state === 'done')  { clearInterval(iv); resolve(d); return; }
+                    if (d.state === 'error') { clearInterval(iv); reject(new Error(d.error || 'staging failed')); return; }
+                    if (label) setPhase(label + ' (' + Math.round(tries * 3) + 's)', null);
+                } catch (e) { /* transient — keep polling */ }
+                if (tries > 800) { clearInterval(iv); reject(new Error('staging timed out')); }
+            }, 3000);
+        });
+    }
+    async function stageAllClips(b, m) {
+        var files = Array.prototype.slice.call(b.files);
+        var job = '', clips = [];
+        showProgress();
+        try {
+            for (var i = 0; i < files.length; i++) {
+                // 1) upload the clip to the server (fast browser→origin, shows %)
+                var fd = baseForm(b, { action: 'ft_stage_one', method: m });
+                if (job) fd.append('job', job);
+                fd.append('audio', files[i], files[i].name);
+                var res = await postCustomize(fd, (function (idx) {
+                    return function (loaded, total) { setProgress(idx, files.length, loaded, total); };
+                })(i));
+                // 2) wait while the server pushes it to the GPU box in the background
+                var lbl = 'Sending clip ' + (i + 1) + '/' + files.length + ' to the GPU box…';
+                setPhase(lbl, null);
+                var staged = await pollStage(res.token, lbl);
+                job = staged.job || job;
+                if (staged.clip) clips.push(staged.clip);
+            }
+        } finally { hideProgress(); }
+        return { job: job, clips: clips };
+    }
+    function beginPoll(job) {
+        stopPoll();
+        pollTimer = setInterval(async function () {
+            try {
+                var fd = new FormData();
+                fd.append('action', 'ft_status');
+                fd.append('job', job);
+                var r = await fetch(API + '/admin-tts-customize.php', { method: 'POST', credentials: 'include', body: fd });
+                var d = await r.json();
+                if (!d.ok) throw new Error(d.error || 'status error');
+                var st = d.status || {};
+                var pct = Math.round((st.progress || 0) * 100);
+                if (st.state === 'done') {
+                    stopPoll();
+                    setPhase('✓ Training complete. Reloading…', 1, '#2e7d32');
+                    setTimeout(function () { window.location.reload(); }, 1000);
+                } else if (st.state === 'error') {
+                    stopPoll();
+                    hideProgress();
+                    setStatus('Training failed: ' + (st.message || 'unknown'), '#c0392b');
+                    goBtn.disabled = false; goBtn.textContent = 'Start fine-tune';
+                } else {
+                    // Training % is known once the box reports progress; until the
+                    // first step lands, st.progress is 0 — show an indeterminate bar.
+                    setPhase('Training… ' + pct + '% — ' + (st.message || st.state || ''),
+                             (st.progress != null && st.progress > 0) ? st.progress : null);
+                }
+            } catch (e) {
+                setStatus('Training… (waiting on status)', '#999');
+            }
+        }, 4000);
+    }
+
+    goBtn.addEventListener('click', async function () {
+        var m = method();
+        var b = validBasics();
+        if (!b) return;
+        goBtn.disabled = true;
+        try {
+            if (m === 'clone') {
+                var stc = await stageAllClips(b, 'clone');
+                if (!stc.clips.length) { setStatus('No clips could be staged.', '#c0392b'); goBtn.disabled = false; return; }
+                goBtn.textContent = 'Building…';
+                setPhase('Building voice from ' + stc.clips.length + ' clip' + (stc.clips.length > 1 ? 's' : '') + '…', null);
+                await postCustomize(baseForm(b, { action: 'ft_clone', job: stc.job }));
+                setPhase('✓ Voice created. Reloading…', 1, '#2e7d32');
+                setTimeout(function () { window.location.reload(); }, 800);
+                return;
+            }
+            if (!prepared.length) {
+                var stf = await stageAllClips(b, 'finetune');
+                stagedJob = stf.job; prepared = stf.clips || [];
+                if (!prepared.length) { setStatus('No clips could be staged.', '#c0392b'); goBtn.disabled = false; return; }
+                renderTranscripts();
+                setPhase('Starting transcription…', null);
+                var pr = await postCustomize(baseForm(b, { action: 'ft_transcribe', job: stagedJob }));
+                if (pr.transcribing) {
+                    // STT runs in the background on the box (long audio can take
+                    // minutes); poll until each clip's transcript arrives.
+                    goBtn.textContent = 'Transcribing…';
+                    setStatus('Transcribing clips… (long audio can take a few minutes)', '#666');
+                    beginTranscribePoll(stagedJob);
+                } else {
+                    goBtn.textContent = 'Start fine-tune';
+                    goBtn.disabled = false;
+                    setStatus('Review the transcripts, then start training.', '#666');
+                }
+                return;
+            }
+            var clips = prepared.map(function (c, idx) {
+                var ta = panel.querySelector('#xv-tx-' + idx);
+                return { file: c.stub, text: (ta ? ta.value : (c.text || '')).trim(),
+                         segments: c.segments || [] };
+            }).filter(function (c) { return c.file && c.text; });
+            if (!clips.length) { setStatus('Each clip needs a transcript.', '#c0392b'); goBtn.disabled = false; return; }
+            var preset = presetVal() || 'balanced';
+            setPhase('Starting fine-tune…', null);
+            var sd = await postCustomize(baseForm(b, { action: 'ft_start', job: stagedJob, preset: preset, clips: JSON.stringify(clips) }));
+            goBtn.textContent = 'Training…';
+            beginPoll(sd.job || stagedJob);
+        } catch (e) {
+            hideProgress();
+            setStatus('Failed: ' + (e.message || e), '#c0392b');
+            goBtn.disabled = false;
+        }
+    });
 }
 
 // ── Unified Add / Edit Custom Voice popover ─────────────────────────────
@@ -2169,6 +2659,9 @@ function openCustomVoicePopover(opts) {
     var mode = opts.mode === 'edit' ? 'edit' : 'add';
     var v = opts.voice || null;
     var engineCode = opts.engineCode || (v ? (v.tts_code || '') : '');
+    // XTTS "add" gets the dedicated two-method (clone / fine-tune) flow with
+    // multi-file upload. Edit mode + every other provider use the shared form.
+    if (mode === 'add' && engineCode === 'xtts') { return openXttsAddVoice(opts); }
     var meta = CUSTOMIZE_PROVIDERS[engineCode];
     var noAudio = !!(meta && meta.noAudio);
     var provLabel = (meta && meta.label) || engineCode;
@@ -2197,17 +2690,15 @@ function openCustomVoicePopover(opts) {
              + '<input type="' + (f.type || 'text') + '" id="' + f.id + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">';
     }).join('');
 
-    // Reference clips section: edit mode lists existing styles (each clip is a
-    // style) with remove buttons; both modes can add a clip (which auto-trains).
+    // Reference clips section: edit mode lists the clips the box actually holds
+    // (filled in async so each shows its ORIGINAL uploaded filename, not just
+    // the style key); both modes can add a clip (which auto-trains). Falls back
+    // to the DB style names if the box is unreachable.
     var clipsListHtml = '';
     if (mode === 'edit') {
-        clipsListHtml = '<div style="margin-top:6px;font-size:0.82rem;color:#444;"><strong>Reference clips used to train this voice</strong>'
-            + (styles.length
-                ? '<ul style="margin:4px 0 0;padding-left:18px;">' + styles.map(function (s) {
-                    return '<li style="margin:1px 0;">' + escapeHtml(s)
-                        + ' <button type="button" class="cvp-del-style" data-style="' + escapeHtml(s) + '" style="font-size:0.72rem;border:1px solid #c0392b;background:#fff;color:#c0392b;border-radius:3px;cursor:pointer;padding:0 5px;margin-left:6px;">remove</button></li>';
-                  }).join('') + '</ul>'
-                : ' <span style="color:#888;">none yet</span>')
+        clipsListHtml = '<div style="margin-top:6px;font-size:0.82rem;color:#444;">'
+            + '<strong>Reference clips used to train this voice</strong>'
+            + '<div id="cvp-clips" style="margin-top:4px;color:#888;">Loading…</div>'
             + '</div>';
     }
 
@@ -2277,7 +2768,8 @@ function openCustomVoicePopover(opts) {
     var close = function () { if (overlay.parentNode) document.body.removeChild(overlay); };
     panel.querySelector('.cvp-cancel').addEventListener('click', close);
     panel.querySelector('.cvp-x').addEventListener('click', close);
-    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    // Backdrop clicks do not dismiss — avoids losing entered data / uploads.
+    // Close only via the × or Cancel button.
 
     // Audio preview.
     var audioInput = panel.querySelector('#cvp-audio');
@@ -2290,12 +2782,18 @@ function openCustomVoicePopover(opts) {
         });
     }
 
-    // Remove-style buttons (edit mode).
-    panel.querySelectorAll('.cvp-del-style').forEach(function (btn) {
+    // Remove one reference clip (= remove its style). Removing the last one is
+    // allowed — the voice (and any fine-tuned model) is kept; it just has no
+    // reference clip until a new one is uploaded.
+    function bindRemove(btn) {
         btn.addEventListener('click', async function () {
             var style = btn.dataset.style;
-            if (!confirm('Remove style "' + style + '" from "' + v.tts_voice_code + '"? Its reference clip on the box will be deleted.')) return;
-            statusEl.textContent = 'Removing style…'; statusEl.style.color = '#888';
+            var last  = btn.dataset.last === '1';
+            var msg = last
+                ? 'Remove the last reference clip from "' + v.tts_voice_code + '"?\n\nThe voice is kept (any trained model stays), but it will have no reference clip until you upload a new one.'
+                : 'Remove clip "' + style + '" from "' + v.tts_voice_code + '"? Its audio on the box will be deleted.';
+            if (!confirm(msg)) return;
+            statusEl.textContent = 'Removing clip…'; statusEl.style.color = '#888';
             try {
                 var r = await fetch(API + '/admin-tts-voice-edit.php', {
                     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
@@ -2306,7 +2804,49 @@ function openCustomVoicePopover(opts) {
                 window.location.reload();
             } catch (e) { statusEl.textContent = 'Failed: ' + e.message; statusEl.style.color = '#c0392b'; }
         });
-    });
+    }
+
+    // Populate the clip list from the box (original filenames). Falls back to
+    // the DB style names when the box is unreachable.
+    var clipsBox = panel.querySelector('#cvp-clips');
+    function renderClipsFallback() {
+        if (!clipsBox) return;
+        if (!styles.length) { clipsBox.innerHTML = '<span style="color:#888;">none yet</span>'; return; }
+        clipsBox.innerHTML = '<ul style="margin:0;padding-left:18px;">' + styles.map(function (s) {
+            return '<li style="margin:1px 0;">' + escapeHtml(s)
+                + ' <button type="button" class="cvp-del-style" data-style="' + escapeHtml(s)
+                + '" data-last="' + (styles.length === 1 ? '1' : '0')
+                + '" style="font-size:0.72rem;border:1px solid #c0392b;background:#fff;color:#c0392b;border-radius:3px;cursor:pointer;padding:0 5px;margin-left:6px;">remove</button></li>';
+        }).join('') + '</ul>';
+        clipsBox.querySelectorAll('.cvp-del-style').forEach(bindRemove);
+    }
+    if (mode === 'edit' && clipsBox) {
+        fetch(API + '/admin-tts-voice-edit.php?action=clips&code=' + encodeURIComponent(v.tts_voice_code), { credentials: 'include' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d || !d.ok || d.engine_offline || !Array.isArray(d.styles)) { renderClipsFallback(); return; }
+                var rows = d.styles;
+                if (!rows.length) { clipsBox.innerHTML = '<span style="color:#888;">none yet</span>'; return; }
+                var single = rows.length === 1;
+                clipsBox.innerHTML = '<ul style="margin:0;padding-left:18px;">' + rows.map(function (row) {
+                    var clips = row.clips && row.clips.length ? row.clips : [{ name: row.style, file: '' }];
+                    var names = clips.map(function (c) {
+                        var label = c.name || c.file || row.style;
+                        var fileNote = (c.file && c.name && c.file !== c.name)
+                            ? ' <span style="color:#999;">(' + escapeHtml(c.file) + ')</span>' : '';
+                        return escapeHtml(label) + fileNote;
+                    }).join('<br>');
+                    var styleTag = (row.style && row.style !== 'default')
+                        ? ' <span style="color:#888;">[' + escapeHtml(row.style) + ']</span>' : '';
+                    return '<li style="margin:2px 0;">' + names + styleTag
+                        + ' <button type="button" class="cvp-del-style" data-style="' + escapeHtml(row.style)
+                        + '" data-last="' + (single ? '1' : '0')
+                        + '" style="font-size:0.72rem;border:1px solid #c0392b;background:#fff;color:#c0392b;border-radius:3px;cursor:pointer;padding:0 5px;margin-left:6px;">remove</button></li>';
+                }).join('') + '</ul>';
+                clipsBox.querySelectorAll('.cvp-del-style').forEach(bindRemove);
+            })
+            .catch(function () { renderClipsFallback(); });
+    }
 
     panel.querySelector('.cvp-save').addEventListener('click', async function () {
         var code   = (panel.querySelector('#cvp-code').value || '').trim();
@@ -2383,6 +2923,12 @@ async function loadVoiceCatalog() {
     var tbody = $('voices-tbody');
     if (!tbody) return;
     var s = $('vc-status'); if (s) { s.textContent = 'Loading voices…'; s.className = 'status-msg'; }
+    // Reconcile any XTTS fine-tunes that finished while no modal was polling
+    // (flips 'building' rows active once the engine has the trained voice).
+    try {
+        var rfd = new FormData(); rfd.append('action', 'ft_reconcile');
+        await fetch(API + '/admin-tts-customize.php', { method: 'POST', credentials: 'include', body: rfd });
+    } catch (e) { /* non-fatal */ }
     try {
         var scopeKey = getCatalogScopeKey();
         var url = '/admin-tts-voices.php?action=list' + (scopeKey ? ('&tts_key=' + scopeKey) : '');
@@ -2547,6 +3093,7 @@ function buildVoiceRow(v) {
     tr.dataset.voiceKey = v.tts_voice_key;
     var isMulti = vcIsMulti(v);
     var active = !!v.tts_voice_active_flag;
+    var building = (v.tts_voice_status === 'building');
     var isCustom = vcIsCustom(v);
     var isSelected = VC_STATE.selectedKey === v.tts_voice_key;
     tr.classList.toggle('inactive', !active);
@@ -2576,7 +3123,7 @@ function buildVoiceRow(v) {
     var providerLabel = v.tts_name || v.tts_code || '';
     tr.innerHTML =
         '<td style="text-align:center;padding:4px 2px;">' +
-            '<input type="checkbox" class="vc-active"' + (active ? ' checked' : '') + '>' +
+            '<input type="checkbox" class="vc-active"' + (active ? ' checked' : '') + (building ? ' disabled title="Fine-tune training in progress — this voice activates automatically when training finishes"' : '') + '>' +
         '</td>' +
         // Provider (from yy_tts joined in admin-tts-voices.php). Sits in front
         // of the Voice column so cross-provider catalogs are scannable.
@@ -2588,6 +3135,7 @@ function buildVoiceRow(v) {
         '<td style="padding:4px 6px;">'
             + '<div style="display:flex;align-items:center;gap:6px;">'
             +   '<span class="vc-voice-label" style="white-space:nowrap;">' + escapeHtml(v.tts_voice_label || v.tts_voice_code || '') + '</span>'
+            +   (building ? '<span class="vc-building-badge" title="Fine-tune training on the GPU box — activates automatically when training finishes" style="white-space:nowrap;font-size:0.68rem;font-weight:700;color:#8a5a00;background:#fff3cd;border:1px solid #e4d27a;border-radius:10px;padding:1px 8px;">⏳ Training…</span>' : '')
             +   '<input type="text" class="vc-note-inline" value="' + escapeHtml(v.tts_voice_note || '') + '" placeholder="note…" maxlength="60" title="Short identifier shown next to this voice. Use sparingly — does not rename the voice upstream." style="flex:1;min-width:60px;padding:2px 6px;border:1px solid #e0e0e0;border-radius:3px;font-size:0.78rem;color:#555;background:#fafafa;">'
             + '</div>'
         + '</td>' +
@@ -2623,7 +3171,10 @@ function buildVoiceRow(v) {
         // rows leave it empty. Sortable/filterable via the tts_voice_custom_flag.
         '<td style="text-align:center;padding:4px 2px;">' +
             (isCustom
-                ? '<button type="button" class="btn-sm btn-sec vc-edit" title="Edit custom voice (code / metadata / reference clips)" style="padding:1px 6px;color:#2e7d32;">✎</button>'
+                ? '<button type="button" class="vc-edit" title="Edit voice — code, metadata &amp; reference clips">'
+                    + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">'
+                    + '<path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.07.62-.07.94 0 .32.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.39.3.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.25.41.48.41h3.84c.23 0 .43-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>'
+                    + '</button>'
                 : '') +
         '</td>' +
         '<td style="text-align:center;padding:4px 2px;white-space:nowrap;">' +

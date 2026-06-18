@@ -263,18 +263,28 @@ if ($action === 'apply') {
                 'word_boundary'  => (bool)$wordBoundary,
                 'is_regex'       => (bool)$isRegex,
             ];
+            // Targeted upsert by primary key — NOT a whole-transcript rewrite.
+            // The old delete-all + insert-all per item re-indexed every row in
+            // the GIN trigram/tsv indexes, which under contention made big
+            // "apply to all" runs exceed Cloudflare's 100s limit (HTTP 524).
             $insStmt = $db->prepare("
                 INSERT INTO yy_feed_item_transcript
                     (feed_item_key, feed_item_transcript_segment, feed_item_transcript_text, feed_item_transcript_sort,
                      feed_item_transcript_revision_user_key)
                 VALUES (?, ?::interval, ?, ?, ?)
+                ON CONFLICT (feed_item_key, feed_item_transcript_segment, md5(feed_item_transcript_text)) DO NOTHING
             ");
-            $delStmt = $db->prepare("DELETE FROM yy_feed_item_transcript WHERE feed_item_key = ?");
+            $updRowStmt = $db->prepare("UPDATE yy_feed_item_transcript
+                   SET feed_item_transcript_text = ?, feed_item_transcript_sort = ?,
+                       feed_item_transcript_revision_user_key = ?, feed_item_transcript_revision_dtime = NOW()
+                 WHERE feed_item_transcript_key = ? AND feed_item_key = ?");
+            $delRowStmt = $db->prepare("DELETE FROM yy_feed_item_transcript WHERE feed_item_transcript_key = ? AND feed_item_key = ?");
             foreach ($itemKeys as $ik) {
                 $allRowsStmt = $db->prepare("
-                    SELECT feed_item_transcript_segment::text AS segment,
-                           feed_item_transcript_text          AS text,
-                           feed_item_transcript_sort          AS sort
+                    SELECT feed_item_transcript_key            AS key,
+                           feed_item_transcript_segment::text  AS segment,
+                           feed_item_transcript_text           AS text,
+                           feed_item_transcript_sort           AS sort
                       FROM yy_feed_item_transcript
                      WHERE feed_item_key = ?
                      ORDER BY feed_item_transcript_sort, feed_item_transcript_segment
@@ -282,39 +292,46 @@ if ($action === 'apply') {
                 $allRowsStmt->execute([$ik]);
                 $origRows = $allRowsStmt->fetchAll();
                 if (!$origRows) continue;
+                $origByKey = [];
+                foreach ($origRows as $or) $origByKey[(int)$or['key']] = $or['text'];
+                // applyReplacementsAcrossRows preserves each unmerged row's key;
+                // a MERGED row comes back without a key (→ inserted as new, and
+                // the original keys it absorbed fall out of $keptKeys → deleted).
                 $newRows = applyReplacementsAcrossRows($origRows, [$rep]);
 
-                // Diff: for each original segment, find the new text. Missing
-                // segment in newRows means the row merged into an earlier
-                // segment — log it as a removal (edit_new_text = '').
-                $newBySeg = [];
-                foreach ($newRows as $nr) $newBySeg[$nr['segment']] = $nr['text'];
-                $itemChanged = false;
-                foreach ($origRows as $or) {
-                    $newText = $newBySeg[$or['segment']] ?? null;
-                    if ($newText === null) {
-                        $logStmt->execute([$ik, $or['segment'], $or['text'], '',
-                                           $user['user_key'], $batchKey]);
+                $keptKeys = [];
+                $seenRows = [];
+                $sort = 0;
+                foreach ($newRows as $nr) {
+                    $rowText  = mb_substr((string)$nr['text'], 0, 2000);
+                    $dedupKey = (string)$nr['segment'] . "\x00" . $rowText;
+                    if (isset($seenRows[$dedupKey])) continue; // never persist exact dups
+                    $seenRows[$dedupKey] = true;
+                    $nk = (isset($nr['key']) && $nr['key'] !== null && $nr['key'] !== '') ? (int)$nr['key'] : null;
+                    if ($nk !== null && isset($origByKey[$nk])) {
+                        $keptKeys[$nk] = true;
+                        if ($origByKey[$nk] !== $rowText) {
+                            // text changed → UPDATE this row only (minimal GIN churn)
+                            $logStmt->execute([$ik, $nr['segment'], $origByKey[$nk], $rowText, $user['user_key'], $batchKey]);
+                            $rowsForAutoLearn[] = ['old_text' => $origByKey[$nk], 'new_text' => $rowText];
+                            $updRowStmt->execute([$rowText, $sort, $user['user_key'], $nk, $ik]);
+                            $changed++;
+                        }
+                    } else {
+                        // merged/new row → INSERT
+                        $logStmt->execute([$ik, $nr['segment'], null, $rowText, $user['user_key'], $batchKey]);
+                        $insStmt->execute([$ik, $nr['segment'], $rowText, $sort, $user['user_key']]);
                         $changed++;
-                        $itemChanged = true;
-                    } elseif ($newText !== $or['text']) {
-                        $logStmt->execute([$ik, $or['segment'], $or['text'],
-                                           mb_substr($newText, 0, 2000),
-                                           $user['user_key'], $batchKey]);
-                        $changed++;
-                        $itemChanged = true;
-                        // Track for auto-learn (token-diff path)
-                        $rowsForAutoLearn[] = ['old_text' => $or['text'], 'new_text' => $newText];
                     }
+                    $sort++;
                 }
-                if ($itemChanged) {
-                    $delStmt->execute([$ik]);
-                    $sort = 0;
-                    foreach ($newRows as $nr) {
-                        $insStmt->execute([$ik, $nr['segment'],
-                                           mb_substr((string)$nr['text'], 0, 2000),
-                                           $sort, $user['user_key']]);
-                        $sort++;
+                // Original rows absorbed by a merge (key no longer present) → DELETE.
+                foreach ($origRows as $or) {
+                    $ok = (int)$or['key'];
+                    if (!isset($keptKeys[$ok])) {
+                        $logStmt->execute([$ik, $or['segment'], $or['text'], '', $user['user_key'], $batchKey]);
+                        $delRowStmt->execute([$ok, $ik]);
+                        $changed++;
                     }
                 }
             }

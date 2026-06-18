@@ -220,7 +220,11 @@ function gpuRegisterVoice(array $params, string $audioPath, int $timeout = 60): 
     foreach (['provider','code','label','description','language','gender','prompt_text','style'] as $k) {
         if (isset($params[$k])) $form[$k] = (string)$params[$k];
     }
-    $form['file'] = new CURLFile($audioPath, $mime, basename($audioPath));
+    // Send the ORIGINAL upload filename as the multipart postname so the engine
+    // can record it (shown next to the clip in the edit modal). Falls back to
+    // the relay file's basename when no original name was supplied.
+    $postName = !empty($params['orig_name']) ? (string)$params['orig_name'] : basename($audioPath);
+    $form['file'] = new CURLFile($audioPath, $mime, $postName);
     return gpuRequest('POST', '/tts/voices', ['multipart' => $form, 'timeout' => $timeout]);
 }
 
@@ -281,6 +285,97 @@ function gpuRegisterBuiltinVoice(array $params, int $timeout = 30): array {
         if (isset($params[$k])) $form[$k] = (string)$params[$k];
     }
     return gpuRequest('POST', '/tts/voices/builtin', ['multipart' => $form, 'timeout' => $timeout]);
+}
+
+/**
+ * Stage ONE reference clip into a fine-tune/clone job dir on the box. Clips
+ * upload one-per-call (reusing the single-file multipart path); pass back the
+ * returned job id on subsequent calls so they accumulate. The engine normalizes
+ * each clip to 24k mono wav. Returns ['ok'=>true,'data'=>{job,stub,filename,
+ * seconds,index}].  Engine route POST /tts/voices/stage.
+ */
+function gpuStageClip(string $job, string $audioPath, int $timeout = 120, string $origName = ''): array {
+    if (!is_file($audioPath)) {
+        return ['ok' => false, 'status' => 0, 'error' => 'audio file not found: ' . $audioPath];
+    }
+    $mime = function_exists('mime_content_type')
+        ? (mime_content_type($audioPath) ?: 'application/octet-stream')
+        : 'application/octet-stream';
+    // Postname carries the original upload filename (relay file is randomized).
+    $postName = $origName !== '' ? $origName : basename($audioPath);
+    $form = ['file' => new CURLFile($audioPath, $mime, $postName)];
+    if ($job !== '') $form['job'] = $job;
+    return gpuRequest('POST', '/tts/voices/stage', ['multipart' => $form, 'timeout' => $timeout]);
+}
+
+/**
+ * Build a multi-reference zero-shot clone voice from the clips already staged
+ * under $params['job']. XTTS averages the speaker latents across all clips.
+ *   $params: ['provider'=>'xtts','code'=>…,'label'=>…,'description'=>…,
+ *             'language'=>'en','gender'=>…,'job'=>'job-N']
+ * Engine route POST /tts/voices/clone-multi.
+ */
+function gpuCloneMulti(array $params, int $timeout = 180): array {
+    foreach (['code', 'job'] as $req) {
+        if (empty($params[$req])) {
+            return ['ok' => false, 'status' => 0, 'error' => "missing required field '$req'"];
+        }
+    }
+    $form = [];
+    foreach (['provider','code','label','description','language','gender','job'] as $k) {
+        if (isset($params[$k])) $form[$k] = (string)$params[$k];
+    }
+    if (empty($form['provider'])) $form['provider'] = 'xtts';
+    return gpuRequest('POST', '/tts/voices/clone-multi', ['multipart' => $form, 'timeout' => $timeout]);
+}
+
+/**
+ * Kick off a background XTTS fine-tune over the staged clips. Returns
+ * immediately (training is async — poll gpuFinetuneStatus). 409 if a run is
+ * already in progress.
+ *   $payload: ['job'=>…,'code'=>…,'label'=>…,'description'=>…,'language'=>…,
+ *              'gender'=>…,'preset'=>'fast|balanced|thorough',
+ *              'clips'=>[['file'=>'01.wav','text'=>'…'], …]]
+ * Engine route POST /tts/voices/finetune/start.
+ */
+function gpuFinetuneStart(array $payload, int $timeout = 30): array {
+    foreach (['job', 'code', 'clips'] as $req) {
+        if (empty($payload[$req])) {
+            return ['ok' => false, 'status' => 0, 'error' => "missing required field '$req'"];
+        }
+    }
+    return gpuRequest('POST', '/tts/voices/finetune/start', ['json' => $payload, 'timeout' => $timeout]);
+}
+
+/**
+ * Poll a fine-tune job's progress. Returns ['ok'=>true,'data'=>{state,progress,
+ * step,total_steps,message,code,...}] — state ∈ queued|preparing|training|
+ * publishing|done|error. Engine route GET /tts/voices/finetune/status.
+ */
+function gpuFinetuneStatus(string $job, int $timeout = 20): array {
+    return gpuRequest('GET', '/tts/voices/finetune/status?job=' . urlencode($job), ['timeout' => $timeout]);
+}
+
+/**
+ * Begin BACKGROUND transcription of the clips staged under $job (fine-tune
+ * review step). Returns immediately with the clip list; poll
+ * gpuTranscribeJobStatus() for the text. Engine route POST
+ * /tts/voices/transcribe/start. (Avoids the ~100s edge timeout that long
+ * synchronous STT hits.)
+ */
+function gpuTranscribeJobStart(string $job, string $language = 'en', int $timeout = 30): array {
+    if ($job === '') return ['ok' => false, 'status' => 0, 'error' => 'job required'];
+    return gpuRequest('POST', '/tts/voices/transcribe/start',
+        ['multipart' => ['job' => $job, 'language' => $language], 'timeout' => $timeout]);
+}
+
+/**
+ * Poll a transcription job: ['ok'=>true,'data'=>{state,clips:[{stub,filename,
+ * seconds,text,segments,done,error}]}]. Engine route GET
+ * /tts/voices/transcribe/status.
+ */
+function gpuTranscribeJobStatus(string $job, int $timeout = 20): array {
+    return gpuRequest('GET', '/tts/voices/transcribe/status?job=' . urlencode($job), ['timeout' => $timeout]);
 }
 
 // ── CLI self-test ───────────────────────────────────────────────────────────

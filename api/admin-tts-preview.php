@@ -127,6 +127,29 @@ $resolvedCat = $primaryCat ?? 'main';
 $providerKey = ttsResolveProviderKey($cfg, $resolvedCat);
 $transport   = ttsProviderTransport($cfg, $providerKey);
 $usesSsml    = ($transport === 'azure-ssml');
+
+// Self-hosted GPU engines (XTTS/Coqui, Chatterbox, CosyVoice, Qwen3) are
+// autoregressive and slow — ~5-10 s per sentence chunk. We chunk long text
+// below so it no longer 500s, but a whole page / chapter would still run
+// past the ~100 s CDN proxy timeout and surface as a gateway error. So for
+// local engines we silently TRIM the preview to roughly one paragraph
+// (p99 ≈ 1053 chars) and play that — the audition only needs a sample of the
+// voice, not the whole selection. Cloud providers (Azure / ElevenLabs /
+// Inworld) keep the full 8000-char allowance since they synthesise quickly.
+const PREVIEW_LOCAL_CHAR_CAP = 1200;
+if ($transport === 'gpu-tailnet' && mb_strlen($text) > PREVIEW_LOCAL_CHAR_CAP) {
+    $text = mb_substr($text, 0, PREVIEW_LOCAL_CHAR_CAP);
+    // Back off to the last whitespace so we don't cut mid-word.
+    $lastSpace = mb_strrpos($text, ' ');
+    if ($lastSpace !== false && $lastSpace > PREVIEW_LOCAL_CHAR_CAP * 0.6) {
+        $text = mb_substr($text, 0, $lastSpace);
+    }
+    // Drop any dangling unterminated tag fragment the cut may have left
+    // (e.g. sliced inside "<b"). Local synth flattens b/i anyway, but a
+    // half-open tag could confuse the segmenter.
+    $text = rtrim(preg_replace('/<[^>]*$/', '', $text));
+}
+
 $err = '';
 $mp3 = '';
 
@@ -195,15 +218,32 @@ try {
         // (tune_override carries one) so the audition tells the listener
         // which variant they're hearing.
         if (mb_strlen(trim((string)($localSeg['text'] ?? ''))) <= 120) {
+            // Short preview (single word / phrase): warmup + ONE synth call.
+            // The warmup must travel in the same call so the engine's startup
+            // garbage lands on it — chunking here would speak "uh." aloud.
             $warmup = (isset($localSeg['seed']) && $localSeg['seed'] !== null)
                 ? (((int)$localSeg['seed']) . '. ')
                 : 'uh. ';
             $localSeg['text'] = $warmup . $localSeg['text'];
-        }
-        if (function_exists('localTtsSynthesizeRetry')) {
-            $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
+            if (function_exists('localTtsSynthesizeRetry')) {
+                $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
+            } else {
+                $mp3 = localTtsSynthesize($cfg, $localSeg, $outputFormat, $err);
+            }
         } else {
-            $mp3 = localTtsSynthesize($cfg, $localSeg, $outputFormat, $err);
+            // Long preview (the Load button can pull a whole page / chapter).
+            // Local engines (XTTS/Coqui, Chatterbox, CosyVoice) reject or
+            // truncate text over ~250 chars per call — XTTS returns HTTP 500
+            // outright, which surfaced as a failed preview. Chunk at sentence
+            // boundaries exactly like the book-build worker so each GPU call
+            // stays under the cap; the MP3 frames concatenate losslessly.
+            if (function_exists('localTtsSynthesizeChunked')) {
+                $mp3 = localTtsSynthesizeChunked($cfg, $localSeg, $outputFormat, $err);
+            } elseif (function_exists('localTtsSynthesizeRetry')) {
+                $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
+            } else {
+                $mp3 = localTtsSynthesize($cfg, $localSeg, $outputFormat, $err);
+            }
         }
     }
 } catch (Throwable $e) {

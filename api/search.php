@@ -20,43 +20,59 @@ $stripChars = ["\u{02BF}","\u{02BE}","\u{02BC}","\u{02BB}","\u{02B9}","\u{02BA}"
 $q = str_replace($stripChars, '', $q);
 $q = preg_replace('/\s{2,}/', ' ', trim($q));
 
-// Consonant skeleton for Hebrew-transliteration fuzzy matching. Mirrors
-// the SQL normalize_consonants() function: lowercase, strip aeiou, drop
-// non-alphanumerics. "shemayim" / "shamaym" / "shamayim" all collapse
-// to "shmym"; "Yahowah" / "Yahuwah" / "Yahweh" all collapse to "yhwh".
-// Used both for matching (ILIKE clause below) AND for highlightSnippet
-// so a consonant-only match still wraps the visible word in <mark>.
-function consonantSkel(string $s): string {
+// Phonetic skeleton for Hebrew-transliteration matching. MUST stay byte-for-byte
+// identical to the SQL phonetic_skeleton() function (used to build the indexed
+// paragraph_consonants column) or the query skeleton won't match the stored one.
+// Folds the consonant classes that vary in romanization to canonical UPPERCASE
+// tokens, drops vowels, preserves word spacing:
+//   tsade ts/tz -> C, shin sh -> J, chet/khaf ch/kh -> H, fe ph -> P,
+//   tav th -> T, then qof/kaf q/k/c -> K, vav v/w -> V, fe f/p -> P, etc.
+// "etsah"/"etzah"/"ʿEtsah" -> "CH"; "Yahowah"/"Yahuwah"/"Yahweh" -> "YHVH";
+// "mitzvah"/"mitsvah" -> "MCVH"; "qodesh"/"kodesh" -> "KDJ".
+// Digraph alternations are ordered longest-first so PCRE's first-match matches
+// Postgres's POSIX leftmost-longest. The strip set mirrors normalize_search_text().
+function phoneticSkel(string $s): string {
     $s = mb_strtolower($s);
-    $s = preg_replace('/[aeiou]/u', '', $s);
-    $s = preg_replace('/[^a-z0-9 ]/u', '', $s);
-    return trim(preg_replace('/\s+/u', ' ', (string)$s));
+    $s = str_replace(
+        ["\u{02BF}","\u{02BE}","\u{02BC}","\u{02BB}","\u{02B9}","\u{02BA}","\u{2018}","\u{2019}","\u{201C}","\u{201D}","\u{2013}","\u{2014}","'"],
+        '', $s);
+    $s = preg_replace('/tsch|tch|tz|ts/', 'C', $s);   // tsade
+    $s = preg_replace('/sch|sh/', 'J', $s);            // shin
+    $s = preg_replace('/ch|kh/', 'H', $s);             // chet / khaf-soft
+    $s = str_replace('ph', 'P', $s);                   // fe
+    $s = str_replace('th', 'T', $s);                   // tav-spirant
+    $s = str_replace('ck', 'K', $s);                   // hard k
+    $s = str_replace('gh', 'G', $s);                   // gimel
+    $s = strtr($s, 'qckwvfpbgdtszjxhrlmny', 'KKKVVPPBGDTSZJHHRLMNY');
+    $s = preg_replace('/[aeiou]/', '', $s);            // drop vowels
+    $s = preg_replace('/[^A-Z0-9 ]/u', '', $s);        // keep class tokens / digits / space
+    return trim(preg_replace('/ {2,}/', ' ', (string)$s));
 }
 
-// Walk both the snippet and a query word in lockstep, skipping any char
-// in $stripChars on the snippet side, so "Miqraʿey" matches "miqraey".
-// When $consonantMode is true, ALSO skip aeiou in the snippet so
-// "Shamayim" matches the consonant skeleton "shmym" — that's what lets
-// the highlight follow a fuzzy/transliteration match into the visible
-// text. Used by every search tier so all snippets get consistent
-// highlighting even when the source contains stripped characters or
-// vowel-variant spellings.
-function highlightSnippet(string $snippet, array $words, array $stripChars, array $consonantWords = []): string {
+// Highlights query matches in a snippet via two passes:
+//   • literal — walk the snippet and a query word in lockstep, skipping any
+//     char in $stripChars on the snippet side, so the stripped query "miqraey"
+//     still marks "Miqraʿey". Whole-word (\m..\M) boundaries.
+//   • phonetic — for results matched via the phonetic skeleton (the visible
+//     word is a transliteration variant of the query, e.g. "etsah" for a query
+//     of "etzah"), mark each whole word whose phonetic_skeleton STARTS WITH a
+//     query skeleton. $phoneticSkels holds the query word skeletons (uppercase
+//     class tokens, e.g. ["CH"]); empty for non-phonetic tiers.
+function highlightSnippet(string $snippet, array $words, array $stripChars, array $phoneticSkels = []): string {
     if ($snippet === '') return '';
     $words = array_values(array_unique(array_filter(array_map(function($w) use ($stripChars) {
         $w = str_replace($stripChars, '', mb_strtolower((string)$w));
         return mb_strlen($w) >= 2 ? $w : null;
     }, $words))));
-    $consonantWords = array_values(array_unique(array_filter(array_map(function($w) {
-        $w = (string)$w;
-        return mb_strlen($w) >= 3 ? mb_strtolower($w) : null;
-    }, $consonantWords))));
-    if (empty($words) && empty($consonantWords)) {
+    $phoneticSkels = array_values(array_unique(array_filter(array_map(function($w) {
+        $w = trim((string)$w);
+        return mb_strlen(str_replace(' ', '', $w)) >= 2 ? $w : null;
+    }, $phoneticSkels))));
+    if (empty($words) && empty($phoneticSkels)) {
         return htmlspecialchars($snippet, ENT_QUOTES, 'UTF-8');
     }
     $lower = mb_strtolower($snippet);
     $len   = mb_strlen($snippet);
-    $vowels = ['a','e','i','o','u'];
     $marks = []; // [start, end) character-index pairs
 
     // Word-boundary check that matches Postgres \m / \M semantics used by
@@ -105,7 +121,27 @@ function highlightSnippet(string $snippet, array $words, array $stripChars, arra
         }
     };
     $scan($words, []);                  // literal pass (strip-chars only)
-    $scan($consonantWords, $vowels);    // consonant pass (also skip vowels)
+
+    // Phonetic pass: mark whole (whitespace-delimited) words whose phonetic
+    // skeleton starts with a query skeleton, so an "etzah" search bolds the
+    // visible "etsah" / "ʿEtsah". Word-start match mirrors the search-side
+    // `paragraph_consonants ~ '(^| )SKEL'`.
+    if (!empty($phoneticSkels)) {
+        $chars = preg_split('//u', $snippet, -1, PREG_SPLIT_NO_EMPTY);
+        $i = 0;
+        while ($i < $len) {
+            while ($i < $len && preg_match('/\s/u', $chars[$i])) $i++;   // skip whitespace
+            if ($i >= $len) break;
+            $wstart = $i;
+            while ($i < $len && !preg_match('/\s/u', $chars[$i])) $i++;  // consume non-space token
+            $wskel = phoneticSkel(implode('', array_slice($chars, $wstart, $i - $wstart)));
+            if ($wskel !== '') {
+                foreach ($phoneticSkels as $qs) {
+                    if (strpos($wskel, $qs) === 0) { $marks[] = [$wstart, $i]; break; }
+                }
+            }
+        }
+    }
 
     if (empty($marks)) return htmlspecialchars($snippet, ENT_QUOTES, 'UTF-8');
     usort($marks, function($a, $b) { return $a[0] - $b[0] ?: $a[1] - $b[1]; });
@@ -219,17 +255,22 @@ if ($mode === 'phrase') {
         $tsqSql = "plainto_tsquery('english', ?)";
     }
 
-    // Build a UNION of:
+    // Build an OR group of:
     //   • FTS match on paragraph_tsv (stem-aware, fast GIN index)
-    //   • Consonant-skeleton ILIKE for Hebrew vowel-transliteration variants
-    //     (shemayim ↔ shamayim ↔ shamaym all share skeleton "shmym"); only
-    //     when the skeleton is ≥4 chars so we don't blow up on "ten"→"tn".
+    //   • Word-anchored phonetic-skeleton regex per query word on the indexed
+    //     paragraph_consonants column (Hebrew-transliteration variants:
+    //     etsah↔etzah, Yahowah↔Yahuwah↔Yahweh, mitzvah↔mitsvah, …).
     //   • One ILIKE per alias target.
     // NOTE: plain ILIKE on paragraph_text_plain was removed from Tier 1 —
     // on common terms it triggered a 5000-row bitmap heap scan that took
     // 10+ seconds even with the trigram index. Stemming-asymmetry misses
     // (e.g. "Taruwah" → paragraphs containing "Taruwa") fall through to
     // Tier 2 which does a single ILIKE scan with no TSV overhead.
+    // PERF: paragraph_norm / paragraph_consonants are materialized columns
+    // (maintained by the BEFORE tsv trigger) so the trigram-index bitmap
+    // recheck reads a stored value instead of recomputing normalize_search_text()
+    // / phonetic_skeleton() per row — the fix that took common-term searches
+    // from 40s+ (and 8s-timeout tier fallthrough) down to sub-second.
     $ftsMatchConditions = [
         "p.paragraph_tsv @@ $tsqSql",
     ];
@@ -237,18 +278,24 @@ if ($mode === 'phrase') {
         $tsqParam,
     ];
 
-    $qConsonants = consonantSkel($q);
-    if (mb_strlen($qConsonants) >= 4) {
-        $ftsMatchConditions[] = "normalize_consonants(p.paragraph_text_plain) ILIKE ?";
-        $ftsMatchParams[]     = '%' . str_replace(['%', '_'], ['\%', '\_'], $qConsonants) . '%';
-        foreach ($queryWords as $qw) {
-            $cs = consonantSkel($qw);
-            if (mb_strlen($cs) >= 3) $consonantWordsForHighlight[] = $cs;
-        }
+    // Per-word phonetic (Hebrew-transliteration) skeletons, computed once and
+    // used by the PHONETIC fallback tier (below) — NOT OR'd into this Tier-1
+    // gate. Reason: OR-ing a word-anchored consonants regex into the common
+    // path forces a regex recheck over every tsv candidate (thousands of rows
+    // for common terms like "covenant"), pushing the count past the 8s budget.
+    // Phonetic only needs to fire when the literal/stem path finds nothing
+    // (e.g. "etzah" → corpus spelling "etsah"), so it runs as a fallback.
+    // Gated at >=2 class tokens so single-consonant words don't match the world.
+    $phonSkels = [];   // trimmed-word => skeleton
+    foreach ($queryWords as $qw) {
+        $t = preg_replace('/[^A-Za-z0-9]/', '', $qw);
+        if ($t === '' || isset($phonSkels[$t])) continue;
+        $ps = phoneticSkel($t);
+        if (mb_strlen(str_replace(' ', '', $ps)) >= 2) $phonSkels[$t] = $ps;
     }
 
     foreach ($aliasTargets as $at) {
-        $ftsMatchConditions[] = "normalize_search_text(p.paragraph_text_plain) ILIKE ?";
+        $ftsMatchConditions[] = "p.paragraph_norm ILIKE ?";
         $ftsMatchParams[]     = '%' . str_replace(['%', '_'], ['\%', '\_'], $at) . '%';
     }
 }
@@ -267,23 +314,62 @@ if ($mode === 'all') {
     foreach ($queryWords as $qw) {
         $qwTrim = preg_replace('/[^A-Za-z0-9]/', '', $qw);
         if ($qwTrim === '') continue;
-        $allConditions[] = "normalize_search_text(p.paragraph_text_plain) ~* ?";
+        $allConditions[] = "p.paragraph_norm ~* ?";
         $allParams[]     = '\m' . preg_quote(strtolower($qwTrim), '/') . '\M';
     }
 }
 
 $ftsWhere = 'WHERE ' . implode(' AND ', $allConditions);
 
-// Short timeout on the Tier 1 count — consonant-skeleton OR + multi-word
-// ~* conditions can scan the entire table for common terms and take minutes.
-// If it times out, fall through to Tier 2 rather than blocking the request.
+// Tier 1 runs as ONE windowed query: COUNT(*) OVER() returns the exact total
+// alongside the page of rows, so the matched set is scanned/re-checked ONCE
+// instead of twice (a separate COUNT then SELECT each re-checked thousands of
+// rows for common terms — "covenant" ~11.7s→~5.5s). 8s budget: if the scan is
+// too slow (very abundant terms like "yahowah", 34k matches) it times out and
+// we fall through to Tier 2/3 ($tier1TimedOut also suppresses the phonetic tier).
+$tier1TimedOut = false;
+$results = [];
+$total = 0;
+$snippetAnchor = str_replace($stripChars, '', $queryWords[0] ?? $q);
 try {
-    $pdo->exec("SET statement_timeout = '8s'");
-    $countStmt = $pdo->prepare("SELECT COUNT(*) FROM yy_paragraph p JOIN yy_volume v ON v.volume_key = p.volume_key $ftsWhere");
-    $countStmt->execute($allParams);
-    $total = (int)$countStmt->fetchColumn();
+    // 12s (vs the tier-2/3 8s): the single windowed query does the count's work
+    // too, so it needs more headroom than the old bare COUNT did — otherwise
+    // common terms straddle the limit and inconsistently fall to Tier 2,
+    // yielding different totals page-to-page. Genuinely abundant terms
+    // (yahowah, 34k) still exceed it and fall through.
+    $pdo->exec("SET statement_timeout = '12s'");
+    $stmt = $pdo->prepare("
+        SELECT v.volume_label AS volume_label,
+               v.volume_code AS volume_code,
+               v.volume_flip_code AS flip_code,
+               v.volume_pdf AS volume_pdf,
+               s.series_label AS series_label,
+               ch.chapter_name AS chapter_name,
+               ch.chapter_number AS chapter_number,
+               p.paragraph_page AS page,
+               p.paragraph_number AS paragraph_number,
+               COUNT(*) OVER() AS total_count,
+               ts_rank(p.paragraph_tsv, $tsqSql) AS rank,
+               CASE WHEN length(p.paragraph_text_plain) > $snippetLen
+                    THEN substring(p.paragraph_text_plain
+                         FROM greatest(1, position(lower(?) in lower(p.paragraph_norm)) - $snippetLead)
+                         FOR $snippetLen)
+                    ELSE p.paragraph_text_plain
+               END AS snippet,
+               p.paragraph_text_html AS html
+        FROM yy_paragraph p
+        JOIN yy_volume v ON v.volume_key = p.volume_key
+        JOIN yy_series s ON s.series_key = p.series_key
+        LEFT JOIN yy_chapter ch ON ch.chapter_key = p.chapter_key
+        $ftsWhere
+        ORDER BY rank DESC, v.volume_sort, p.paragraph_page, p.paragraph_number
+        LIMIT ? OFFSET ?
+    ");
+    $stmt->execute(array_merge([$tsqParam, $snippetAnchor], $allParams, [$limit, $offset]));
+    $results = $stmt->fetchAll();
+    $total = $results ? (int)$results[0]['total_count'] : 0;
 } catch (PDOException $e) {
-    $total = 0; // Count too slow; fall through to Tier 2
+    $results = []; $total = 0; $tier1TimedOut = true; // too slow (abundant term); fall through
 } finally {
     try { $pdo->exec("SET statement_timeout = '600s'"); } catch (PDOException $_) {}
 }
@@ -353,52 +439,12 @@ try {
 $fuzzy = false;
 
 if ($total > 0) {
-    // ts_headline tokenizes paragraph_text_plain (which still contains
-    // half-rings/curly apostrophes), so a stripped query like "miqraey"
-    // never matches "Miqraʿey" and the snippet falls back to the head
-    // of the paragraph with no highlight. Switch to the same substring-
-    // around-normalized-position approach Tier 2/3 use, and highlight
-    // in PHP via highlightSnippet() which walks past strip chars.
-    $stmt = $pdo->prepare("
-        SELECT v.volume_label AS volume_label,
-               v.volume_code AS volume_code,
-               v.volume_flip_code AS flip_code,
-               v.volume_pdf AS volume_pdf,
-               s.series_label AS series_label,
-               ch.chapter_name AS chapter_name,
-               ch.chapter_number AS chapter_number,
-               p.paragraph_page AS page,
-               p.paragraph_number AS paragraph_number,
-               ts_rank(p.paragraph_tsv, $tsqSql) AS rank,
-               CASE WHEN length(p.paragraph_text_plain) > $snippetLen
-                    THEN substring(p.paragraph_text_plain
-                         FROM greatest(1, position(lower(?) in lower(normalize_search_text(p.paragraph_text_plain))) - $snippetLead)
-                         FOR $snippetLen)
-                    ELSE p.paragraph_text_plain
-               END AS snippet,
-               p.paragraph_text_html AS html
-        FROM yy_paragraph p
-        JOIN yy_volume v ON v.volume_key = p.volume_key
-        JOIN yy_series s ON s.series_key = p.series_key
-        LEFT JOIN yy_chapter ch ON ch.chapter_key = p.chapter_key
-        $ftsWhere
-        ORDER BY rank DESC, v.volume_sort, p.paragraph_page, p.paragraph_number
-        LIMIT ? OFFSET ?
-    ");
-
-    // Anchor the substring on the first query word (or the stripped query
-    // itself if it's a single token). Params: ts_rank, snippet-anchor,
-    // WHERE, LIMIT, OFFSET.
-    $snippetAnchor = $queryWords[0] ?? $q;
-    $snippetAnchor = str_replace($stripChars, '', $snippetAnchor);
-    $stmtParams = array_merge([$tsqParam, $snippetAnchor], $allParams, [$limit, $offset]);
-    $stmt->execute($stmtParams);
-    $results = $stmt->fetchAll();
-
-    // Highlight using the strip-aware matcher so "Miqraʿey" gets wrapped
-    // even though the query stripped the half-ring out.
+    // $results were already fetched by the single windowed Tier-1 query above.
+    // Drop the window-count column and highlight (strip-aware; the snippet is a
+    // substring around the match position, so "Miqraʿey" still gets wrapped).
     $highlightWords = array_merge($queryWords, $aliasTargets);
     foreach ($results as &$row) {
+        unset($row['total_count']);
         if ($row['snippet']) {
             $row['snippet'] = highlightSnippet((string)$row['snippet'], $highlightWords, $stripChars, $consonantWordsForHighlight);
         }
@@ -411,10 +457,84 @@ if ($total > 0) {
     // of a misleading substring-fuzzed count.
     $results = [];
 } else {
+    // --- TIER 1.5: PHONETIC (Hebrew transliteration variants) ---
+    // Reached when the literal/stem Tier 1 was sparse (0..$limit-1 hits). Match
+    // each query word by its phonetic skeleton against the indexed
+    // paragraph_consonants column, so "etzah"→"etsah" (skeleton "CH") and
+    // "yahweh"→every "Yahowah" (skeleton "YHVH"). Phonetic is a superset of the
+    // literal match, so this only ever broadens. AND across words for "all"
+    // mode, OR for "any". If it finds nothing, fall through to the Tier 2/3
+    // substring fuzzy search below.
+    $fuzzy = true;
+    $total = 0;
+    $phonParams = [];
+    // Skip phonetic when Tier 1 *timed out* (abundant term) rather than
+    // genuinely finding nothing — the phonetic skeleton for a common word is
+    // just as abundant and would burn another 8s before falling to Tier 2.
+    if (!empty($phonSkels) && !$tier1TimedOut) {
+        $phonConds = [];
+        foreach ($phonSkels as $ps) {
+            $phonConds[]  = "p.paragraph_consonants ~ ?";
+            $phonParams[] = '(^| )' . $ps;
+        }
+        $glue = ($mode === 'any') ? ' OR ' : ' AND ';
+        $phonWhere = 'WHERE (' . implode($glue, $phonConds) . ') AND ' . implode(' AND ', $filterConditions);
+        try {
+            $pdo->exec("SET statement_timeout = '8s'");
+            $countStmt = $pdo->prepare("SELECT COUNT(*) FROM yy_paragraph p JOIN yy_volume v ON v.volume_key = p.volume_key $phonWhere");
+            $countStmt->execute(array_merge($phonParams, $filterParams));
+            $total = (int)$countStmt->fetchColumn();
+        } catch (PDOException $e) {
+            $total = 0;
+        } finally {
+            try { $pdo->exec("SET statement_timeout = '600s'"); } catch (PDOException $_) {}
+        }
+    }
+    if ($total > 0) {
+        // The matched word is a spelling variant of the query, so anchoring the
+        // snippet on the literal query word may miss — position() returns 0 and
+        // the snippet falls back to the paragraph head, which is acceptable.
+        $stmt = $pdo->prepare("
+            SELECT v.volume_label AS volume_label,
+                   v.volume_code AS volume_code,
+                   v.volume_flip_code AS flip_code,
+                   v.volume_pdf AS volume_pdf,
+                   s.series_label AS series_label,
+                   ch.chapter_name AS chapter_name,
+                   ch.chapter_number AS chapter_number,
+                   p.paragraph_page AS page,
+                   p.paragraph_number AS paragraph_number,
+                   0::float AS rank,
+                   CASE WHEN length(p.paragraph_text_plain) > $snippetLen
+                        THEN substring(p.paragraph_text_plain FROM greatest(1, position(lower(?) in lower(p.paragraph_norm)) - $snippetLead) FOR $snippetLen)
+                        ELSE p.paragraph_text_plain
+                   END AS snippet,
+                   p.paragraph_text_html AS html
+            FROM yy_paragraph p
+            JOIN yy_volume v ON v.volume_key = p.volume_key
+            JOIN yy_series s ON s.series_key = p.series_key
+            LEFT JOIN yy_chapter ch ON ch.chapter_key = p.chapter_key
+            $phonWhere
+            ORDER BY v.volume_sort, p.paragraph_page, p.paragraph_number
+            LIMIT ? OFFSET ?
+        ");
+        $snippetAnchor = str_replace($stripChars, '', $queryWords[0] ?? $q);
+        $stmt->execute(array_merge([$snippetAnchor], $phonParams, $filterParams, [$limit, $offset]));
+        $results = $stmt->fetchAll();
+        // Pass the query phonetic skeletons so the variant spelling that
+        // actually matched (e.g. "etsah" for "etzah") gets <mark>'d.
+        $highlightWords = array_merge($queryWords, $aliasTargets);
+        foreach ($results as &$row) {
+            if ($row['snippet']) {
+                $row['snippet'] = highlightSnippet((string)$row['snippet'], $highlightWords, $stripChars, array_values($phonSkels));
+            }
+        }
+        unset($row);
+    } else {
     // --- TIER 2: ILIKE substring search ---
     $fuzzy = true;
     $likePattern = '%' . str_replace(['%', '_'], ['\%', '\_'], $q) . '%';
-    $fuzzyConditions = array_merge(["normalize_search_text(p.paragraph_text_plain) ILIKE ?"], $filterConditions);
+    $fuzzyConditions = array_merge(["p.paragraph_norm ILIKE ?"], $filterConditions);
     $fuzzyWhere = 'WHERE ' . implode(' AND ', $fuzzyConditions);
 
     // Short timeout on Tier 2 count — full-string ILIKE on large tables can
@@ -441,9 +561,9 @@ if ($total > 0) {
                    ch.chapter_number AS chapter_number,
                    p.paragraph_page AS page,
                    p.paragraph_number AS paragraph_number,
-                   similarity(normalize_search_text(p.paragraph_text_plain), ?) AS rank,
+                   similarity(p.paragraph_norm, ?) AS rank,
                    CASE WHEN length(p.paragraph_text_plain) > $snippetLen
-                        THEN substring(p.paragraph_text_plain FROM greatest(1, position(lower(?) in lower(normalize_search_text(p.paragraph_text_plain))) - $snippetLead) FOR $snippetLen)
+                        THEN substring(p.paragraph_text_plain FROM greatest(1, position(lower(?) in lower(p.paragraph_norm)) - $snippetLead) FOR $snippetLen)
                         ELSE p.paragraph_text_plain
                    END AS snippet,
                    p.paragraph_text_html AS html
@@ -466,9 +586,11 @@ if ($total > 0) {
         }
         unset($row);
     } else {
-        // --- TIER 3: Per-word ILIKE fallback (OR logic, uses GiST idx_paragraph_norm_gist) ---
+        // --- TIER 3: Per-word ILIKE fallback (OR logic, uses GIN idx_paragraph_norm2_trgm) ---
         // word_similarity (%>) never uses GIN/GiST indexes in PG 15, causing full seq scans.
-        // Per-word ILIKE on normalize_search_text() DOES use idx_paragraph_norm_gist and is fast.
+        // Per-word ILIKE on the materialized paragraph_norm column DOES use the
+        // GIN trigram index and — because the bitmap recheck reads a stored value
+        // instead of recomputing normalize_search_text() per row — is now fast.
         // Semantics: any query word present in a paragraph (OR logic), ranked by word-match count.
         $tier3Words = array_values(array_filter(
             array_slice($queryWords, 0, 8),
@@ -481,7 +603,7 @@ if ($total > 0) {
             $simConditions = [];
             $simParams = [];
             foreach ($tier3Words as $w) {
-                $simConditions[] = "normalize_search_text(p.paragraph_text_plain) ILIKE ?";
+                $simConditions[] = "p.paragraph_norm ILIKE ?";
                 $simParams[] = '%' . str_replace(['%', '_'], ['\%', '\_'], $w) . '%';
             }
             $simWhere = 'WHERE (' . implode(' OR ', $simConditions) . ')';
@@ -497,7 +619,7 @@ if ($total > 0) {
             // (site-search.js) already handles null total gracefully.
 
             // Rank by how many query words appear; snippet anchored to first matching word.
-            $rankCases = implode(' + ', array_fill(0, count($tier3Words), '(CASE WHEN normalize_search_text(p.paragraph_text_plain) ILIKE ? THEN 1 ELSE 0 END)'));
+            $rankCases = implode(' + ', array_fill(0, count($tier3Words), '(CASE WHEN p.paragraph_norm ILIKE ? THEN 1 ELSE 0 END)'));
             $firstWord = $tier3Words[0];
             $stmt = $pdo->prepare("
                 SELECT v.volume_label AS volume_label,
@@ -512,7 +634,7 @@ if ($total > 0) {
                        ($rankCases)::float / ? AS rank,
                        CASE WHEN length(p.paragraph_text_plain) > $snippetLen
                             THEN substring(p.paragraph_text_plain
-                                 FROM greatest(1, position(lower(?) in lower(normalize_search_text(p.paragraph_text_plain))) - $snippetLead)
+                                 FROM greatest(1, position(lower(?) in lower(p.paragraph_norm)) - $snippetLead)
                                  FOR $snippetLen)
                             ELSE p.paragraph_text_plain
                        END AS snippet,
@@ -559,6 +681,7 @@ if ($total > 0) {
             unset($row);
         }
     }
+    } // end Tier 2/3 (phonetic fallback found nothing)
 }
 
 // Build per-result links.

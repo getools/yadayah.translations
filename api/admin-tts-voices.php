@@ -442,6 +442,113 @@ if ($action === 'refresh') {
             continue;
         }
 
+        // ── MOSS-TTS-Nano adapter (Puget box, /catalog endpoint) ───────────
+        // MOSS is clone-first with no enumerable speaker catalog, so the box's
+        // /catalog?provider=moss returns the registered voices.json entries
+        // (code / label / language / gender / description). Locale + type are
+        // derived here since the clone-voice payload doesn't carry them. Bundled
+        // reference clips come in as type 'Clone'. ON CONFLICT preserves the
+        // admin's active_flag picks across refreshes.
+        if ($provCode === 'moss') {
+            require_once __DIR__ . '/gpu-client.php';
+            if (!gpuConfigured()) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'GPU_BASE_URL / GPU_API_TOKEN not set in .env'];
+                continue;
+            }
+            $mossProvKey = (int)$db->query(
+                "SELECT provider_key FROM yy_provider
+                  WHERE provider_main='MOSS' AND provider_engine='TTS-Nano'
+                  ORDER BY provider_key LIMIT 1"
+            )->fetchColumn();
+            if ($mossProvKey <= 0) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'no MOSS-TTS-Nano yy_provider row'];
+                continue;
+            }
+            try {
+                $resp = gpuProviderCatalog($provCode);
+            } catch (Throwable $e) {
+                errorResponse("Puget /catalog failed for $provCode: " . $e->getMessage());
+            }
+            $voices = is_array($resp['data']['voices'] ?? null) ? $resp['data']['voices'] : [];
+
+            // MOSS clone voices only carry a 2-letter language; map it to a
+            // representative locale so the catalog's locale filter groups them.
+            $localeFor = static function (string $lang): array {
+                switch (strtolower($lang)) {
+                    case 'en':            return ['en-US', 'English (United States)'];
+                    case 'ja': case 'jp': return ['ja-JP', 'Japanese (Japan)'];
+                    case 'zh':            return ['zh-CN', 'Chinese (Mandarin, Simplified)'];
+                    default:
+                        $l = $lang !== '' ? $lang : 'en';
+                        return [$l, strtoupper($l)];
+                }
+            };
+
+            $upsert = $db->prepare("
+                INSERT INTO yy_tts_voice
+                    (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
+                     tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_type,
+                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_description,
+                     tts_voice_download_dtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]'::jsonb, ?, ?, ?, NOW())
+                ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
+                    tts_voice_label             = EXCLUDED.tts_voice_label,
+                    tts_voice_locale            = EXCLUDED.tts_voice_locale,
+                    tts_voice_locale_name       = EXCLUDED.tts_voice_locale_name,
+                    tts_voice_language          = EXCLUDED.tts_voice_language,
+                    tts_voice_region            = EXCLUDED.tts_voice_region,
+                    tts_voice_gender            = EXCLUDED.tts_voice_gender,
+                    tts_voice_type              = EXCLUDED.tts_voice_type,
+                    tts_voice_status            = EXCLUDED.tts_voice_status,
+                    provider_key                = EXCLUDED.provider_key,
+                    tts_voice_description       = EXCLUDED.tts_voice_description,
+                    tts_voice_download_dtime    = NOW()
+                RETURNING (xmax = 0) AS is_insert
+            ");
+            $added = 0; $updated = 0;
+            $db->beginTransaction();
+            try {
+                foreach ($voices as $v) {
+                    $code = (string)($v['code'] ?? '');
+                    if ($code === '') continue;
+                    $lang = (string)($v['language'] ?? 'en');
+                    [$locale, $localeName] = $localeFor($lang);
+                    $region = (strpos($locale, '-') !== false)
+                            ? substr($locale, strpos($locale, '-') + 1) : null;
+                    $gender = (string)($v['gender'] ?? '');
+                    $gender = ($gender === '' || strtolower($gender) === 'unknown')
+                            ? null : ucfirst(strtolower($gender));
+                    $upsert->execute([
+                        $provKey,
+                        $code,
+                        substr((string)($v['label'] ?? $code), 0, 250),
+                        substr($locale, 0, 20),
+                        substr($localeName, 0, 120),
+                        substr($lang, 0, 8),
+                        $region !== null ? substr($region, 0, 8) : null,
+                        $gender !== null ? substr($gender, 0, 20) : null,
+                        'Clone',
+                        'active',
+                        $mossProvKey,
+                        (string)($v['description'] ?? ''),
+                    ]);
+                    $row = $upsert->fetch(PDO::FETCH_ASSOC);
+                    if ($row && $row['is_insert']) $added++; else $updated++;
+                }
+                $db->commit();
+            } catch (Throwable $e) {
+                if ($db->inTransaction()) $db->rollBack();
+                errorResponse("yy_tts_voice upsert failed for $provCode: " . $e->getMessage());
+            }
+            $totalAdded   += $added;
+            $totalUpdated += $updated;
+            $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                              'added' => $added, 'updated' => $updated, 'total' => count($voices)];
+            continue;
+        }
+
         // ── ElevenLabs adapter ───────────────────────────────────────────
         if ($provCode === 'elevenlabs') {
             $apiKey = readEnv('ELEVENLABS_API_KEY');

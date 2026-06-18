@@ -45,11 +45,14 @@ if ($method === 'GET') {
     $item = $itemStmt->fetch();
     if (!$item) errorResponse('Item not found', 404);
 
-    // Get transcript rows for this item AND any items linked to it via
-    // yy_feed_item_link (treat the cluster as one logical transcript so a
-    // duplicate-uploaded video automatically inherits the original's transcript).
-    $itemKeys = getFeedItemKeyCluster($db, $itemKey);
-    $placeholders = implode(',', array_fill(0, count($itemKeys), '?'));
+    // Load the transcript STRICTLY for this feed_item by its primary key — never
+    // the linked/duplicate-import cluster. Merging a cluster on read is unsafe for
+    // editing: the save path writes back to this single key (DELETE+INSERT), so a
+    // merged read collapses every linked/duplicate item's rows into this one item
+    // and re-renders them as duplicates (3 imports of one video => 3x rows). Each
+    // feed_item's transcript must round-trip by its own key alone.
+    $itemKeys = [$itemKey];
+    $placeholders = '?';
     // Optional view: when ?view=<model_code> is supplied, return rows from
     // yy_feed_item_transcript_auto for that model instead of the live
     // table. The client puts the editor into read-only mode for these
@@ -238,54 +241,96 @@ if ($method === 'POST') {
         $rows = $data['rows'] ?? [];
         if (!is_array($rows)) errorResponse('rows must be an array');
 
-        // Load existing rows for diff logging
-        $existingStmt = $db->prepare("SELECT feed_item_transcript_segment, feed_item_transcript_text FROM yy_feed_item_transcript WHERE feed_item_key = ? ORDER BY feed_item_transcript_sort, feed_item_transcript_segment");
+        // Diff-based save keyed by feed_item_transcript_key (the editor sends
+        // each row's key; rows it added/split have none). Rows with a known key
+        // are UPDATEd in place by primary key; keyless rows are INSERTed; and
+        // existing keys absent from the posted set are DELETEd. This replaces the
+        // old DELETE-all + INSERT-all save, which reissued every row's key and
+        // history on each save and — under READ COMMITTED — could lose a
+        // concurrent save's DELETE and duplicate rows. UPDATE-by-key is race-safe
+        // and leaves untouched columns (e.g. speaker/diarisation) intact.
+        $existingStmt = $db->prepare("SELECT feed_item_transcript_key AS k, feed_item_transcript_segment::text AS segment, feed_item_transcript_text AS text, feed_item_transcript_sort AS sort FROM yy_feed_item_transcript WHERE feed_item_key = ?");
         $existingStmt->execute([$itemKey]);
-        $existing = [];
+        $existingByKey = [];
         foreach ($existingStmt->fetchAll() as $r) {
-            $existing[$r['feed_item_transcript_segment']] = $r['feed_item_transcript_text'];
+            $existingByKey[(int)$r['k']] = ['segment' => $r['segment'], 'text' => $r['text'], 'sort' => (int)$r['sort']];
         }
+        // Parse "H:M:S(.fff)" / "M:S" / bare seconds to a float so a timestamp
+        // edit is detected reliably despite display-vs-interval formatting
+        // (e.g. "0:00:41.9" from the input vs "00:00:41.9" from interval::text).
+        $segToSec = function ($s) {
+            $p = array_map('floatval', explode(':', trim((string)$s)));
+            $n = count($p);
+            if ($n === 3) return $p[0]*3600 + $p[1]*60 + $p[2];
+            if ($n === 2) return $p[0]*60 + $p[1];
+            return $p[0] ?? 0.0;
+        };
 
         $db->beginTransaction();
         try {
-            $db->prepare("DELETE FROM yy_feed_item_transcript WHERE feed_item_key = ?")->execute([$itemKey]);
-            // INSERT now writes the speaker column too so save doesn't wipe
-            // diarisation labels every time the editor calls save().
-            $insStmt = $db->prepare("INSERT INTO yy_feed_item_transcript (feed_item_key, feed_item_transcript_segment, feed_item_transcript_text, feed_item_transcript_sort, feed_item_transcript_revision_user_key, feed_item_transcript_speaker) VALUES (?, ?::interval, ?, ?, ?, ?)");
+            $updStmt = $db->prepare("UPDATE yy_feed_item_transcript
+                   SET feed_item_transcript_segment = ?::interval,
+                       feed_item_transcript_text    = ?,
+                       feed_item_transcript_sort    = ?,
+                       feed_item_transcript_revision_user_key = ?,
+                       feed_item_transcript_revision_dtime    = NOW()
+                 WHERE feed_item_transcript_key = ? AND feed_item_key = ?");
+            // New rows only. ON CONFLICT guards uq_transcript_no_dup so a racing
+            // insert becomes a no-op instead of a duplicate / aborting error.
+            $insStmt = $db->prepare("INSERT INTO yy_feed_item_transcript (feed_item_key, feed_item_transcript_segment, feed_item_transcript_text, feed_item_transcript_sort, feed_item_transcript_revision_user_key) VALUES (?, ?::interval, ?, ?, ?) ON CONFLICT (feed_item_key, feed_item_transcript_segment, md5(feed_item_transcript_text)) DO NOTHING");
+            $delStmt = $db->prepare("DELETE FROM yy_feed_item_transcript WHERE feed_item_transcript_key = ? AND feed_item_key = ?");
             $logStmt = $db->prepare("INSERT INTO yy_transcript_edit_log (feed_item_key, edit_segment, edit_original_text, edit_new_text, edit_action, edit_user_key) VALUES (?, ?::interval, ?, ?, ?, ?)");
+
             $sort = 0;
-            $newSegments = [];
+            $keptKeys = [];
+            $inserted = 0; $deleted = 0; $updated = 0;
             foreach ($rows as $r) {
                 $segment = trim($r['segment'] ?? '00:00:00');
-                $text = trim($r['text'] ?? '');
-                if (!$text) continue;
-                $rowSort = isset($r['sort']) ? (int)$r['sort'] : $sort++;
+                $text    = trim($r['text'] ?? '');
+                if ($text === '') continue;
                 if (!preg_match('/^\d+:\d+:\d+(\.\d+)?$|^\d+$/', $segment)) $segment = '00:00:00';
                 $textTrim = mb_substr($text, 0, 2000);
-                $speaker = (isset($r['speaker']) && $r['speaker'] !== null && $r['speaker'] !== '')
-                    ? mb_substr((string)$r['speaker'], 0, 64) : null;
-                $insStmt->execute([$itemKey, $segment, $textTrim, $rowSort, $userKey, $speaker]);
-                $newSegments[$segment] = $textTrim;
+                $rowSort  = isset($r['sort']) ? (int)$r['sort'] : $sort;
+                $sort++;
+                $key = (isset($r['key']) && $r['key'] !== null && $r['key'] !== '') ? (int)$r['key'] : null;
 
-                // Log diff to the audit log. We intentionally do NOT call
-                // autoLearnCorrections here — too many in-flight edits get
-                // captured as bogus correction pairs. Only Search & Replace
-                // operations (admin-transcript-replace.php) feed the dictionary.
-                $oldText = $existing[$segment] ?? null;
-                if ($oldText === null) {
+                if ($key !== null && isset($existingByKey[$key])) {
+                    // Known row → UPDATE in place by primary key. Skip the write
+                    // entirely when nothing changed so unedited rows don't churn
+                    // their revision history on every save.
+                    $keptKeys[$key] = true;
+                    $old = $existingByKey[$key];
+                    $txtChanged  = $old['text'] !== $textTrim;
+                    $segChanged  = abs($segToSec($old['segment']) - $segToSec($segment)) > 0.01;
+                    $sortChanged = $old['sort'] !== $rowSort;
+                    if ($txtChanged || $segChanged || $sortChanged) {
+                        $updStmt->execute([$segment, $textTrim, $rowSort, $userKey, $key, $itemKey]);
+                        if ($txtChanged || $segChanged) {
+                            $logStmt->execute([$itemKey, $segment, $old['text'], $textTrim, 'edit', $userKey]);
+                        }
+                        $updated++;
+                    }
+                } else {
+                    // New row (no key, or a key that no longer exists) → INSERT.
+                    $insStmt->execute([$itemKey, $segment, $textTrim, $rowSort, $userKey]);
                     $logStmt->execute([$itemKey, $segment, null, $textTrim, 'add', $userKey]);
-                } elseif ($oldText !== $textTrim) {
-                    $logStmt->execute([$itemKey, $segment, $oldText, $textTrim, 'edit', $userKey]);
+                    $inserted++;
                 }
             }
-            // Log deletions
-            foreach ($existing as $oldSegment => $oldText) {
-                if (!isset($newSegments[$oldSegment])) {
-                    $logStmt->execute([$itemKey, $oldSegment, $oldText, null, 'delete', $userKey]);
+            // DELETE rows the editor dropped (existing key absent from the post).
+            foreach ($existingByKey as $key => $old) {
+                if (!isset($keptKeys[$key])) {
+                    $delStmt->execute([$key, $itemKey]);
+                    $logStmt->execute([$itemKey, $old['segment'], $old['text'], null, 'delete', $userKey]);
+                    $deleted++;
                 }
             }
             $db->commit();
-            jsonResponse(['saved' => true, 'count' => count($rows)]);
+            // inserted/deleted signal a structural change → the client reloads to
+            // pick up the new rows' primary keys (so a follow-up save UPDATEs
+            // them instead of re-INSERTing).
+            jsonResponse(['saved' => true, 'count' => count($rows),
+                          'updated' => $updated, 'inserted' => $inserted, 'deleted' => $deleted]);
         } catch (Exception $e) {
             $db->rollBack();
             errorResponse('Save failed: ' . $e->getMessage());

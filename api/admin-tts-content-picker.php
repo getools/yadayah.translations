@@ -87,22 +87,25 @@ if ($mode === 'chapters') {
 const PV_FOOTER_OFFSET = 6;
 
 if ($mode === 'pages') {
-    // Distinct content pages for a volume, expressed as footer page
-    // numbers. Front-matter pages (paragraph_page <= offset) are hidden;
-    // table-only paragraphs are excluded the same way the build worker
-    // skips them.
-    $volumeKey = (int)($_GET['volume_key'] ?? 0);
-    if (!$volumeKey) errorResponse('volume_key required');
+    // Distinct content pages, expressed as footer page numbers. Front-matter
+    // pages (paragraph_page <= offset) are hidden; table-only paragraphs are
+    // excluded the same way the build worker skips them. A chapter_key scopes
+    // the list to only the pages spanned by that chapter — the picker passes
+    // it so Page is a child of the selected Chapter.
+    $volumeKey  = (int)($_GET['volume_key'] ?? 0);
+    $chapterKey = (int)($_GET['chapter_key'] ?? 0);
+    if (!$volumeKey && !$chapterKey) errorResponse('volume_key or chapter_key required');
+    $where  = ['paragraph_is_table = FALSE', 'paragraph_page IS NOT NULL', 'paragraph_page > ?'];
+    $params = [PV_FOOTER_OFFSET];
+    if ($volumeKey)  { $where[] = 'volume_key = ?';  $params[] = $volumeKey; }
+    if ($chapterKey) { $where[] = 'chapter_key = ?'; $params[] = $chapterKey; }
     $stmt = $db->prepare("
         SELECT DISTINCT paragraph_page
           FROM yy_paragraph
-         WHERE volume_key = ?
-           AND paragraph_is_table = FALSE
-           AND paragraph_page IS NOT NULL
-           AND paragraph_page > ?
+         WHERE " . implode(' AND ', $where) . "
          ORDER BY paragraph_page
     ");
-    $stmt->execute([$volumeKey, PV_FOOTER_OFFSET]);
+    $stmt->execute($params);
     $rows = array_map(function ($r) {
         $footerPg = (int)$r['paragraph_page'] - PV_FOOTER_OFFSET;
         return ['key' => $footerPg, 'number' => $footerPg, 'label' => 'p.' . $footerPg];
@@ -173,6 +176,44 @@ if ($mode === 'paragraph_text') {
         'key'   => (int)$r['paragraph_key'],
         'html'  => (string)($r['paragraph_text_html'] ?? ''),
         'plain' => (string)($r['paragraph_text_plain'] ?? ''),
+    ]);
+}
+
+if ($mode === 'combined_text') {
+    // Concatenate every in-scope paragraph's stored HTML into one blob the
+    // preview field can hold — used by the Load button for page-level and
+    // chapter-level reads. Same scoping rules as mode=paragraphs (chapter_key
+    // and/or page, optional volume_key). Paragraphs join with a blank line so
+    // the preview/build segmentation still sees paragraph boundaries.
+    $chapterKey = (int)($_GET['chapter_key'] ?? 0);
+    $page       = (int)($_GET['page'] ?? 0);
+    $volumeKey  = (int)($_GET['volume_key'] ?? 0);
+    if (!$chapterKey && !$page) errorResponse('chapter_key or page required');
+    $where  = ['paragraph_is_table = FALSE'];
+    $params = [];
+    if ($chapterKey) { $where[] = 'chapter_key = ?'; $params[] = $chapterKey; }
+    if ($page)       { $where[] = 'paragraph_page = ?'; $params[] = $page + PV_FOOTER_OFFSET; }
+    if ($volumeKey)  { $where[] = 'volume_key = ?'; $params[] = $volumeKey; }
+    $stmt = $db->prepare("
+        SELECT paragraph_text_html, paragraph_text_plain
+          FROM yy_paragraph
+         WHERE " . implode(' AND ', $where) . "
+         ORDER BY paragraph_number
+    ");
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll();
+    $htmlParts = [];
+    $plainParts = [];
+    foreach ($rows as $r) {
+        $h = trim((string)($r['paragraph_text_html'] ?? ''));
+        $p = trim((string)($r['paragraph_text_plain'] ?? ''));
+        if ($h !== '') $htmlParts[] = $h;
+        if ($p !== '') $plainParts[] = $p;
+    }
+    jsonResponse([
+        'count' => count($rows),
+        'html'  => implode('<br><br>', $htmlParts),
+        'plain' => implode("\n\n", $plainParts),
     ]);
 }
 
