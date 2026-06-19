@@ -16,10 +16,35 @@
  * be useful starting points for a TTS read.
  */
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/admin-tts-helpers.php';
 $user = requireAuth();
 $db = getDb();
 
 $mode = $_GET['mode'] ?? '';
+
+// Verification: return the EXACT chunk strings the TTS pipeline would synth for
+// a given text + Min/Target/Max, so the editor's highlight can be checked
+// against reality. Runs the same clean → buildLocalSegment → chunk pipeline.
+if ($mode === 'preview_chunks') {
+    $body   = json_decode(file_get_contents('php://input'), true) ?: [];
+    $ttsKey = (int)($body['tts_key'] ?? ($_GET['tts_key'] ?? 0));
+    $text   = (string)($body['text'] ?? '');
+    $max    = max(40, min(600, (int)($body['max'] ?? 250)));
+    $target = max(20, min($max, (int)($body['target'] ?? 150)));
+    $min    = max(10, min($target, (int)($body['min'] ?? 80)));
+    $clean  = ttsCleanPreviewText($text);
+    $segText = $clean;
+    if ($ttsKey) {
+        $cfg = loadTtsConfig($db, $ttsKey);
+        if (!empty($cfg['system'])) {
+            // category 'main' with no voice override → tunes/pauses applied as in a real preview.
+            $seg = buildLocalSegment($clean, $cfg, 'main');
+            $segText = (string)($seg['text'] ?? $clean);
+        }
+    }
+    $chunks = chunkTextForPreview($segText, $min, $target, $max);
+    jsonResponse(['chunks' => $chunks, 'seg_text' => $segText, 'count' => count($chunks)]);
+}
 
 if ($mode === 'series') {
     // Only return series that actually have at least one active volume so the

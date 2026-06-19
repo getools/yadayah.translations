@@ -378,6 +378,12 @@ function runIndexIntegrityCheck(PDO $db, array $config): array {
     $skipped = 0;
     $failures = [];
 
+    // Raise timeout for the whole amcheck pass — large indexes (100+ MB) take
+    // longer than the 120s global default set in config.php.
+    $perIndexTimeout = (int)($config['per_index_timeout_s'] ?? 120);
+    $totalTimeout = max(300, count($indexes) * $perIndexTimeout);
+    $db->exec("SET statement_timeout = '{$totalTimeout}s'");
+
     foreach ($indexes as $idx) {
         $skip = false;
         foreach ($excludePatterns as $pat) {
@@ -394,6 +400,8 @@ function runIndexIntegrityCheck(PDO $db, array $config): array {
             $failures[] = $idx['qualified_name'] . ': ' . $e->getMessage();
         }
     }
+
+    $db->exec("SET statement_timeout = '120s'");
 
     if (empty($failures)) {
         return [

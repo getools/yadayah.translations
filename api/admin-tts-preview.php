@@ -21,43 +21,23 @@ setCurrentUser($db, (int)$user['user_key']);
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') errorResponse('POST required');
 $data = json_decode(file_get_contents('php://input'), true) ?: [];
 
-$ttsKey = (int)($data['tts_key'] ?? 0);
-$text   = trim((string)($data['text'] ?? ''));
+$ttsKey  = (int)($data['tts_key'] ?? 0);
+$rawText = trim((string)($data['text'] ?? ''));   // keep paragraph breaks for the async worker
+$text    = $rawText;
 if (!$ttsKey) errorResponse('tts_key required');
 if ($text === '') errorResponse('text required');
-if (mb_strlen($text) > 8000) errorResponse('text too long (8000 char limit for preview)');
+// Per-engine length guard is applied AFTER transport is resolved (below):
+// self-hosted engines chunk + render long selections in the background, so
+// they accept far more than cloud providers that synth in one request.
 
 // Always pre-strip HTML before synthesis. Word pastes inject
 // <p class="MsoNormal">, <o:p>, <span style="...">, <head>, <style>
 // blocks, etc. — even when no bold/italic is present. Without this
 // strip, htmlspecialchars later escapes the <p ...> brackets and
 // Azure reads them as literal text ("less than p m s o normal…").
-$text = preg_replace('/<!--[\s\S]*?-->/', '', $text);
-$text = preg_replace('/<head\b[\s\S]*?<\/head>/i', '', $text);
-$text = preg_replace('/<style\b[\s\S]*?<\/style>/i', '', $text);
-$text = preg_replace('/<script\b[\s\S]*?<\/script>/i', '', $text);
-// Strip Office namespace tags (<o:p>, <w:WordDocument>, etc.).
-$text = preg_replace('/<\/?[a-z]+:[a-z]+\b[^>]*>/i', '', $text);
-// Normalise <strong>/<em> → <b>/<i> so segmentParagraph routes them.
-$text = preg_replace('/<\s*strong\b[^>]*>/i',  '<b>',  $text);
-$text = preg_replace('/<\s*\/\s*strong\s*>/i', '</b>', $text);
-$text = preg_replace('/<\s*em\b[^>]*>/i',      '<i>',  $text);
-$text = preg_replace('/<\s*\/\s*em\s*>/i',     '</i>', $text);
-// Drop every remaining tag except <b>, </b>, <i>, </i>. Replace with
-// a single space so adjacent words don't fuse together.
-$text = preg_replace('/<(?!\/?(?:b|i)\b)[^>]*>/i', ' ', $text);
-$text = preg_replace('/&nbsp;/', ' ', $text);
-$text = preg_replace('/\s+/u', ' ', $text);
-$text = trim($text);
-// Glue apostrophe-class modifiers (half-rings, curly / straight quotes,
-// primes, etc.) back to adjacent letters that Word's span-per-character
-// paste split apart. "rea ʿ" → "reaʿ"; "ʾ Adam" → "ʾAdam". Without this
-// the apos-anchored tunes (Print "reaʿ" → IPA "ɹˈɛɑʕ") wouldn't match
-// and Azure would fall back to letter-spelling the orphaned 3-letter
-// fragments like "rea".
-$aposCls = "[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]";
-$text = preg_replace('/(\pL)\s+(' . $aposCls . ')/u', '$1$2', $text);
-$text = preg_replace('/(' . $aposCls . ')\s+(\pL)/u', '$1$2', $text);
+// (ttsCleanPreviewText also glues apostrophe-class modifiers back to their
+// letters so apos-anchored tunes still match — see the helper.)
+$text = ttsCleanPreviewText($text);
 $hasFormat = (bool)preg_match('/<\s*(b|i)\b/i', $text);
 
 $cfg = loadTtsConfig($db, $ttsKey);
@@ -128,26 +108,53 @@ $providerKey = ttsResolveProviderKey($cfg, $resolvedCat);
 $transport   = ttsProviderTransport($cfg, $providerKey);
 $usesSsml    = ($transport === 'azure-ssml');
 
-// Self-hosted GPU engines (XTTS/Coqui, Chatterbox, CosyVoice, Qwen3) are
-// autoregressive and slow — ~5-10 s per sentence chunk. We chunk long text
-// below so it no longer 500s, but a whole page / chapter would still run
-// past the ~100 s CDN proxy timeout and surface as a gateway error. So for
-// local engines we silently TRIM the preview to roughly one paragraph
-// (p99 ≈ 1053 chars) and play that — the audition only needs a sample of the
-// voice, not the whole selection. Cloud providers (Azure / ElevenLabs /
-// Inworld) keep the full 8000-char allowance since they synthesise quickly.
-const PREVIEW_LOCAL_CHAR_CAP = 1200;
-if ($transport === 'gpu-tailnet' && mb_strlen($text) > PREVIEW_LOCAL_CHAR_CAP) {
-    $text = mb_substr($text, 0, PREVIEW_LOCAL_CHAR_CAP);
-    // Back off to the last whitespace so we don't cut mid-word.
-    $lastSpace = mb_strrpos($text, ' ');
-    if ($lastSpace !== false && $lastSpace > PREVIEW_LOCAL_CHAR_CAP * 0.6) {
-        $text = mb_substr($text, 0, $lastSpace);
+// Operator-tunable chunk sizing (Voices page Min / Target / Max fields).
+// Clamped + ordered server-side (chunkTextForPreview re-clamps too).
+// Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
+$chunkMax    = max(40, min(600, (int)($data['chunk_max'] ?? 250)));
+$chunkTarget = max(20, min($chunkMax, (int)($data['chunk_target'] ?? 150)));
+$chunkMin    = max(10, min($chunkTarget, (int)($data['chunk_min'] ?? 80)));
+
+// Length guard, per engine. Self-hosted engines render long selections in the
+// background (chunked whole-paragraph, see below), so there's no hard preview
+// cap — chunking absorbs the scale. Cloud providers synth the whole utterance
+// in a single request and have their own ceilings, so keep them bounded.
+$previewCharMax = ($transport === 'gpu-tailnet') ? 100000 : 8000;
+if (mb_strlen($text) > $previewCharMax) {
+    errorResponse('text too long (' . $previewCharMax . ' char limit for this engine)');
+}
+
+// Self-hosted engines synthesise ~real-time when the box is busy, so a preview
+// longer than what fits the synchronous path (~1100 chars ≈ ~70 s of audio)
+// can't return inside Cloudflare's ~100 s proxy window. Hand those off to a
+// background worker that renders the FULL selection whole-paragraph (no chunk
+// cap) and stash an async job; the browser polls admin-tts-preview-status.php.
+// Cloud providers synth fast and keep the synchronous path at any length.
+const PREVIEW_SYNC_CHAR_MAX = 1100;
+if ($transport === 'gpu-tailnet' && mb_strlen($text) > PREVIEW_SYNC_CHAR_MAX) {
+    $jobKey = ttsEnqueuePreviewJob($db, [
+        'tts_key'    => $ttsKey,
+        'user_key'   => (int)$user['user_key'],
+        'raw_text'   => $rawText,                 // paragraph breaks preserved
+        'category'   => $resolvedCat,
+        'voice_code' => $overrideVoice,
+        'style'      => $data['style'] ?? null,
+        'rate_pct'   => (int)($data['rate_pct'] ?? 0),
+        'pitch_st'   => (float)($data['pitch_st'] ?? 0),
+        'volume'     => (int)($data['volume'] ?? 100),
+        'min_chars'    => $chunkMin,
+        'target_chars' => $chunkTarget,
+        'max_chars'    => $chunkMax,
+    ]);
+    if ($jobKey) {
+        // Spawn the detached worker inside this container; it survives the
+        // request (new session via setsid) and renders without the CDN clock.
+        $workerPath = __DIR__ . '/admin-tts-preview-worker.php';
+        @exec('setsid php ' . escapeshellarg($workerPath) . ' ' . (int)$jobKey . ' > /dev/null 2>&1 &');
+        jsonResponse(['async' => true, 'job_key' => $jobKey]);
     }
-    // Drop any dangling unterminated tag fragment the cut may have left
-    // (e.g. sliced inside "<b"). Local synth flattens b/i anyway, but a
-    // half-open tag could confuse the segmenter.
-    $text = rtrim(preg_replace('/<[^>]*$/', '', $text));
+    // Enqueue failed — fall through to the (capped) synchronous path so the
+    // operator still hears something rather than an error.
 }
 
 $err = '';
@@ -205,45 +212,22 @@ try {
         // Local engine. Preview uses the single category voice for the whole
         // utterance (matches the picker semantics; segment-level B/I tune
         // routing is a build-worker concern).
+        //
+        // NO WARMUP. localTtsSynthesizePreview merges to whole-paragraph chunks
+        // (≤590 chars) and synthesises each verbatim with only the gentle
+        // leading/trailing silence trim — same as the book-build path. A short
+        // single word is just one plain call. The old "uh."/"Seed N." warmup
+        // and the warmup-word-handoff/cut were removed 2026-06-18: they cut text
+        // off and repeated words. Any seed (tune_override) still APPLIES via the
+        // seg; it's just no longer spoken aloud.
         $localSeg     = buildLocalSegment($text, $cfg, $resolvedCat);
         $outputFormat = $cfg['system']['tts_output_format'] ?? 'audio-24khz-96kbitrate-mono-mp3';
-        // Preview-only warmup. For short single-word respelling previews
-        // the Chatterbox engine's first ~200 ms is startup garbage and
-        // would clip "Yadah" → "adah" etc. Prepend a warmup phrase that
-        // travels in the same synth call so the garbage lands on the
-        // warmup audio. The book-build path explicitly does NOT add this
-        // warmup — see localTtsSynthesizeChunked in admin-tts-helpers.php
-        // — because chapter audio can't have spoken "uh." / "Seed N."
-        // mixed in. Previews announce the seed number when a seed is set
-        // (tune_override carries one) so the audition tells the listener
-        // which variant they're hearing.
-        if (mb_strlen(trim((string)($localSeg['text'] ?? ''))) <= 120) {
-            // Short preview (single word / phrase): warmup + ONE synth call.
-            // The warmup must travel in the same call so the engine's startup
-            // garbage lands on it — chunking here would speak "uh." aloud.
-            $warmup = (isset($localSeg['seed']) && $localSeg['seed'] !== null)
-                ? (((int)$localSeg['seed']) . '. ')
-                : 'uh. ';
-            $localSeg['text'] = $warmup . $localSeg['text'];
-            if (function_exists('localTtsSynthesizeRetry')) {
-                $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
-            } else {
-                $mp3 = localTtsSynthesize($cfg, $localSeg, $outputFormat, $err);
-            }
+        if (function_exists('localTtsSynthesizePreview')) {
+            $mp3 = localTtsSynthesizePreview($cfg, $localSeg, $outputFormat, $err, 60, $chunkMin, $chunkTarget, $chunkMax);
+        } elseif (function_exists('localTtsSynthesizeChunked')) {
+            $mp3 = localTtsSynthesizeChunked($cfg, $localSeg, $outputFormat, $err);
         } else {
-            // Long preview (the Load button can pull a whole page / chapter).
-            // Local engines (XTTS/Coqui, Chatterbox, CosyVoice) reject or
-            // truncate text over ~250 chars per call — XTTS returns HTTP 500
-            // outright, which surfaced as a failed preview. Chunk at sentence
-            // boundaries exactly like the book-build worker so each GPU call
-            // stays under the cap; the MP3 frames concatenate losslessly.
-            if (function_exists('localTtsSynthesizeChunked')) {
-                $mp3 = localTtsSynthesizeChunked($cfg, $localSeg, $outputFormat, $err);
-            } elseif (function_exists('localTtsSynthesizeRetry')) {
-                $mp3 = localTtsSynthesizeRetry($cfg, $localSeg, $outputFormat, $err);
-            } else {
-                $mp3 = localTtsSynthesize($cfg, $localSeg, $outputFormat, $err);
-            }
+            $mp3 = localTtsSynthesize($cfg, $localSeg, $outputFormat, $err);
         }
     }
 } catch (Throwable $e) {

@@ -128,6 +128,11 @@
         .tts-table .vc-edit { display:inline-flex; align-items:center; justify-content:center; width:26px; height:24px; padding:0; background:#888; color:#fff; border:none; border-radius:4px; cursor:pointer; line-height:1; }
         .tts-table .vc-edit:hover { opacity:0.85; }
         .tts-table .vc-edit svg { width:15px; height:15px; fill:currentColor; display:block; }
+        /* Catalog audio player pinned to the bottom of the viewport so it's
+           visible regardless of how far down the voice list you've scrolled. */
+        #vc-audio-row.fixed-player { position:fixed; left:0; right:0; bottom:0; z-index:1200; margin:0; padding:8px 16px; background:#fff; border-top:1px solid #ccc; box-shadow:0 -2px 10px rgba(0,0,0,0.14); }
+        /* Reserve space so the fixed bar never hides the last voice rows. */
+        body.vc-playing { padding-bottom:64px; }
         .tts-table .col-toggle { width:60px; text-align:center; }
         .tts-table tr.inactive td { color:#aaa; }
 
@@ -274,7 +279,7 @@
                     <button type="button" class="pv-fmt" onclick="pvFormat('italic')"  title="Italic (Ctrl+I)"                                                  style="font-weight:normal;font-style:italic;padding:3px 9px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer;font-size:0.85rem;">I</button>
                     <button type="button" class="pv-fmt" onclick="pvFormat('removeFormat')" title="Clear formatting on the selection"                          style="padding:3px 9px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer;font-size:0.8rem;color:#666;">clear</button>
                 </div>
-                <div id="preview-text" contenteditable="true" data-placeholder="Yahowah commanded the children of Yisraʾel to keep the Shabuwʿah." spellcheck="false" style="min-height:60px;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-family:inherit;font-size:0.9rem;line-height:1.5;background:#fff;outline:none;">Yahowah commanded the children of <b>Yisraʾel</b> to keep the <b>Shabuwʿah</b>.</div>
+                <div id="preview-text" contenteditable="true" data-placeholder="Yahowah commanded the children of Yisraʾel to keep the Shabuwʿah." spellcheck="false" style="min-height:140px;height:160px;max-height:600px;overflow:auto;resize:vertical;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-family:inherit;font-size:0.9rem;line-height:1.6;background:#fff;outline:none;">Yahowah commanded the children of <b>Yisraʾel</b> to keep the <b>Shabuwʿah</b>.</div>
                 <!-- Cascading starting-point picker: each dropdown is disabled
                      until the one before it has a selection. Picking a
                      paragraph drops its HTML into #preview-text above so the
@@ -305,6 +310,10 @@
                 <div class="preview-controls">
                     <label>Rate <input type="number" id="preview-rate" value="0" min="-50" max="200" style="width:60px"><span title="Percent — positive speeds the voice up, negative slows it down (range -50 to +200)" style="margin-left:2px;cursor:help;">%</span></label>
                     <label>Pitch <input type="number" id="preview-pitch" value="0" min="-12" max="12" step="0.1" style="width:80px"><span title="Semitones — 12 = one octave. Positive raises the voice, negative lowers it (range -12 to +12). Fractional values like 0.5 give finer control." style="margin-left:2px;cursor:help;">st</span></label>
+                    <span title="Self-hosted voices only. Chunk sizing: aim for ~Target characters, breaking at the last punctuation (. ! ? ; : , — - ) and ( ); a chunk never goes below Min (except at end of text) and never exceeds Max (hard cap — falls back to the last whitespace if no punctuation fits)." style="cursor:help;color:#555;">Chunk</span>
+                    <label>Min <input type="number" id="preview-chunk-min" value="80" min="20" max="400" step="10" style="width:71px"></label>
+                    <label>Target <input type="number" id="preview-chunk-target" value="150" min="40" max="500" step="10" style="width:71px"></label>
+                    <label>Max <input type="number" id="preview-chunk-max" value="250" min="60" max="600" step="10" style="width:71px"></label>
                 </div>
                 <div id="preview-status" class="status-msg"></div>
                 <audio id="preview-audio" controls style="width:100%;margin-top:8px;display:none"></audio>
@@ -401,9 +410,14 @@
                 </thead>
                 <tbody id="voices-tbody"></tbody>
             </table>
-            <div id="vc-audio-row" style="display:none;align-items:center;gap:10px;margin-top:8px;">
+            <!-- Audio player is pinned to the bottom of the viewport (see
+                 #vc-audio-row.fixed-player) so it stays visible no matter which
+                 voice row you scrolled to. -->
+            <div id="vc-audio-row" class="fixed-player" style="display:none;align-items:center;gap:10px;">
                 <span id="vc-audio-name" title="" style="flex:0 0 auto;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.85rem;font-weight:600;color:#31345A;"></span>
-                <audio id="vc-audio" controls preload="none" style="flex:1 1 auto;min-width:0;"></audio>
+                <span id="vc-audio-status" style="flex:1 1 auto;min-width:0;font-size:0.85rem;color:#666;display:none;"></span>
+                <audio id="vc-audio" controls preload="none" style="flex:1 1 auto;min-width:0;display:none;"></audio>
+                <button type="button" id="vc-audio-close" title="Close player" onclick="closeVcAudio()" style="flex:0 0 auto;background:none;border:none;font-size:1.1rem;line-height:1;cursor:pointer;color:#888;padding:2px 6px;">✕</button>
             </div>
             <div id="vc-status" class="status-msg"></div>
         </div>
@@ -1612,19 +1626,16 @@ async function saveAndListenCategory(catCode, rowEl) {
         // the latest values.
         await saveCategoryOnly(catCode, rowEl);
         var c = readCategoryRow(rowEl);
-        var blob = await api('/admin-tts-preview.php', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                tts_key: TTS_KEY,
-                category: catCode,
-                voice_code: c.voice,
-                style: c.style || null,
-                rate_pct: c.rate, pitch_st: c.pitch, volume: c.volume,
-                text: previewTextHtml() || 'This is a preview.',
-            }),
-        });
-        var url = URL.createObjectURL(blob);
+        var url = await previewSynth({
+            tts_key: TTS_KEY,
+            category: catCode,
+            voice_code: c.voice,
+            style: c.style || null,
+            rate_pct: c.rate, pitch_st: c.pitch, volume: c.volume,
+            chunk_min: pvChunkSizes().min, chunk_target: pvChunkSizes().target, chunk_max: pvChunkSizes().max,
+            text: previewTextHtml() || 'This is a preview.',
+        }, function (m) { pvSetStatus(m); });
+        pvSetStatus('');
         $('preview-audio').src = url;
         $('preview-audio').style.display = 'block';
         $('preview-audio').play();
@@ -1647,15 +1658,179 @@ function pvFormat(cmd) {
     if (!el) return;
     el.focus();
     try { document.execCommand(cmd, false, null); } catch (e) {}
+    pvHighlightChunks();
 }
 
 function previewTextHtml() {
     var el = $('preview-text');
     if (!el) return '';
-    // innerHTML carries the inline formatting; .textContent ignores it.
-    var html = el.innerHTML || '';
-    return html.trim();
+    // Strip the chunk-highlight wrappers (keep their text + any b/i inside) so
+    // the server receives clean content, not our colour spans.
+    return pvUnwrapChunkHtml(el).trim();
 }
+// Return el's innerHTML with every <span class="pv-chunk"> unwrapped.
+function pvUnwrapChunkHtml(el) {
+    var clone = el.cloneNode(true);
+    var spans = clone.querySelectorAll('span.pv-chunk');
+    for (var i = 0; i < spans.length; i++) {
+        var sp = spans[i];
+        while (sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
+        sp.parentNode.removeChild(sp);
+    }
+    return clone.innerHTML || '';
+}
+
+// ── Live chunk highlighting ──────────────────────────────────────────
+// Mirror of the server's chunkTextForPreview() so the preview field can paint
+// each parsed chunk in an alternating background. Approximate for text with
+// pronunciation tunes (the server chunks after substitutions) but exact for
+// plain text. Re-runs on edit and on "Max chars" change.
+var PV_CHUNK_BG = ['#d4e4ff', '#ffe6bf'];   // alternating light blue / light amber
+// Read the Min / Target / Max chunk-size fields (with defaults + ordering).
+function pvChunkSizes() {
+    var g = function (id, d) { var e = $(id); var v = e ? parseInt(e.value, 10) : NaN; return isNaN(v) ? d : v; };
+    // Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
+    var mx = Math.max(40, Math.min(600, g('preview-chunk-max', 250)));
+    var tg = Math.max(20, Math.min(mx, g('preview-chunk-target', 150)));
+    var mn = Math.max(10, Math.min(tg, g('preview-chunk-min', 80)));
+    return { min: mn, target: tg, max: mx };
+}
+function pvEscHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function pvWrapFmt(run, b, i) { var s = pvEscHtml(run); if (i) s = '<i>' + s + '</i>'; if (b) s = '<b>' + s + '</b>'; return s; }
+// Cut length (relative to pos) if index i is a breakpoint, else 0. '(' breaks
+// BEFORE it; '. ! ? ; : ,' need a trailing space; '— – )' always; spaced '-'.
+function pvBreakCut(s, i, pos) {
+    var ch = s.charAt(i);
+    if (ch === '(') return i > pos ? i - pos : 0;
+    var next = (i + 1 < s.length) ? s.charAt(i + 1) : '';
+    if (ch === '-') { var prev = i > 0 ? s.charAt(i - 1) : ''; return (prev === ' ' && next === ' ') ? (i + 1 - pos) : 0; }
+    var nse = (next === '' || next === ' ');
+    if (ch === '.' || ch === '!' || ch === '?' || ch === ';' || ch === ':' || ch === ',') return nse ? (i + 1 - pos) : 0;
+    if (ch === '—' || ch === '–' || ch === ')') return i + 1 - pos;
+    return 0;
+}
+// Contiguous [start,end) ranges covering the whole string. Mirrors the PHP
+// chunkTextForPreview Min/Target/Max logic.
+function pvChunkOffsets(s, minC, targetC, maxC) {
+    // Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
+    maxC = Math.max(40, Math.min(600, maxC || 250));
+    targetC = Math.max(20, Math.min(maxC, targetC || 150));
+    minC = Math.max(10, Math.min(targetC, minC || 80));
+    var len = s.length, pos = 0, out = [];
+    while (pos < len) {
+        if (len - pos <= maxC) { out.push([pos, len]); break; }
+        var lastInTarget = 0, firstOverTarget = 0, hiMax = pos + maxC, i, c;
+        for (i = pos; i < hiMax; i++) {
+            c = pvBreakCut(s, i, pos);
+            if (c <= 0 || c < minC) continue;
+            if (c <= targetC) lastInTarget = c;
+            else if (firstOverTarget === 0) firstOverTarget = c;
+        }
+        var cut = lastInTarget || firstOverTarget;
+        if (cut === 0) {
+            var sp = s.lastIndexOf(' ', pos + maxC - 1);
+            cut = (sp !== -1 && (sp - pos) >= minC) ? (sp - pos) : maxC;
+        }
+        out.push([pos, pos + cut]);
+        pos += cut;
+    }
+    return out;
+}
+// Flatten a node's content to [{ch,b,i}] per character (BR → '\n').
+function pvFlattenUnits(node) {
+    var units = [];
+    (function walk(n, b, it) {
+        for (var c = n.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 3) { var t = c.nodeValue; for (var k = 0; k < t.length; k++) units.push({ ch: t.charAt(k), b: b, i: it }); }
+            else if (c.nodeType === 1) {
+                if (c.nodeName === 'BR') { units.push({ ch: '\n', b: b, i: it }); }
+                else { walk(c, b || c.nodeName === 'B' || c.nodeName === 'STRONG', it || c.nodeName === 'I' || c.nodeName === 'EM'); }
+            }
+        }
+    })(node, false, false);
+    return units;
+}
+// Caret position as a character offset within el (BR counts as 1).
+function pvGetCaret(el) {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return null;
+    var r = sel.getRangeAt(0);
+    if (!el.contains(r.endContainer)) return null;
+    var pre = r.cloneRange();
+    pre.selectNodeContents(el);
+    pre.setEnd(r.endContainer, r.endOffset);
+    return pvFlattenUnits(pre.cloneContents()).length;
+}
+function pvSetCaret(el, offset) {
+    if (offset == null) return;
+    var remaining = offset, done = false;
+    (function recurse(n) {
+        for (var c = n.firstChild; c && !done; c = c.nextSibling) {
+            if (c.nodeType === 3) {
+                var L = c.nodeValue.length;
+                if (remaining <= L) { var sel = window.getSelection(), rg = document.createRange(); rg.setStart(c, remaining); rg.collapse(true); sel.removeAllRanges(); sel.addRange(rg); done = true; return; }
+                remaining -= L;
+            } else if (c.nodeType === 1) {
+                if (c.nodeName === 'BR') { if (remaining <= 0) { var s2 = window.getSelection(), r2 = document.createRange(); r2.setStartBefore(c); r2.collapse(true); s2.removeAllRanges(); s2.addRange(r2); done = true; return; } remaining -= 1; }
+                else { recurse(c); }
+            }
+        }
+    })(el);
+    if (!done) { var s = window.getSelection(), r = document.createRange(); r.selectNodeContents(el); r.collapse(false); s.removeAllRanges(); s.addRange(r); }
+}
+function pvHighlightChunks() {
+    var el = $('preview-text');
+    if (!el) return;
+    try {
+        var units = pvFlattenUnits(el);
+        // Build the SAME cleaned string the server chunks on: collapse runs of
+        // whitespace, drop half-rings (ʾ ʿ ʼ), and treat ~ as a space — exactly
+        // what ttsCleanPreviewText + buildLocalSegment do before chunking. Track
+        // which editable unit each cleaned char came from so the chunk
+        // boundaries map back precisely. (Pronunciation TUNES still can't be
+        // mirrored client-side, so a tuned word may shift one boundary.)
+        var cleaned = '', map = [], prevSpace = false;
+        for (var u = 0; u < units.length; u++) {
+            var ch = units[u].ch;
+            if (ch === 'ʾ' || ch === 'ʿ' || ch === 'ʼ' || ch === 'ˀ') continue; // half-rings
+            if (ch === '~') ch = ' ';
+            if (ch === ' ' || ch === '\n' || ch === '\t' || ch === '\r' || ch === ' ') {
+                if (prevSpace) continue;          // collapse whitespace
+                cleaned += ' '; map.push(u); prevSpace = true;
+            } else {
+                cleaned += ch; map.push(u); prevSpace = false;
+            }
+        }
+        if (!cleaned.length) return;
+        var cs = pvChunkSizes();
+        var ranges = pvChunkOffsets(cleaned, cs.min, cs.target, cs.max);   // cleaned-coord ranges
+        // Each highlight chunk covers editable units [start, nextStart); chunk 0
+        // starts at unit 0 so any leading removed chars stay visible.
+        var unitStart = [];
+        for (var r = 0; r < ranges.length; r++) unitStart.push(r === 0 ? 0 : (map[ranges[r][0]] != null ? map[ranges[r][0]] : units.length));
+        var html = '';
+        for (var ci = 0; ci < ranges.length; ci++) {
+            var st = unitStart[ci], en = (ci + 1 < unitStart.length) ? unitStart[ci + 1] : units.length;
+            html += '<span class="pv-chunk" style="background:' + PV_CHUNK_BG[ci % 2] + ';">';
+            var curB = false, curI = false, run = '';
+            for (var k = st; k < en; k++) {
+                var unit = units[k];
+                if (unit.ch === '\n') { if (run) { html += pvWrapFmt(run, curB, curI); run = ''; } html += '<br>'; continue; }
+                if (unit.b !== curB || unit.i !== curI) { if (run) { html += pvWrapFmt(run, curB, curI); run = ''; } curB = unit.b; curI = unit.i; }
+                run += unit.ch;
+            }
+            if (run) html += pvWrapFmt(run, curB, curI);
+            html += '</span>';
+        }
+        if (el.innerHTML !== html) {
+            var caret = pvGetCaret(el);
+            el.innerHTML = html;
+            pvSetCaret(el, caret);
+        }
+    } catch (e) { /* highlighting is best-effort — never block editing */ }
+}
+var _pvHlTimer = null;
+function pvScheduleHighlight() { if (_pvHlTimer) clearTimeout(_pvHlTimer); _pvHlTimer = setTimeout(pvHighlightChunks, 300); }
 
 // ── Starting-point picker (Series → Volume → Chapter → Paragraph) ──
 // Lazy-loads each level when its parent dropdown gets a selection. Each
@@ -1825,6 +2000,8 @@ async function pvLoadSelected() {
             // Trust the stored HTML — same b/i shape the build worker accepts
             // and the preview endpoint already segments.
             el.innerHTML = d.html || d.plain || '';
+            pvSaveText();
+            pvHighlightChunks();
             pvSetStatus('loaded paragraph — click ▶ on any voice to hear it.');
             return;
         }
@@ -1840,18 +2017,161 @@ async function pvLoadSelected() {
         if (!r2.ok) throw new Error('HTTP ' + r2.status);
         var d2 = await r2.json();
         el.innerHTML = d2.html || d2.plain || '';
+        pvSaveText();
+        pvHighlightChunks();
         pvSetStatus('loaded ' + level + ' (' + (d2.count || 0) + ' paragraphs) — click ▶ on any voice to hear it.');
     } catch (e) {
         pvSetStatus('error: ' + e.message);
     }
 }
+// ── Preview persistence ──────────────────────────────────────────────
+// Cache the preview text and the Load-from-book dropdown picks in
+// localStorage so they survive a reload / tab switch. Picks are stored as
+// the 5 selected keys and replayed through the (async) cascade on restore.
+var PV_LS_PICKS  = 'admin-tts.pv.picks';
+var PV_LS_TEXT   = 'admin-tts.pv.text';
+var PV_LS_HEIGHT = 'admin-tts.pv.height';
+var PV_LS_SIZES  = 'admin-tts.pv.sizes';
+// Persist the Min / Target / Max chunk fields so they survive a reload (the
+// operator's values are the source of truth, not the HTML defaults).
+function pvSaveSizes() {
+    try {
+        localStorage.setItem(PV_LS_SIZES, JSON.stringify({
+            min:    ($('preview-chunk-min')    || {}).value,
+            target: ($('preview-chunk-target') || {}).value,
+            max:    ($('preview-chunk-max')    || {}).value,
+        }));
+    } catch (e) {}
+}
+function pvRestoreSizes() {
+    try {
+        var s = JSON.parse(localStorage.getItem(PV_LS_SIZES) || 'null');
+        if (!s) return;
+        [['preview-chunk-min', s.min], ['preview-chunk-target', s.target], ['preview-chunk-max', s.max]].forEach(function (p) {
+            var el = $(p[0]);
+            if (el && p[1] != null && /^[0-9]+$/.test(String(p[1]))) el.value = p[1];
+        });
+    } catch (e) {}
+}
+// Restore the operator's last preview-field height; observe future resizes.
+function pvRestoreHeight() {
+    var el = $('preview-text');
+    if (!el) return;
+    try {
+        var h = localStorage.getItem(PV_LS_HEIGHT);
+        if (h && /^[0-9]+px$/.test(h)) el.style.height = h;
+    } catch (e) {}
+    if (window.ResizeObserver && !el._pvRO) {
+        var t = null;
+        el._pvRO = new ResizeObserver(function () {
+            if (t) clearTimeout(t);
+            t = setTimeout(function () { try { localStorage.setItem(PV_LS_HEIGHT, el.offsetHeight + 'px'); } catch (e) {} }, 300);
+        });
+        el._pvRO.observe(el);
+    }
+}
+var _pvTextTimer = null;
+
+function pvSavePicks() {
+    try {
+        localStorage.setItem(PV_LS_PICKS, JSON.stringify({
+            series:    $('pv-series')    ? $('pv-series').value    : '',
+            volume:    $('pv-volume')    ? $('pv-volume').value    : '',
+            chapter:   $('pv-chapter')   ? $('pv-chapter').value   : '',
+            page:      $('pv-page')      ? $('pv-page').value      : '',
+            paragraph: $('pv-paragraph') ? $('pv-paragraph').value : '',
+        }));
+    } catch (e) {}
+}
+function pvSaveText() {
+    // Debounced — fires on every keystroke / format command.
+    if (_pvTextTimer) clearTimeout(_pvTextTimer);
+    _pvTextTimer = setTimeout(function () {
+        try {
+            var el = $('preview-text');
+            // Save the CLEAN content (no highlight spans) so the cache stays small
+            // and a restore re-highlights from scratch.
+            if (el) localStorage.setItem(PV_LS_TEXT, pvUnwrapChunkHtml(el));
+        } catch (e) {}
+    }, 400);
+}
+function pvRestoreText() {
+    try {
+        var saved = localStorage.getItem(PV_LS_TEXT);
+        var el = $('preview-text');
+        // Only override the built-in default when there's a non-empty cache.
+        if (el && saved !== null && saved.trim() !== '') el.innerHTML = saved;
+    } catch (e) {}
+    pvHighlightChunks();
+}
+function pvHasOption(sel, val) {
+    if (!sel || val === '' || val == null) return false;
+    for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === String(val)) return true;
+    }
+    return false;
+}
+// Replay the saved cascade level by level, awaiting each async load so the
+// next dropdown is populated before we set it. Bails out cleanly at the
+// first level whose saved key no longer exists (book content changed).
+async function pvRestorePicks() {
+    var saved;
+    try { saved = JSON.parse(localStorage.getItem(PV_LS_PICKS) || 'null'); } catch (e) { saved = null; }
+    if (!saved || !pvHasOption($('pv-series'), saved.series)) return;
+    $('pv-series').value = saved.series;
+    await pvOnSeriesChange();
+    if (!pvHasOption($('pv-volume'), saved.volume)) return;
+    $('pv-volume').value = saved.volume;
+    await pvOnVolumeChange();
+    if (!pvHasOption($('pv-chapter'), saved.chapter)) return;
+    $('pv-chapter').value = saved.chapter;
+    await pvOnChapterChange();
+    if (pvHasOption($('pv-page'), saved.page)) {
+        $('pv-page').value = saved.page;
+        await pvOnPageChange();
+    }
+    if (pvHasOption($('pv-paragraph'), saved.paragraph)) {
+        $('pv-paragraph').value = saved.paragraph;
+        pvOnParagraphChange();
+    }
+    pvUpdateLoadBtn();
+}
+
 // Defer series load until the Voices tab is shown the first time so we
-// don't fire the query for users who never open this pane.
-function pvEnsureSeriesLoaded() {
+// don't fire the query for users who never open this pane. First run also
+// restores the cached preview text + dropdown picks and wires the savers.
+var _pvInited = false;
+async function pvEnsureSeriesLoaded() {
     var sel = $('pv-series');
     if (!sel) return;
     // Only one real option means we haven't loaded yet.
-    if (sel.options.length <= 1) pvLoadSeries();
+    if (sel.options.length <= 1) await pvLoadSeries();
+    if (_pvInited) return;
+    _pvInited = true;
+    pvRestoreSizes();
+    pvRestoreText();
+    pvRestoreHeight();
+    var txt = $('preview-text');
+    if (txt) txt.addEventListener('input', function () { pvSaveText(); pvScheduleHighlight(); });
+    // Persist + re-paint the chunk highlight when any of Min / Target / Max changes.
+    ['preview-chunk-min', 'preview-chunk-target', 'preview-chunk-max'].forEach(function (id) {
+        var f = $(id);
+        if (f) {
+            var h = function () { pvSaveSizes(); pvHighlightChunks(); };
+            f.addEventListener('input', h);
+            f.addEventListener('change', h);
+        }
+    });
+    // Persist picks whenever any level changes. Each on*Change resets its
+    // downstream selects synchronously before awaiting, so this 'change'
+    // listener (which runs right after the inline handler is invoked)
+    // already sees the cleared downstream values — no stale keys saved.
+    ['pv-series', 'pv-volume', 'pv-chapter', 'pv-page', 'pv-paragraph'].forEach(function (id) {
+        var s = $(id);
+        if (s) s.addEventListener('change', pvSavePicks);
+    });
+    await pvRestorePicks();
+    pvSavePicks();
 }
 
 // Wire Ctrl+B / Ctrl+I once on first focus so the shortcut works even
@@ -3515,43 +3835,119 @@ function rebuildAllVoiceDropdowns() {
     });
 }
 
+// ── Preview synthesis (sync + async) ─────────────────────────────────
+// One entry point for both play paths. POSTs to admin-tts-preview.php; a
+// short/cloud preview comes back as an audio blob and resolves immediately.
+// A long self-hosted-voice selection comes back as {async, job_key}: the box
+// renders the full text whole-paragraph in the background and we poll
+// admin-tts-preview-status.php until it's done, then fetch + play. Resolves
+// to an object URL either way. statusCb(msg) drives a progress line.
+async function previewSynth(params, statusCb) {
+    var res = await api('/admin-tts-preview.php', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+    });
+    if (res instanceof Blob) return URL.createObjectURL(res);
+    if (res && res.async && res.job_key) return await pollPreviewJob(res.job_key, statusCb);
+    throw new Error('unexpected preview response');
+}
+async function pollPreviewJob(jobKey, statusCb) {
+    // Ask once for notification permission so we can ping when it finishes
+    // while the operator is on another tab.
+    try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (e) {}
+    if (statusCb) statusCb('rendering on the box…');
+    var MAX_TRIES = 900;            // ~30 min ceiling (2s interval) — covers a full chapter render
+    var softErrs = 0;
+    for (var i = 0; i < MAX_TRIES; i++) {
+        await new Promise(function (r) { setTimeout(r, 2000); });
+        var s;
+        try {
+            s = await api('/admin-tts-preview-status.php?job_key=' + jobKey);
+            softErrs = 0;
+        } catch (e) {
+            if (++softErrs > 5) throw e;   // tolerate brief blips
+            continue;
+        }
+        if (s.status === 'done') {
+            notifyPreviewReady();
+            var blob = await api('/admin-tts-preview-status.php?job_key=' + jobKey + '&fetch=1');
+            return URL.createObjectURL(blob);
+        }
+        if (s.status === 'error') throw new Error(s.error || 'render failed on the box');
+        if (statusCb) {
+            statusCb('rendering on the box…' + (s.para_total ? ' (chunk ' + s.para_done + ' of ' + s.para_total + ')' : ''));
+        }
+    }
+    throw new Error('preview timed out (still rendering after ~30 min)');
+}
+function notifyPreviewReady() {
+    try {
+        // Only ping when they've looked away — if the tab is visible the
+        // auto-play is signal enough.
+        if (document.visibilityState === 'visible') return;
+        if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('Voice preview ready', { body: 'Your TTS preview finished rendering — click to listen.' });
+        }
+    } catch (e) {}
+}
+
+// Dismiss the pinned audio bar (pause + hide + release the reserved space).
+function closeVcAudio() {
+    var audio = $('vc-audio');
+    if (audio) { try { audio.pause(); } catch (e) {} }
+    var row = $('vc-audio-row');
+    if (row) row.style.display = 'none';
+    document.body.classList.remove('vc-playing');
+}
+
 async function playVoiceTest(tr, v) {
     var btn = tr.querySelector('.vc-listen');
     btn.disabled = true; btn.textContent = '…';
+    var audio   = $('vc-audio');
+    var nameEl  = $('vc-audio-name');
+    var statEl  = $('vc-audio-status');
+    var styleSel = tr.querySelector('.vc-style');
+    var style    = styleSel && styleSel.value ? styleSel.value : null;
+    // In-bar status so progress is visible on the pinned player itself.
+    var setStatus = function (m, isErr) {
+        if (statEl) {
+            statEl.textContent = m || '';
+            statEl.style.display = m ? 'inline' : 'none';
+            statEl.style.color = isErr ? '#c0392b' : '#666';
+        }
+    };
+    // Reveal the pinned player IMMEDIATELY (name + "rendering…") so it's visible
+    // no matter which voice you're auditioning or how long the render takes.
+    if (nameEl) {
+        var nm = v.tts_voice_label || v.tts_voice_code || '';
+        var prov = v.provider_main || v.tts_name || v.tts_code || '';
+        nameEl.textContent = nm + (style ? ' · ' + style : '');
+        nameEl.title = nm + (prov ? ' (' + prov + ')' : '') + (style ? ' · ' + style : '');
+    }
+    if (audio) { try { audio.pause(); } catch (e) {} audio.removeAttribute('src'); audio.style.display = 'none'; }
+    var row = $('vc-audio-row');
+    if (row) row.style.display = 'flex';
+    document.body.classList.add('vc-playing');
+    setStatus('rendering…');
     try {
         // Reuse the Preview any voice section's text + rate + pitch so
         // there's only one place to tweak audition parameters.
         var text  = previewTextHtml() || VC_DEFAULT_TEST_TEXT;
         var rate  = parseInt($('preview-rate').value, 10) || 0;
         var pitch = parseFloat($('preview-pitch').value) || 0;
-        var styleSel = tr.querySelector('.vc-style');
-        var style    = styleSel && styleSel.value ? styleSel.value : null;
-        var blob = await api('/admin-tts-preview.php', {
-            method: 'POST', headers: { 'Content-Type':'application/json' },
-            body: JSON.stringify({
-                tts_key: TTS_KEY,
-                voice_code: v.tts_voice_code,
-                style: style,
-                rate_pct: rate, pitch_st: pitch, volume: 100,
-                text: text,
-            }),
-        });
-        var audio = $('vc-audio');
-        audio.src = URL.createObjectURL(blob);
-        // Show the voice name to the left of the player so it's clear which
-        // row is currently auditioning.
-        var nameEl = $('vc-audio-name');
-        if (nameEl) {
-            var nm = v.tts_voice_label || v.tts_voice_code || '';
-            var prov = v.provider_main || v.tts_name || v.tts_code || '';
-            nameEl.textContent = nm + (style ? ' · ' + style : '');
-            nameEl.title = nm + (prov ? ' (' + prov + ')' : '') + (style ? ' · ' + style : '');
-        }
-        var row = $('vc-audio-row');
-        if (row) row.style.display = 'flex';
-        audio.play();
+        var url = await previewSynth({
+            tts_key: TTS_KEY,
+            voice_code: v.tts_voice_code,
+            style: style,
+            rate_pct: rate, pitch_st: pitch, volume: 100,
+            chunk_min: pvChunkSizes().min, chunk_target: pvChunkSizes().target, chunk_max: pvChunkSizes().max,
+            text: text,
+        }, setStatus);
+        setStatus('');
+        if (audio) { audio.src = url; audio.style.display = ''; audio.play(); }
     } catch (e) {
-        var s = $('vc-status'); if (s) { s.textContent = 'Play failed: ' + e.message; s.className = 'status-msg error'; }
+        setStatus('Play failed: ' + e.message, true);
+        if (audio) audio.style.display = 'none';
     } finally {
         btn.disabled = false; btn.textContent = '▶';
     }

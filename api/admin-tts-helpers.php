@@ -2286,3 +2286,392 @@ function splitSentencesForLocalTts(string $text): array {
     }
     return $final ?: [$text];
 }
+
+// ── Async preview jobs (admin-tts-preview-{worker,status}.php) ──────────
+// Rendered MP3s are stashed directly in the container's /tmp (shared between
+// the detached worker and the status endpoint, not web-accessible, transient).
+// /tmp is world-writable+sticky (1777); we deliberately do NOT use a subdir —
+// a subdir created by one user (e.g. root in a test run) isn't writable by the
+// non-root FPM worker, which previously caused "could not write" failures.
+function ttsPreviewJobMp3Path(int $jobKey): string { return '/tmp/tts-preview-' . $jobKey . '.mp3'; }
+
+// Insert a pending preview job and return its key (0 on failure). Sweeps jobs +
+// their mp3 files older than 2 h first so the table / tmp dir stay small.
+function ttsEnqueuePreviewJob(\PDO $db, array $j): int {
+    try {
+        $old = $db->query("SELECT job_key FROM yy_tts_preview_job WHERE job_created < now() - interval '2 hours'");
+        foreach ($old as $r) { @unlink(ttsPreviewJobMp3Path((int)$r['job_key'])); }
+        $db->exec("DELETE FROM yy_tts_preview_job WHERE job_created < now() - interval '2 hours'");
+    } catch (\Throwable $e) {}
+    try {
+        $stmt = $db->prepare("INSERT INTO yy_tts_preview_job
+            (job_status, job_tts_key, job_user_key, job_text, job_category, job_voice_code, job_style, job_rate_pct, job_pitch_st, job_volume, job_min_chars, job_target_chars, job_max_chars)
+            VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING job_key");
+        $stmt->execute([
+            (int)$j['tts_key'],
+            (int)($j['user_key'] ?? 0),
+            (string)$j['raw_text'],
+            (string)($j['category'] ?? 'main'),
+            ($j['voice_code'] ?? null) !== null ? (string)$j['voice_code'] : null,
+            ($j['style'] ?? null) !== null && $j['style'] !== '' ? (string)$j['style'] : null,
+            (int)($j['rate_pct'] ?? 0),
+            (float)($j['pitch_st'] ?? 0),
+            (int)($j['volume'] ?? 100),
+            (int)($j['min_chars'] ?? 80),
+            (int)($j['target_chars'] ?? 150),
+            (int)($j['max_chars'] ?? 250),
+        ]);
+        return (int)$stmt->fetchColumn();
+    } catch (\Throwable $e) {
+        error_log('ttsEnqueuePreviewJob failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+
+// Render a full preview selection one paragraph at a time, for the async worker.
+// Progress is reported per CHUNK (not per paragraph): $progress(chunksDone,
+// chunksTotal) drives the UI's "chunk N of M". We pre-chunk every paragraph up
+// front to know the grand total before synthesis starts.
+function localRenderPreviewParagraphs(array $cfg, string $rawText, string $category, string $outputFormat, ?string &$err = null, ?callable $progress = null, int $minChars = 80, int $targetChars = 150, int $maxChars = 250): string {
+    $paras = ttsSplitPreviewParagraphs($rawText);
+    $clean = [];
+    foreach ($paras as $p) { $c = trim(ttsCleanPreviewText($p)); if ($c !== '') $clean[] = $c; }
+    if (!$clean) { $err = 'no synthesizable text'; return ''; }
+
+    // Build segs + tally total chunk count for the progress denominator.
+    $segs = [];
+    $totalChunks = 0;
+    foreach ($clean as $paraText) {
+        $seg = buildLocalSegment($paraText, $cfg, $category);
+        $segs[] = $seg;
+        $totalChunks += max(1, count(chunkTextForPreview((string)$seg['text'], $minChars, $targetChars, $maxChars)));
+    }
+
+    $done = 0;
+    $items = [];
+    foreach ($segs as $idx => $seg) {
+        // Enough chunks to render this whole paragraph without truncation.
+        $maxChunks = (int)max(1, ceil(mb_strlen((string)$seg['text']) / max(20, $minChars)) + 3);
+        $perr = '';
+        // Render each paragraph LOSSLESS (wav) — $finalMp3=false — so the audio
+        // is MP3-encoded only once, in the final assembly below.
+        $b = localTtsSynthesizePreview($cfg, $seg, $outputFormat, $perr, $maxChunks, $minChars, $targetChars, $maxChars,
+            function () use (&$done, $totalChunks, $progress) {
+                $done++;
+                if ($progress) $progress($done, $totalChunks);
+            }, false);
+        if ($b === '') { $err = 'paragraph ' . ($idx + 1) . ': ' . $perr; return ''; }
+        // Slightly longer pause between paragraphs than between chunks.
+        $items[] = ['mp3' => $b, 'pause' => ($idx < count($segs) - 1) ? 380 : 0];
+    }
+    // Final assembly across all (lossless) paragraphs → the single MP3 encode.
+    return pvConcatMp3sWithPauses($items, $err, 'mp3');
+}
+
+// Pre-strip preview HTML to the plain text + <b>/<i> the synth paths expect.
+// Factored out of admin-tts-preview.php so the async worker cleans each
+// paragraph identically. NOTE: collapses all whitespace, so paragraph
+// boundaries must be split off BEFORE calling this (see ttsSplitPreviewParagraphs).
+function ttsCleanPreviewText(string $text): string {
+    $text = preg_replace('/<!--[\s\S]*?-->/', '', $text);
+    $text = preg_replace('/<head\b[\s\S]*?<\/head>/i', '', $text);
+    $text = preg_replace('/<style\b[\s\S]*?<\/style>/i', '', $text);
+    $text = preg_replace('/<script\b[\s\S]*?<\/script>/i', '', $text);
+    $text = preg_replace('/<\/?[a-z]+:[a-z]+\b[^>]*>/i', '', $text);   // Office <o:p> etc.
+    $text = preg_replace('/<\s*strong\b[^>]*>/i',  '<b>',  $text);
+    $text = preg_replace('/<\s*\/\s*strong\s*>/i', '</b>', $text);
+    $text = preg_replace('/<\s*em\b[^>]*>/i',      '<i>',  $text);
+    $text = preg_replace('/<\s*\/\s*em\s*>/i',     '</i>', $text);
+    $text = preg_replace('/<(?!\/?(?:b|i)\b)[^>]*>/i', ' ', $text);    // drop tags except b/i
+    $text = preg_replace('/&nbsp;/', ' ', $text);
+    $text = preg_replace('/\s+/u', ' ', $text);
+    $text = trim($text);
+    $aposCls = "[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]";
+    $text = preg_replace('/(\pL)\s+(' . $aposCls . ')/u', '$1$2', $text);
+    $text = preg_replace('/(' . $aposCls . ')\s+(\pL)/u', '$1$2', $text);
+    return $text;
+}
+
+// Split raw preview HTML at PARAGRAPH boundaries (2+ <br>, closing block tags,
+// or blank lines) so the async worker can synthesise each whole paragraph as
+// its own call. A single <br> inside a paragraph is NOT a boundary. The Load
+// button joins paragraphs with <br><br>, so this recovers them exactly.
+function ttsSplitPreviewParagraphs(string $raw): array {
+    $s = preg_replace('/<\/(?:p|div|li|h[1-6])\s*>/i', "\x1e", $raw);
+    $s = preg_replace('/(?:<br\s*\/?>\s*){2,}/i', "\x1e", $s);
+    $s = preg_replace('/\R{2,}/u', "\x1e", $s);
+    $parts = explode("\x1e", $s);
+    $out = [];
+    foreach ($parts as $p) { $p = trim($p); if ($p !== '') $out[] = $p; }
+    return $out ?: [trim($raw)];
+}
+
+// Trim ONLY leading near-silence / engine startup garbage from a chunk's mp3 —
+// never the trailing edge, so a chunk's final word keeps its full release and
+// doesn't get "cut off" at the join. Gentle -40dB threshold so a soft word
+// onset isn't mistaken for silence. Returns the input unchanged if ffmpeg is
+// unavailable or produces nothing.
+function trimLeadingSilencePreview(string $mp3): string {
+    static $ff = null;
+    if ($ff === null) { $ff = trim((string)shell_exec('which ffmpeg 2>/dev/null')); if ($ff === '') $ff = false; }
+    if ($ff === false || $mp3 === '') return $mp3;
+    $in = tempnam(sys_get_temp_dir(), 'pvl_');
+    if ($in === false) return $mp3;
+    @file_put_contents($in, $mp3);
+    $out = $in . '.l.mp3';
+    $filter = 'silenceremove=start_periods=1:start_silence=0.05:start_threshold=-40dB';
+    @shell_exec(escapeshellarg($ff) . ' -loglevel error -y -i ' . escapeshellarg($in)
+        . ' -af ' . escapeshellarg($filter) . ' -acodec libmp3lame -ab 64k ' . escapeshellarg($out) . ' 2>&1');
+    $b = @file_get_contents($out);
+    @unlink($in); @unlink($out);
+    return ($b !== false && $b !== '') ? $b : $mp3;
+}
+
+// Split text into synth chunks governed by Min / Target / Max char counts (the
+// Voices fields). Operator spec 2026-06-18:
+//   - A chunk never goes below $minChars (unless the text simply runs out).
+//   - Aim for ~$targetChars: take the LAST breakpoint whose chunk length is in
+//     [min, target]. If none, EXTEND past target — take the FIRST breakpoint up
+//     to $maxChars. $maxChars is a HARD cap, never exceeded.
+//   - If no breakpoint meets target without exceeding max, go back to the last
+//     whitespace before max (a word boundary); if even that's missing, cut at max.
+// Breakpoints: . ! ? ; : , (each needs a trailing space so "3.14"/"U.S.A" don't
+// split), em/en dash, spaced hyphen, ')' (break AFTER); '(' breaks BEFORE it so
+// a parenthetical starts a fresh chunk.
+function chunkTextForPreview(string $text, int $minChars = 80, int $targetChars = 150, int $maxChars = 250): array {
+    $text = trim((string)preg_replace('/\s+/u', ' ', $text));
+    if ($text === '') return [];
+    // Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
+    $maxChars    = max(40, min(600, $maxChars));
+    $targetChars = max(20, min($maxChars, $targetChars));
+    $minChars    = max(10, min($targetChars, $minChars));
+    $len = mb_strlen($text);
+    $isPunct = function (string $t, int $idx, int $len) {
+        $ch   = mb_substr($t, $idx, 1);
+        $next = ($idx + 1 < $len) ? mb_substr($t, $idx + 1, 1) : '';
+        $nse  = ($next === '' || $next === ' ');
+        if ($ch === '.' || $ch === '!' || $ch === '?' || $ch === ';' || $ch === ':' || $ch === ',') return $nse;
+        if ($ch === '—' || $ch === '–' || $ch === ')') return true;
+        if ($ch === '-') { $prev = ($idx > 0) ? mb_substr($t, $idx - 1, 1) : ''; return $prev === ' ' && $next === ' '; }
+        return false;
+    };
+    // Cut LENGTH (relative to $pos) if index $i is a breakpoint, else 0. '('
+    // breaks just BEFORE it; everything else just AFTER it.
+    $breakCut = function (int $i, int $pos) use ($text, $len, $isPunct) {
+        if (mb_substr($text, $i, 1) === '(') return $i > $pos ? $i - $pos : 0;
+        return $isPunct($text, $i, $len) ? $i + 1 - $pos : 0;
+    };
+    $chunks = [];
+    $pos = 0;
+    while ($pos < $len) {
+        // Whatever's left fits under the hard cap — take it all (end of text).
+        if ($len - $pos <= $maxChars) { $chunks[] = trim(mb_substr($text, $pos)); break; }
+        $lastInTarget = 0;    // last breakpoint with length in [min, target]
+        $firstOverTarget = 0; // first breakpoint with length in (target, max]
+        $hiMax = $pos + $maxChars;
+        for ($i = $pos; $i < $hiMax; $i++) {
+            $c = $breakCut($i, $pos);
+            if ($c <= 0 || $c < $minChars) continue;
+            if ($c <= $targetChars) $lastInTarget = $c;
+            elseif ($firstOverTarget === 0) $firstOverTarget = $c;
+        }
+        $cut = $lastInTarget ?: $firstOverTarget;
+        if ($cut === 0) {
+            // No usable breakpoint within max — go back to the last whitespace.
+            $window = mb_substr($text, $pos, $maxChars);
+            $sp = mb_strrpos($window, ' ');
+            $cut = ($sp !== false && $sp >= $minChars) ? $sp : $maxChars;
+        }
+        $chunks[] = trim(mb_substr($text, $pos, $cut));
+        $pos += $cut;
+        while ($pos < $len && mb_substr($text, $pos, 1) === ' ') $pos++;
+    }
+    return array_values(array_filter($chunks, function ($c) { return $c !== '' && preg_match('/\p{L}|\d/u', $c); }));
+}
+
+
+/**
+ * PREVIEW-ONLY chunked synth for self-hosted engines (XTTS/Coqui, Chatterbox,
+ * CosyVoice, Qwen3). Splits the text with chunkTextForPreview() at the operator-
+ * tunable $charLimit (Voices "Max chars" field) — each chunk ends at the last
+ * punctuation before the limit. Smaller limits = shorter, more reliable calls
+ * (XTTS drops/clips words on long inputs). $maxChunks is only a runaway safety
+ * cap — large enough never to truncate normal input.
+ *
+ * NO WARMUP, and trims LEADING silence only — never the trailing edge, so a
+ * chunk's final word keeps its full release and isn't cut off at the join.
+ */
+function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat, ?string &$err = null, int $maxChunks = 60, int $minChars = 80, int $targetChars = 150, int $maxChars = 250, ?callable $onChunk = null, bool $finalMp3 = true): string {
+    require_once __DIR__ . '/gpu-client.php';
+    // Only mp3 final output is supported here; anything else uses the plain path.
+    if (strpos($outputFormat, 'mp3') === false) return localTtsSynthesizeChunked($cfg, $seg, $outputFormat, $err);
+
+    $prov = $cfg['providers'][$seg['provider_key']] ?? null;
+    if (!$prov) { $err = 'unknown provider_key ' . ($seg['provider_key'] ?? '?'); return ''; }
+    $settings = json_decode((string)($prov['provider_settings'] ?? '{}'), true) ?: [];
+    $engine   = $settings['engine'] ?? ($prov['provider_model_id'] ?? '');
+    if ($engine === '') { $err = 'provider ' . $seg['provider_key'] . ' has no engine name'; return ''; }
+
+    // Min / Target / Max are the operator-tunable chunk sizes (Voices fields).
+    $chunks = chunkTextForPreview((string)($seg['text'] ?? ''), $minChars, $targetChars, $maxChars);
+    if (!$chunks) { $err = 'no synthesizable text'; return ''; }
+    if (count($chunks) > $maxChunks) $chunks = array_slice($chunks, 0, $maxChunks); // runaway safety only
+
+    // Chunks are synthesised LOSSLESS (wav) and kept lossless through assembly;
+    // we only MP3-encode at the very end (once) — no compounding warble.
+    $fmt = 'wav';
+    foreach ($chunks as $i => $chunk) {
+        // XTTS stochastically CLIPS the last word (~15%) or hallucinates past the
+        // end when a chunk lacks trailing context (confirmed via STT). Appending a
+        // trailing ellipsis gives the model "room" to finish the real last word
+        // and stop — measured to roughly HALVE the drop rate (~17%→~8%) with no
+        // spoken artifact (unlike a dummy word, which leaks). The inter-chunk
+        // pause below is still sized off the ORIGINAL ending.
+        $engineText = rtrim($chunk) . ' ...';
+        $payload = [
+            'provider' => $engine,
+            'voice'    => $seg['voice'],
+            'text'     => $engineText,
+            'phonemes' => '',                 // local segs bake pronunciation into the text; phonemes is null
+            'rate'     => (int)$seg['rate'],
+            'pitch'    => (float)$seg['pitch'],
+            'volume'   => (int)$seg['volume'],
+            'format'   => $fmt,
+        ];
+        if (!empty($seg['style'])) $payload['style'] = (string)$seg['style'];
+        if (array_key_exists('seed', $seg) && $seg['seed'] !== null) $payload['seed'] = (int)$seg['seed'];
+
+        // STT-verify chunks most likely to drop a word OR most noticeable when
+        // they do — (a) chunks ending mid-clause on a bare word (word-splits) and
+        // (b) the FINAL chunk — then re-render if ANY content word (end OR
+        // mid-chunk) didn't make it. Punctuation-ending interior chunks are
+        // trusted (the ellipsis covers their endings) to keep latency down. Per
+        // operator choice 2026-06-18; works best with short chunks (low Max).
+        $probe = preg_replace('/[\s)"\x{201D}\x{2019}\x{0027}]+$/u', '', $chunk);
+        $isWordSplit = ($probe !== '' && !preg_match('/[.!?,;:\x{2014}\x{2013}]$/u', $probe));
+        $isLast = ($i === count($chunks) - 1);
+        $verifyWords = [];
+        if ($isWordSplit || $isLast) {
+            // Content words >=5 chars (STT can't reliably place tiny words like
+            // "of"/"the", and proper-noun respellings would cause false retries).
+            preg_match_all('/[\p{L}\p{N}][\p{L}\p{N}\x{2019}\x{02BC}]{4,}/u', $probe, $wm);
+            $verifyWords = $wm[0];
+        }
+        $maxTries = $verifyWords ? 3 : 1;
+
+        $b = ''; $perr = '';
+        for ($try = 0; $try < $maxTries; $try++) {
+            // Synth (with its own transient-error retry).
+            $b = '';
+            for ($a = 0; $a < 3; $a++) {
+                $r = gpuSynthesize($payload, null, 120);
+                if (!empty($r['ok'])) { $b = (string)($r['body'] ?? ''); break; }
+                $perr = $r['error'] ?? ('HTTP ' . ($r['status'] ?? 0));
+                if (!preg_match('/HTTP (0|429|5\d\d)\b/', (string)$perr)) break;
+                sleep(1);
+            }
+            if ($b === '') break;
+            // Re-render if a content word was clipped/dropped anywhere in the chunk.
+            if (!$verifyWords || pvTranscriptHasWords($b, $verifyWords)) break;
+        }
+        if ($b === '') { $err = 'preview chunk ' . ($i + 1) . ' of ' . count($chunks) . ': ' . $perr; return ''; }
+        // Raw chunk bytes — leading-silence trim happens once in the assembly
+        // (single encode = no warble). Pause AFTER this chunk is sized by the
+        // punctuation it ends on (a natural breath between chunks).
+        $items[] = ['mp3' => $b, 'pause' => ($i < count($chunks) - 1) ? pvChunkPauseMs($chunk) : 0];
+        if ($onChunk) $onChunk();   // one chunk done (drives async chunk-progress)
+    }
+    // Assemble: clean seekable header + inter-chunk pauses. WAV (lossless) when
+    // this is an intermediate (async per-paragraph) stage; MP3 only when final.
+    return pvConcatMp3sWithPauses($items, $err, $finalMp3 ? 'mp3' : 'wav');
+}
+
+// Natural pause (ms) to insert after a chunk, from the punctuation it ends on.
+function pvChunkPauseMs(string $chunk): int {
+    $s = rtrim($chunk);
+    $s = rtrim($s, ")\"'” \xC2\xA0");   // peel a trailing close-paren / quote to see the real punctuation
+    $last = mb_substr($s, -1);
+    if ($last === '.' || $last === '!' || $last === '?') return 280;
+    if ($last === '—' || $last === '–') return 200;
+    if ($last === ',' || $last === ';' || $last === ':') return 140;
+    return 70;   // word-split / no punctuation — a minimal breath
+}
+
+// True if EVERY word in $words appears in the chunk's transcript — i.e. no word
+// (end OR mid-chunk) got clipped/dropped by the engine. A word matches a
+// transcript token exactly or via a shared >=4-char leading prefix (plural/tense
+// tolerance) — never arbitrary substring ("an" must not match "coven[an]t").
+// Trusts the audio (returns true) on any STT error so a transcription hiccup
+// never blocks a preview.
+function pvTranscriptHasWords(string $mp3, array $words): bool {
+    if ($mp3 === '' || !$words) return true;
+    require_once __DIR__ . '/gpu-client.php';
+    $f = tempnam(sys_get_temp_dir(), 'pvv') . '.mp3';
+    if ($f === false) return true;
+    @file_put_contents($f, $mp3);
+    $r = gpuTranscribe($f, ['word_timestamps' => false, 'vad_filter' => false, 'timeout' => 60]);
+    @unlink($f);
+    if (empty($r['ok'])) return true;
+    $t = '';
+    if (isset($r['data']) && is_array($r['data'])) $t = (string)($r['data']['text'] ?? '');
+    elseif (isset($r['data'])) $t = (string)$r['data'];
+    elseif (isset($r['body'])) { $j = json_decode((string)$r['body'], true); $t = is_array($j) ? (string)($j['text'] ?? '') : (string)$r['body']; }
+    $norm = function ($s) { return trim((string)preg_replace('/[^\p{L}\p{N}]+/u', ' ', mb_strtolower($s))); };
+    $tw = preg_split('/\s+/u', $norm($t));
+    foreach ($words as $word) {
+        $w = $norm($word);
+        if ($w === '') continue;
+        $found = false;
+        foreach ($tw as $x) {
+            if ($x === '') continue;
+            if ($x === $w) { $found = true; break; }
+            $minL = min(mb_strlen($x), mb_strlen($w));
+            if ($minL >= 4 && mb_substr($x, 0, $minL) === mb_substr($w, 0, $minL)) { $found = true; break; }
+        }
+        if (!$found) return false;   // a word is missing → the chunk dropped it
+    }
+    return true;
+}
+
+// Concatenate audio byte-blobs (WAV or MP3 inputs) into ONE clean, seekable
+// stream, leading-trimming each + inserting `pause` ms of silence after it.
+// $outFmt='wav' keeps the result LOSSLESS (for intermediate stages); 'mp3'
+// makes the final 128k file. Keeping intermediates as WAV means the audio is
+// MP3-encoded exactly ONCE (at the very end) — no compounding compression warble.
+function pvConcatMp3sWithPauses(array $items, ?string &$err = null, string $outFmt = 'mp3'): string {
+    $items = array_values(array_filter($items, function ($it) { return ($it['mp3'] ?? '') !== ''; }));
+    if (!$items) { $err = $err ?: 'no audio to assemble'; return ''; }
+    static $ff = null;
+    if ($ff === null) { $ff = trim((string)shell_exec('which ffmpeg 2>/dev/null')); if ($ff === '') $ff = false; }
+    $byteConcat = function () use ($items) { $b = ''; foreach ($items as $it) { $b .= $it['mp3']; } return $b; };
+    if ($ff === false) return $byteConcat();   // (mp3-only fallback; ffmpeg is present in prod)
+
+    // ONE pass: leading-silence trim each input, inter-chunk pause, concat, and
+    // a single encode. WAV out = lossless (intermediate); MP3 out = final 128k.
+    $wav = ($outFmt === 'wav');
+    $tmp = []; $inputs = ''; $filter = ''; $n = count($items);
+    for ($i = 0; $i < $n; $i++) {
+        $f = tempnam(sys_get_temp_dir(), 'pvc_') . ($wav ? '.wav' : '.mp3');
+        @file_put_contents($f, $items[$i]['mp3']);   // 'mp3' key holds the raw bytes (wav or mp3)
+        $tmp[] = $f;
+        $inputs .= ' -i ' . escapeshellarg($f);
+        $filter .= '[' . $i . ':a]aresample=24000,aformat=sample_fmts=fltp:channel_layouts=mono'
+                 . ',silenceremove=start_periods=1:start_silence=0.05:start_threshold=-40dB';
+        $pad = ($i < $n - 1) ? (int)($items[$i]['pause'] ?? 0) : 0;
+        if ($pad > 0) $filter .= ',apad=pad_dur=' . sprintf('%.3f', $pad / 1000.0);
+        $filter .= '[a' . $i . '];';
+    }
+    for ($i = 0; $i < $n; $i++) $filter .= '[a' . $i . ']';
+    $filter .= 'concat=n=' . $n . ':v=0:a=1[out]';
+    $out = tempnam(sys_get_temp_dir(), 'pvo_') . ($wav ? '.wav' : '.mp3');
+    $codec = $wav ? '-c:a pcm_s16le' : '-c:a libmp3lame -b:a 128k';
+    $cmd = escapeshellarg($ff) . ' -loglevel error -y' . $inputs
+         . ' -filter_complex ' . escapeshellarg($filter)
+         . ' -map ' . escapeshellarg('[out]') . ' ' . $codec . ' ' . escapeshellarg($out) . ' 2>&1';
+    @shell_exec($cmd);
+    $bytes = @file_get_contents($out);
+    foreach ($tmp as $f) @unlink($f);
+    @unlink($out);
+    if ($bytes === false || $bytes === '') { $err = 'ffmpeg assembly failed'; return $byteConcat(); }
+    return $bytes;
+}
