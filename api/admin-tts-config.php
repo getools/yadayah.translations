@@ -278,15 +278,20 @@ if ($method === 'GET' && $action === 'list_providers') {
     // the flag and keep getting active-only providers.
     $includeInactive = !empty($_GET['include_inactive']);
     $activeClause = $includeInactive ? '' : 'p.provider_active_flag = TRUE AND ';
+    // Provider 0 ("Default / fallback") is ALWAYS returned — it holds the global
+    // default chunk config the client uses when no specific voice is selected.
+    // The Voices UI hides it from the providers table + filters.
     $rows = $db->query("
         SELECT p.provider_key, p.provider_label, p.provider_main,
                p.provider_phonetic_type, p.provider_active_flag,
                p.provider_custom_voice_flag,
                p.provider_settings ->> 'engine' AS provider_engine_code,
+               p.provider_settings -> 'chunk'   AS provider_chunk,
+               (p.provider_settings ->> 'always_async') AS provider_always_async,
                (SELECT COUNT(*) FROM yy_tts_voice v
                  WHERE v.provider_key = p.provider_key) AS voice_count
           FROM yy_provider p
-         WHERE " . $activeClause . "(
+         WHERE p.provider_key = 0 OR (" . $activeClause . "(
                 p.provider_key IN (SELECT DISTINCT provider_key FROM yy_tts_voice)
              OR p.provider_key IN (
                     SELECT fp.provider_key
@@ -295,7 +300,7 @@ if ($method === 'GET' && $action === 'list_providers') {
                      WHERE f.functionality_code = 'tts'
                        AND fp.functionality_provider_active_flag = TRUE
                 )
-           )
+           ))
          ORDER BY p.provider_sort, p.provider_label
     ")->fetchAll();
     jsonResponse(['providers' => $rows]);
@@ -648,6 +653,17 @@ if ($action === 'save_provider') {
         if ($clean === null) errorResponse('invalid value for ' . $col);
         $sets[] = "$col = ?";
         $params[] = $clean;
+    }
+    // Per-provider chunk sizing lives in provider_settings (jsonb), not a plain
+    // column — merge it in. This is the single source of truth the Voices form
+    // edits. Validation rails only (10..600), ordered (max≥target≥min).
+    if (array_key_exists('chunk', $data) && is_array($data['chunk'])) {
+        $c    = $data['chunk'];
+        $cmax = max(40, min(600, (int)($c['max'] ?? 0)));
+        $ctar = max(20, min($cmax, (int)($c['target'] ?? 0)));
+        $cmin = max(10, min($ctar, (int)($c['min'] ?? 0)));
+        $sets[]   = "provider_settings = COALESCE(provider_settings, '{}'::jsonb) || jsonb_build_object('chunk', jsonb_build_object('min', ?::int, 'target', ?::int, 'max', ?::int))";
+        $params[] = $cmin; $params[] = $ctar; $params[] = $cmax;
     }
     if (!$sets) errorResponse('no editable fields supplied');
     $sets[] = "provider_revision_dtime = NOW()";

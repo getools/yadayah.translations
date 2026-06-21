@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781790917">
+    <meta name="page-version" content="1781995294">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -181,7 +181,7 @@
 <div id="app" class="container">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=14"></script>
+<script src="/js/admin-nav.js?v=15"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -310,10 +310,10 @@
                 <div class="preview-controls">
                     <label>Rate <input type="number" id="preview-rate" value="0" min="-50" max="200" style="width:60px"><span title="Percent — positive speeds the voice up, negative slows it down (range -50 to +200)" style="margin-left:2px;cursor:help;">%</span></label>
                     <label>Pitch <input type="number" id="preview-pitch" value="0" min="-12" max="12" step="0.1" style="width:80px"><span title="Semitones — 12 = one octave. Positive raises the voice, negative lowers it (range -12 to +12). Fractional values like 0.5 give finer control." style="margin-left:2px;cursor:help;">st</span></label>
-                    <span title="Self-hosted voices only. Chunk sizing: aim for ~Target characters, breaking at the last punctuation (. ! ? ; : , — - ) and ( ); a chunk never goes below Min (except at end of text) and never exceeds Max (hard cap — falls back to the last whitespace if no punctuation fits)." style="cursor:help;color:#555;">Chunk</span>
-                    <label>Min <input type="number" id="preview-chunk-min" value="80" min="20" max="400" step="10" style="width:71px"></label>
-                    <label>Target <input type="number" id="preview-chunk-target" value="150" min="40" max="500" step="10" style="width:71px"></label>
-                    <label>Max <input type="number" id="preview-chunk-max" value="250" min="60" max="600" step="10" style="width:71px"></label>
+                    <span title="Self-hosted voices only. These are the SELECTED VOICE'S PROVIDER chunk sizes from the database — editing a value saves it back to that provider. Chunk sizing: aim for ~Target characters, breaking at the last punctuation (. ! ? ; : , — - ) and ( ); a chunk never goes below Min (except at end of text) and never exceeds Max (hard cap — falls back to the last whitespace if no punctuation fits)." style="cursor:help;color:#555;">Chunk (provider)</span>
+                    <label>Min <input type="number" id="preview-chunk-min" min="20" max="400" step="10" autocomplete="off" style="width:71px" title="Provider chunk minimum — saved to the provider on change"></label>
+                    <label>Target <input type="number" id="preview-chunk-target" min="40" max="500" step="10" autocomplete="off" style="width:71px" title="Provider chunk target — saved to the provider on change"></label>
+                    <label>Max <input type="number" id="preview-chunk-max" min="60" max="600" step="10" autocomplete="off" style="width:71px" title="Provider chunk maximum — saved to the provider on change"></label>
                 </div>
                 <div id="preview-status" class="status-msg"></div>
                 <audio id="preview-audio" controls style="width:100%;margin-top:8px;display:none"></audio>
@@ -779,16 +779,34 @@ var CUSTOMIZE_PROVIDERS = {
         codePrefix: 'qw-',
         noAudio: true,
         instructions: {
-            data:     'No audio clip — Qwen3-Omni has three built-in speakers (Ethan, Aiden, Chelsie). Pick one and give it a friendly label.',
-            workflow: 'Built-in speaker selection. The label/description are stored so the voice shows up in Defaults; the chosen base speaker is what actually speaks.',
-            time:     'Instant.',
+            data:     'No audio clip — Qwen3-Omni has three built-in speakers (Ethan, Aiden, Chelsie). Pick one as the base.',
+            workflow: 'Built-in speaker selection. Qwen3 can’t clone, so a new voice differs from its base speaker only via the Tone direction (system prompt) and the Acoustics sampling knobs below — leave both untouched to get the plain base speaker.',
         },
         extraFields: [
-            { id: 'cv-qwen-speaker', type: 'select', label: 'Base speaker',
+            { id: 'cv-qwen-speaker', type: 'select', label: 'Base Speaker',
+              help: 'The underlying Qwen3-Omni voice. Everything below shapes how this speaker delivers the text; it cannot change the timbre itself.',
               options: [
                   { value: 'Ethan',   label: 'Ethan (male, en)' },
                   { value: 'Aiden',   label: 'Aiden (male, en)' },
                   { value: 'Chelsie', label: 'Chelsie (female, en)' },
+              ]
+            },
+            { id: 'cv-qwen-instruct', type: 'textarea', label: 'Tone direction (optional)', rows: 4,
+              placeholder: 'e.g. Read slowly and warmly, like an audiobook narrator.',
+              help: 'This is how you give a voice character without a clip (e.g. “calm, measured, reverent” vs “bright and upbeat”). Leave blank for a neutral read.' },
+            { type: 'fieldset', legend: 'Acoustics — talker sampling',
+              help: 'Qwen3 builds the speech one audio token at a time, and at each step several plausible options are available. These settings decide how freely it chooses between them: looser settings let it pick less-likely options, giving a more varied, expressive delivery that changes from run to run; tighter settings keep it to the safest options, giving a steadier, more uniform read. Defaults match Qwen3-Omni’s built-ins, so leaving them unchanged reproduces the plain base speaker. Temperature, Top-p and Top-k apply only when “Vary delivery” is on.',
+              fields: [
+                  { id: 'cv-qwen-do_sample', type: 'checkbox', label: 'Vary delivery (sampling on)', checked: true,
+                    help: 'On = natural variation between runs (uses Temperature / Top-p / Top-k). Off = deterministic — identical audio every time.' },
+                  { id: 'cv-qwen-temperature', type: 'number', label: 'Temperature', value: 0.9, min: 0.05, max: 2.0, step: 0.05,
+                    help: 'Expressiveness / randomness of prosody. 0.9 = default. Lower (~0.5) = calmer and more uniform; higher (~1.3) = livelier and more variable. Above ~1.5 can wobble or mispronounce.' },
+                  { id: 'cv-qwen-top_p', type: 'number', label: 'Top-p (nucleus)', value: 1.0, min: 0.05, max: 1.0, step: 0.05,
+                    help: 'Restricts sampling to the most-likely tokens covering this probability mass. 1.0 = no restriction (default). Lowering (~0.8) tightens delivery and trims inflections.' },
+                  { id: 'cv-qwen-top_k', type: 'number', label: 'Top-k', value: 50, min: 0, max: 200, step: 1,
+                    help: 'Restricts sampling to the K most-likely tokens. 50 = default; 0 = no limit. Lower = safer and flatter, higher = more varied.' },
+                  { id: 'cv-qwen-rep_penalty', type: 'number', label: 'Repetition penalty', value: 1.05, min: 1.0, max: 2.0, step: 0.01,
+                    help: 'Discourages repetitive / sing-song prosody. 1.05 = default. Nudge up (~1.1–1.2) if the voice drones or gets stuck; too high can sound clipped.' },
               ]
             },
         ],
@@ -1686,14 +1704,74 @@ function pvUnwrapChunkHtml(el) {
 // pronunciation tunes (the server chunks after substitutions) but exact for
 // plain text. Re-runs on edit and on "Max chars" change.
 var PV_CHUNK_BG = ['#d4e4ff', '#ffe6bf'];   // alternating light blue / light amber
-// Read the Min / Target / Max chunk-size fields (with defaults + ordering).
-function pvChunkSizes() {
-    var g = function (id, d) { var e = $(id); var v = e ? parseInt(e.value, 10) : NaN; return isNaN(v) ? d : v; };
-    // Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
-    var mx = Math.max(40, Math.min(600, g('preview-chunk-max', 250)));
-    var tg = Math.max(20, Math.min(mx, g('preview-chunk-target', 150)));
-    var mn = Math.max(10, Math.min(tg, g('preview-chunk-min', 80)));
+// Chunk sizing is PER-PROVIDER and lives in the DB (yy_provider.provider_settings
+// ->chunk). The Min/Target/Max fields just REFLECT the current voice's provider
+// values and write edits back to that provider — there are no hardcoded size
+// defaults in the client. PV_CURRENT_PROVIDER_KEY is whichever provider the
+// fields currently represent (set when a voice is auditioned / on load).
+var PV_CURRENT_PROVIDER_KEY = null;
+function pvProviderByKey(pk) {
+    var list = VC_STATE.providers || [];
+    for (var i = 0; i < list.length; i++) {
+        if (String(list[i].provider_key) === String(pk)) return list[i];
+    }
+    return null;
+}
+// Parse + clamp a provider row's stored chunk config (jsonb arrives as a string).
+function pvParseChunk(p) {
+    if (!p) return null;
+    var c = p.provider_chunk;
+    if (typeof c === 'string') { try { c = JSON.parse(c); } catch (e) { c = null; } }
+    if (!c || typeof c !== 'object') return null;
+    var mx = Math.max(40, Math.min(600, parseInt(c.max, 10) || 0));
+    var tg = Math.max(20, Math.min(mx, parseInt(c.target, 10) || 0));
+    var mn = Math.max(10, Math.min(tg, parseInt(c.min, 10) || 0));
     return { min: mn, target: tg, max: mx };
+}
+// Read the live Min/Target/Max fields; fall back to the current provider's (or
+// the global provider-0) DB values, never to a hardcoded size.
+function pvChunkSizes() {
+    var fallback = pvParseChunk(pvProviderByKey(PV_CURRENT_PROVIDER_KEY))
+                || pvParseChunk(pvProviderByKey(0))
+                || { min: 10, target: 20, max: 40 };   // validation floor only
+    var g = function (id, d) { var e = $(id); var v = e ? parseInt(e.value, 10) : NaN; return isNaN(v) ? d : v; };
+    var mx = Math.max(40, Math.min(600, g('preview-chunk-max', fallback.max)));
+    var tg = Math.max(20, Math.min(mx, g('preview-chunk-target', fallback.target)));
+    var mn = Math.max(10, Math.min(tg, g('preview-chunk-min', fallback.min)));
+    return { min: mn, target: tg, max: mx };
+}
+// Populate the fields from a provider's DB chunk config (and remember which
+// provider they now represent). Falls back to the global default (provider 0).
+function pvApplyProviderChunk(providerKey) {
+    if (providerKey === null || providerKey === undefined) return;
+    var cs = pvParseChunk(pvProviderByKey(providerKey)) || pvParseChunk(pvProviderByKey(0));
+    PV_CURRENT_PROVIDER_KEY = providerKey;
+    if (!cs) return;
+    if ($('preview-chunk-min'))    $('preview-chunk-min').value    = cs.min;
+    if ($('preview-chunk-target')) $('preview-chunk-target').value = cs.target;
+    if ($('preview-chunk-max'))    $('preview-chunk-max').value    = cs.max;
+    if (typeof pvHighlightChunks === 'function') pvHighlightChunks();
+}
+// Persist field edits back to the current provider (DB = single source of truth).
+async function pvSaveChunkToProvider() {
+    if (PV_CURRENT_PROVIDER_KEY === null || PV_CURRENT_PROVIDER_KEY === undefined) return;
+    var cs = pvChunkSizes();
+    var s = $('preview-status');
+    try {
+        await api('/admin-tts-config.php', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'save_provider', provider_key: PV_CURRENT_PROVIDER_KEY, chunk: cs }),
+        });
+        var p = pvProviderByKey(PV_CURRENT_PROVIDER_KEY);
+        if (p) p.provider_chunk = JSON.stringify(cs);   // keep client cache in sync
+        if (s) {
+            var pl = p ? (p.provider_label || ('provider ' + PV_CURRENT_PROVIDER_KEY)) : ('provider ' + PV_CURRENT_PROVIDER_KEY);
+            s.textContent = 'Saved chunk sizes (' + cs.min + '/' + cs.target + '/' + cs.max + ') for ' + pl;
+            s.className = 'status-msg success';
+        }
+    } catch (e) {
+        if (s) { s.textContent = 'Save failed: ' + (e && e.message || e); s.className = 'status-msg error'; }
+    }
 }
 function pvEscHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function pvWrapFmt(run, b, i) { var s = pvEscHtml(run); if (i) s = '<i>' + s + '</i>'; if (b) s = '<b>' + s + '</b>'; return s; }
@@ -1713,9 +1791,10 @@ function pvBreakCut(s, i, pos) {
 // chunkTextForPreview Min/Target/Max logic.
 function pvChunkOffsets(s, minC, targetC, maxC) {
     // Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
-    maxC = Math.max(40, Math.min(600, maxC || 250));
-    targetC = Math.max(20, Math.min(maxC, targetC || 150));
-    minC = Math.max(10, Math.min(targetC, minC || 80));
+    // Callers pass provider-derived sizes; the || floors are validation rails only.
+    maxC = Math.max(40, Math.min(600, maxC || 0));
+    targetC = Math.max(20, Math.min(maxC, targetC || 0));
+    minC = Math.max(10, Math.min(targetC, minC || 0));
     var len = s.length, pos = 0, out = [];
     while (pos < len) {
         if (len - pos <= maxC) { out.push([pos, len]); break; }
@@ -2148,18 +2227,19 @@ async function pvEnsureSeriesLoaded() {
     if (sel.options.length <= 1) await pvLoadSeries();
     if (_pvInited) return;
     _pvInited = true;
-    pvRestoreSizes();
+    // NOTE: chunk sizes are no longer restored from localStorage — they come
+    // from the voice's PROVIDER (DB). pvRestoreSizes() is intentionally not called.
     pvRestoreText();
     pvRestoreHeight();
     var txt = $('preview-text');
     if (txt) txt.addEventListener('input', function () { pvSaveText(); pvScheduleHighlight(); });
-    // Persist + re-paint the chunk highlight when any of Min / Target / Max changes.
+    // While typing, just re-paint the highlight; on commit (change/blur), SAVE
+    // the edited sizes back to the current provider (DB = single source of truth).
     ['preview-chunk-min', 'preview-chunk-target', 'preview-chunk-max'].forEach(function (id) {
         var f = $(id);
         if (f) {
-            var h = function () { pvSaveSizes(); pvHighlightChunks(); };
-            f.addEventListener('input', h);
-            f.addEventListener('change', h);
+            f.addEventListener('input', function () { pvHighlightChunks(); });
+            f.addEventListener('change', function () { pvHighlightChunks(); pvSaveChunkToProvider(); });
         }
     });
     // Persist picks whenever any level changes. Each on*Change resets its
@@ -2348,6 +2428,10 @@ async function loadProviders() {
         // Cache for the per-column Provider filter so it can render
         // every TTS provider, not just the ones currently in VC_STATE.voices.
         VC_STATE.providers = providers.slice();
+        // Seed the Preview chunk fields from the global default (provider 0)
+        // until a specific voice is auditioned, so they're never blank and never
+        // show a hardcoded number.
+        if (PV_CURRENT_PROVIDER_KEY === null) pvApplyProviderChunk(0);
         // Refresh the per-column filter now in case voices loaded before
         // providers did. The filter populator unions both sources.
         if (typeof populateVoiceFilterOptions === 'function') populateVoiceFilterOptions();
@@ -2358,7 +2442,7 @@ async function loadProviders() {
             tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#888;padding:12px;">No TTS providers with voices yet — populate the catalog below first.</td></tr>';
             return;
         }
-        tbody.innerHTML = providers.map(function (p) {
+        tbody.innerHTML = providers.filter(function (p) { return String(p.provider_key) !== '0'; }).map(function (p) {
             var pk = p.provider_key;
             var phon = (p.provider_phonetic_type || 'sub') === 'ipa' ? 'ipa' : 'sub';
             var grp  = 'prov-phon-' + pk;
@@ -2994,21 +3078,75 @@ function openCustomVoicePopover(opts) {
         ? '<dl style="margin:0;font-size:0.8rem;line-height:1.4;color:#5b4a00;">'
             + '<dt style="font-weight:700;">Data needed</dt><dd style="margin:0 0 6px;">' + meta.instructions.data + '</dd>'
             + '<dt style="font-weight:700;">Workflow</dt><dd style="margin:0 0 6px;">' + meta.instructions.workflow + '</dd>'
-            + '<dt style="font-weight:700;">Time-to-voice</dt><dd style="margin:0;">' + meta.instructions.time + '</dd>'
+            + (meta.instructions.time ? '<dt style="font-weight:700;">Time-to-voice</dt><dd style="margin:0;">' + meta.instructions.time + '</dd>' : '')
             + '</dl>'
         : '<p style="font-style:italic;margin:0;font-size:0.8rem;color:#5b4a00;">No provider-specific guidance available.</p>';
 
-    var extraHtml = (meta && meta.extraFields || []).map(function (f) {
+    // Render one extra field. Supports select / textarea / number (range-
+    // limited) / checkbox / fieldset (recursive group) / text. Field `help`
+    // copy is NOT shown inline — it's collected by cvpFieldGuideHtml() and
+    // surfaced in the right-hand guidance panel instead.
+    function cvpFieldHtml(f) {
+        var INP = 'width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;';
+        var LBL = 'font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;';
+        if (f.type === 'fieldset') {
+            var inner = (f.fields || []).map(cvpFieldHtml).join('');
+            return '<fieldset style="margin:12px 0 4px;border:1px solid #d9d2b0;border-radius:5px;padding:6px 10px 10px;background:#fcfbf3;">'
+                 + '<legend style="font-weight:700;font-size:0.78rem;color:#5b4a00;padding:0 5px;">' + escapeHtml(f.legend || '') + '</legend>'
+                 + inner + '</fieldset>';
+        }
+        if (f.type === 'checkbox') {
+            return '<label style="display:block;margin:6px 0 2px;font-size:0.82rem;font-weight:600;cursor:pointer;">'
+                 + '<input type="checkbox" id="' + f.id + '"' + (f.checked ? ' checked' : '') + ' style="margin-right:6px;vertical-align:middle;">'
+                 + escapeHtml(f.label || '') + '</label>';
+        }
         if (f.type === 'select') {
             var optsH = (f.options || []).map(function (o) {
                 return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>';
             }).join('');
-            return '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">' + escapeHtml(f.label) + '</label>'
-                 + '<select id="' + f.id + '" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">' + optsH + '</select>';
+            return '<label style="' + LBL + '">' + escapeHtml(f.label) + '</label>'
+                 + '<select id="' + f.id + '" style="' + INP + 'background:#fff;">' + optsH + '</select>';
         }
-        return '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">' + escapeHtml(f.label) + '</label>'
-             + '<input type="' + (f.type || 'text') + '" id="' + f.id + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">';
-    }).join('');
+        if (f.type === 'number') {
+            var attrs = '';
+            if (f.min  !== undefined) attrs += ' min="'  + f.min  + '"';
+            if (f.max  !== undefined) attrs += ' max="'  + f.max  + '"';
+            if (f.step !== undefined) attrs += ' step="' + f.step + '"';
+            var val = (f.value !== undefined ? f.value : '');
+            var range = (f.min !== undefined && f.max !== undefined)
+                ? ' <span style="color:#888;font-weight:normal;font-size:0.74rem;">(' + f.min + '–' + f.max + ', default ' + val + ')</span>' : '';
+            return '<label style="' + LBL + '">' + escapeHtml(f.label) + range + '</label>'
+                 + '<input type="number" id="' + f.id + '" value="' + val + '"' + attrs
+                 + ' data-min="' + (f.min !== undefined ? f.min : '') + '" data-max="' + (f.max !== undefined ? f.max : '') + '"'
+                 + ' style="width:130px;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">';
+        }
+        if (f.type === 'textarea') {
+            return '<label style="' + LBL + '">' + escapeHtml(f.label) + '</label>'
+                 + '<textarea id="' + f.id + '" rows="' + (f.rows || 2) + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="' + INP + 'font-family:inherit;resize:vertical;"></textarea>';
+        }
+        return '<label style="' + LBL + '">' + escapeHtml(f.label) + '</label>'
+             + '<input type="' + (f.type || 'text') + '" id="' + f.id + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="' + INP + '">';
+    }
+    // Collect every field's `help` copy (recursing into fieldsets) into a block
+    // for the right-hand guidance panel, keeping the form column uncluttered.
+    function cvpFieldGuideHtml(fields) {
+        return (fields || []).map(function (f) {
+            if (f.type === 'fieldset') {
+                return '<dt style="font-weight:700;margin-top:8px;">' + escapeHtml(f.legend || '') + '</dt>'
+                     + (f.help ? '<dd style="margin:0 0 4px;">' + f.help + '</dd>' : '')
+                     + cvpFieldGuideHtml(f.fields);
+            }
+            if (!f.help) return '';
+            return '<dt style="font-weight:700;margin-top:6px;">' + escapeHtml(f.label || '') + '</dt>'
+                 + '<dd style="margin:0 0 4px;">' + f.help + '</dd>';
+        }).join('');
+    }
+    var fieldGuide = cvpFieldGuideHtml(meta && meta.extraFields);
+    if (fieldGuide) {
+        fieldGuide = '<hr style="border:none;border-top:1px solid #e4d27a;margin:10px 0;">'
+                   + '<dl style="margin:0;font-size:0.8rem;line-height:1.4;color:#5b4a00;">' + fieldGuide + '</dl>';
+    }
+    var extraHtml = (meta && meta.extraFields || []).map(cvpFieldHtml).join('');
 
     // Reference clips section: edit mode lists the clips the box actually holds
     // (filled in async so each shows its ORIGINAL uploaded filename, not just
@@ -3063,7 +3201,7 @@ function openCustomVoicePopover(opts) {
             '</div>' +
             '<div style="flex:1 1 240px;min-width:220px;background:#fffbe6;border:1px solid #e4d27a;border-radius:4px;padding:10px 12px;">' +
                 '<div style="font-weight:700;color:#5b4a00;margin-bottom:6px;font-size:0.85rem;">Provider guidance — ' + escapeHtml(provLabel) + '</div>' +
-                guidance +
+                guidance + fieldGuide +
             '</div>' +
         '</div>' +
         '<div style="margin-top:12px;display:flex;align-items:center;gap:10px;">' +
@@ -3224,6 +3362,26 @@ function openCustomVoicePopover(opts) {
                 if (file && !noAudio) fd.append('audio', file, file.name);
                 if (qSpeaker && qSpeaker.value) fd.append('voice_id', qSpeaker.value);
                 if (cvPrompt && cvPrompt.value.trim()) fd.append('prompt_text', cvPrompt.value.trim());
+                // Qwen3-Omni voice-character fields (rendered only for that
+                // provider). Numbers are clamped to each field's data-min/max so
+                // a typed-in out-of-range value can't reach the engine.
+                var qInstruct = panel.querySelector('#cv-qwen-instruct');
+                if (qInstruct && qInstruct.value.trim()) fd.append('instruct', qInstruct.value.trim());
+                var qSample = panel.querySelector('#cv-qwen-do_sample');
+                if (qSample) fd.append('talker_do_sample', qSample.checked ? '1' : '0');
+                [['#cv-qwen-temperature', 'talker_temperature'],
+                 ['#cv-qwen-top_p',       'talker_top_p'],
+                 ['#cv-qwen-top_k',       'talker_top_k'],
+                 ['#cv-qwen-rep_penalty', 'talker_repetition_penalty']].forEach(function (p) {
+                    var el = panel.querySelector(p[0]);
+                    if (!el || el.value === '') return;
+                    var n = parseFloat(el.value);
+                    if (isNaN(n)) return;
+                    var lo = parseFloat(el.getAttribute('data-min')), hi = parseFloat(el.getAttribute('data-max'));
+                    if (!isNaN(lo)) n = Math.max(lo, n);
+                    if (!isNaN(hi)) n = Math.min(hi, n);
+                    fd.append(p[1], String(n));
+                 });
                 var tr2 = await fetch(API + '/admin-tts-customize.php', { method: 'POST', credentials: 'include', body: fd });
                 var ct = tr2.headers.get('content-type') || '';
                 var td = ct.indexOf('json') >= 0 ? await tr2.json() : { error: await tr2.text() };
@@ -3305,6 +3463,7 @@ function populateVoiceFilterOptions() {
     // loaded voices since those values are voice-shaped, not provider-shaped.
     var langs = new Set(), regions = new Set(), types = new Set(), providers = new Set();
     (VC_STATE.providers || []).forEach(function (p) {
+        if (String(p.provider_key) === '0') return;   // global-default row, not a real provider
         var providerLabel = p.provider_main || p.provider_label || '';
         if (providerLabel) providers.add(providerLabel);
     });
@@ -3908,6 +4067,9 @@ async function playVoiceTest(tr, v) {
     var statEl  = $('vc-audio-status');
     var styleSel = tr.querySelector('.vc-style');
     var style    = styleSel && styleSel.value ? styleSel.value : null;
+    // Reflect THIS voice's provider chunk sizes (DB) in the Min/Target/Max
+    // fields, so what you see is exactly what will drive the split.
+    if (v && v.provider_key !== undefined) pvApplyProviderChunk(v.provider_key);
     // In-bar status so progress is visible on the pinned player itself.
     var setStatus = function (m, isErr) {
         if (statEl) {
@@ -5047,12 +5209,15 @@ async function handleTuneAction(tr, act) {
                 body.pitch_st   = 0;
                 body.volume     = 100;
             }
-            var blob = await api('/admin-tts-preview.php', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify(body),
+            // Route through previewSynth so a heavy/always-async engine
+            // (Qwen3) returns via the polling worker instead of breaking on a
+            // JSON {async,job_key} response. Resolves to a ready object-URL
+            // either way; statusCb drives the Tunes status line's chunk progress.
+            var url = await previewSynth(body, function (m) {
+                if (s2) { s2.textContent = m; s2.className = 'status-msg'; }
             });
             var a = tunesAudio || $('preview-audio');
-            a.src = URL.createObjectURL(blob); a.style.display='block'; a.play();
+            a.src = url; a.style.display='block'; a.play();
             } finally {
                 // Restore the ▶ button regardless of success or error
                 // (saveTuneRow throw, API error, browser autoplay block,

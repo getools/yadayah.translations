@@ -29,19 +29,25 @@ if ($mode === 'preview_chunks') {
     $body   = json_decode(file_get_contents('php://input'), true) ?: [];
     $ttsKey = (int)($body['tts_key'] ?? ($_GET['tts_key'] ?? 0));
     $text   = (string)($body['text'] ?? '');
-    $max    = max(40, min(600, (int)($body['max'] ?? 250)));
-    $target = max(20, min($max, (int)($body['target'] ?? 150)));
-    $min    = max(10, min($target, (int)($body['min'] ?? 80)));
+    // Caller MAY pass explicit sizes (live Voices fields, for what-if
+    // highlighting); 0/unset ⇒ resolve from the voice's PROVIDER chunk config
+    // (single source of truth). No hardcoded size defaults.
+    $reqMax = (int)($body['max'] ?? 0); $reqTarget = (int)($body['target'] ?? 0); $reqMin = (int)($body['min'] ?? 0);
     $clean  = ttsCleanPreviewText($text);
     $segText = $clean;
+    $cs = ['min' => 0, 'target' => 0, 'max' => 0];
     if ($ttsKey) {
         $cfg = loadTtsConfig($db, $ttsKey);
         if (!empty($cfg['system'])) {
             // category 'main' with no voice override → tunes/pauses applied as in a real preview.
             $seg = buildLocalSegment($clean, $cfg, 'main');
             $segText = (string)($seg['text'] ?? $clean);
+            $cs = ttsProviderChunkSizes($cfg, (int)($seg['provider_key'] ?? 0));
         }
     }
+    $max    = max(40, min(600, $reqMax    > 0 ? $reqMax    : $cs['max']));
+    $target = max(20, min($max, $reqTarget > 0 ? $reqTarget : $cs['target']));
+    $min    = max(10, min($target, $reqMin > 0 ? $reqMin    : $cs['min']));
     $chunks = chunkTextForPreview($segText, $min, $target, $max);
     jsonResponse(['chunks' => $chunks, 'seg_text' => $segText, 'count' => count($chunks)]);
 }

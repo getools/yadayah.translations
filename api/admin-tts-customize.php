@@ -49,6 +49,14 @@ $instruct     = trim($_POST['instruct']    ?? '');   // natural-lang style hint 
 $styleName    = trim($_POST['style_name']  ?? 'default');  // style slot (default/happy/...)
 $voiceId      = trim($_POST['voice_id']    ?? '');   // built-in-speaker path
 $langCode     = trim($_POST['lang_code']   ?? '');   // Kokoro-specific
+// Qwen3-Omni talker (acoustic) sampling overrides — forwarded as-is; the
+// engine range-clamps and ignores them for non-Qwen3 providers. Blank = leave
+// the parameter at the model default.
+$talkerTemp   = trim($_POST['talker_temperature']        ?? '');
+$talkerTopP   = trim($_POST['talker_top_p']              ?? '');
+$talkerTopK   = trim($_POST['talker_top_k']              ?? '');
+$talkerRepPen = trim($_POST['talker_repetition_penalty'] ?? '');
+$talkerSample = trim($_POST['talker_do_sample']          ?? '');
 $language     = trim($_POST['language']    ?? 'en');
 $gender       = trim($_POST['gender']      ?? 'unknown');
 
@@ -489,6 +497,11 @@ try {
     if ($instruct)    $params['instruct']     = $instruct;
     if ($voiceId)     $params['voice_id']     = $voiceId;
     if ($langCode)    $params['lang_code']    = $langCode;
+    if ($talkerTemp   !== '') $params['talker_temperature']        = $talkerTemp;
+    if ($talkerTopP   !== '') $params['talker_top_p']              = $talkerTopP;
+    if ($talkerTopK   !== '') $params['talker_top_k']              = $talkerTopK;
+    if ($talkerRepPen !== '') $params['talker_repetition_penalty'] = $talkerRepPen;
+    if ($talkerSample !== '') $params['talker_do_sample']          = $talkerSample;
 
     if ($isBuiltin) {
         $r = gpuRegisterBuiltinVoice($params, 30);

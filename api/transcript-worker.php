@@ -22,6 +22,72 @@ require_once __DIR__ . '/transcribe-providers.php'; // Groq / Deepgram / Assembl
 require_once __DIR__ . '/spawn-helpers.php';        // spawnCappedWorker() for post-exit dequeue
 $db = getDb();
 
+// ── Durable worker logging ───────────────────────────────────────────────
+// The old play-by-play went to /tmp/transcript_<key>.log, which systemd-
+// tmpfiles reaped before anyone could read why a worker died (lost the
+// 2026-06-21 orphan's cause entirely). Now we (a) append a timestamped,
+// phase-tagged trace to /var/tmp/transcript-worker/ — www-data-writable and
+// NOT on the short /tmp reap cycle — and (b) capture the death cause durably
+// in the DB via a diagnostic shutdown handler, so even an uncaught fatal, a
+// signal, or an OOM leaves a record. /var/tmp is the only persistent path
+// www-data can write outside the (web-served) document root.
+if (!defined('WORKER_LOG_DIR')) define('WORKER_LOG_DIR', '/var/tmp/transcript-worker');
+$GLOBALS['__wjob']   = $jobKey;
+$GLOBALS['WPHASE']   = 'bootstrap';
+$GLOBALS['WSIGNAL']  = '';
+function wlog(string $msg): void {
+    @mkdir(WORKER_LOG_DIR, 0775, true);
+    $line = '[' . date('c') . ' pid=' . getmypid()
+          . ' job=' . ($GLOBALS['__wjob'] ?? 0)
+          . ' phase=' . ($GLOBALS['WPHASE'] ?? '?') . '] ' . $msg . "\n";
+    @file_put_contents(WORKER_LOG_DIR . '/job_' . ($GLOBALS['__wjob'] ?? 0) . '.log',
+                       $line, FILE_APPEND | LOCK_EX);
+}
+function wphase(string $p): void { $GLOBALS['WPHASE'] = $p; wlog('» phase: ' . $p); }
+
+// Diagnostic shutdown handler — registered BEFORE the dequeue handler below
+// so it runs first. Normal exit paths all set complete/failed/cancelled; if
+// the job is still 'running' at process exit the worker died abnormally.
+// Capture the PHP fatal (if any), the caught signal, or note an uncatchable
+// death (SIGKILL/OOM), and persist it to job_error so "why did Whisper get
+// stuck" is answerable after the fact. Also flips the row to 'failed' so the
+// queue unwedges immediately (the dispatch reaper remains the net for the
+// uncatchable SIGKILL/OOM case, where shutdown handlers never run).
+register_shutdown_function(function () use ($jobKey) {
+    $err     = error_get_last();
+    $isFatal = $err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true);
+    $sig     = $GLOBALS['WSIGNAL'] ?? '';
+    $phase   = $GLOBALS['WPHASE'] ?? '?';
+    try {
+        $db = getDb(); // fresh — the worker's own connection may be unusable at shutdown
+        $st = $db->prepare("SELECT job_status FROM yy_feed_item_transcript_job WHERE feed_item_transcript_job_key = ?");
+        $st->execute([$jobKey]);
+        $status = $st->fetchColumn();
+        if ($status !== 'running') {
+            if ($isFatal) wlog('note: PHP fatal after terminal status (' . $status . '): ' . $err['message']);
+            return;
+        }
+        if ($isFatal) {
+            $reason = 'PHP fatal in phase ' . $phase . ': ' . $err['message']
+                    . ' @ ' . ($err['file'] ?? '?') . ':' . ($err['line'] ?? '?');
+        } elseif ($sig) {
+            $reason = 'killed by ' . $sig . ' in phase ' . $phase;
+        } else {
+            $reason = 'process exited unexpectedly in phase ' . $phase
+                    . ' (no PHP fatal — likely SIGKILL/OOM/CPU-limit; check host dmesg / cgroup OOM around ' . date('c') . ')';
+        }
+        wlog('ABNORMAL EXIT — ' . $reason);
+        $db->prepare("UPDATE yy_feed_item_transcript_job
+                         SET job_status = 'failed', job_completed_dtime = NOW(),
+                             job_error = ?,
+                             job_message = 'Worker died — see job_error & /var/tmp/transcript-worker'
+                       WHERE feed_item_transcript_job_key = ? AND job_status = 'running'")
+           ->execute([$reason, $jobKey]);
+    } catch (Throwable $e) {
+        wlog('shutdown diagnostic failed: ' . $e->getMessage());
+    }
+});
+
 // On any exit (success, failure, fatal error) try to pull the next pending
 // transcript job and spawn a worker for it. This keeps a bounded number of
 // workers grinding through a long pending queue without ever exceeding the
@@ -65,8 +131,22 @@ register_shutdown_function(function () use ($jobKey) {
 // sending the signal, so we just need to exit promptly.
 if (function_exists('pcntl_async_signals') && function_exists('pcntl_signal')) {
     pcntl_async_signals(true);
-    pcntl_signal(SIGTERM, function () { exit(0); });
-    pcntl_signal(SIGINT,  function () { exit(0); });
+    // Log which signal arrived and in which phase before exiting. SIGTERM is
+    // the normal cancel path (admin-transcript.php sets 'cancelled' first, so
+    // the diagnostic shutdown handler won't touch it); SIGXCPU is what
+    // `ulimit -t` raises when the worker blows its CPU-time cap — recording it
+    // turns a silent disappearance into a named cause.
+    $sigHandler = function ($signo) {
+        $map = [SIGTERM => 'SIGTERM', SIGINT => 'SIGINT'];
+        if (defined('SIGXCPU')) $map[SIGXCPU] = 'SIGXCPU (CPU-time limit / ulimit -t)';
+        $sig = $map[$signo] ?? ('signal ' . $signo);
+        $GLOBALS['WSIGNAL'] = $sig;
+        wlog('received ' . $sig . ' — exiting (diagnostic shutdown handler records state if job was still running)');
+        exit(($signo === SIGTERM || $signo === SIGINT) ? 0 : 1);
+    };
+    pcntl_signal(SIGTERM, $sigHandler);
+    pcntl_signal(SIGINT,  $sigHandler);
+    if (defined('SIGXCPU')) pcntl_signal(SIGXCPU, $sigHandler);
 }
 
 function readEnv(string $name): string {
@@ -156,6 +236,43 @@ $site = strtolower($job['feed_site_code']);
 $jobModel = $job['job_model'] ?: 'whisper-1-segment';
 $wantYoutubeCaptions = ($jobModel === 'youtube');
 
+// ── Derived join models are NOT transcription jobs ──────────────────────
+// 'whisper-1-word-join'      = whisper-1-word + youtube (block boundaries)
+// 'whisper-1-word-join-seg'  = the above + whisper-1-segment disambiguation
+// They assemble existing _auto rows; there is no audio fetch or STT call.
+// Build inline and complete so the existing run→poll→done UI works for them
+// unchanged (this is the on-demand "Generate" path from the view/Initialize
+// pickers; the worker also auto-derives them after a word/youtube/segment
+// run completes — see the block near the end of this file).
+if ($jobModel === 'whisper-1-word-join' || $jobModel === 'whisper-1-word-join-seg') {
+    $useSeg = ($jobModel === 'whisper-1-word-join-seg');
+    updateJob($db, $jobKey, ['job_status' => 'running', 'job_progress' => 20,
+        'job_worker_pid' => getmypid(),
+        'job_message' => 'Assembling ' . $jobModel . ' from existing auto rows…']);
+    try {
+        $n = buildWhisperWordJoin($db, $itemKey, 'youtube', $useSeg);
+        if ($n === 0) {
+            $need = 'a word-level whisper + youtube' . ($useSeg ? ' + a segment-level whisper' : '');
+            updateJob($db, $jobKey, ['job_status' => 'failed', 'job_progress' => 100,
+                'job_error'   => 'Join produced 0 rows — generate ' . $need . ' first.',
+                'job_message' => 'Missing source rows for ' . $jobModel,
+                'job_completed_dtime' => date('c')]);
+        } else {
+            updateJob($db, $jobKey, ['job_status' => 'complete', 'job_progress' => 100,
+                'job_message' => 'Built ' . $n . ' ' . $jobModel . ' rows',
+                'job_completed_dtime' => date('c')]);
+            error_log("transcript-worker: built $n $jobModel rows for item $itemKey");
+        }
+    } catch (Throwable $e) {
+        updateJob($db, $jobKey, ['job_status' => 'failed', 'job_progress' => 100,
+            'job_error'   => 'Join build error: ' . $e->getMessage(),
+            'job_message' => 'Join build failed',
+            'job_completed_dtime' => date('c')]);
+        error_log("transcript-worker: $jobModel build failed for item $itemKey: " . $e->getMessage());
+    }
+    exit(0); // register_shutdown_function dequeues the next pending job
+}
+
 // NOTE: We used to override model='youtube' → 'whisper-1-segment' whenever
 // an uploaded MP3 existed, on the theory that "we have the audio, just
 // re-transcribe it". That conflated two different things — the durable
@@ -167,6 +284,8 @@ $wantYoutubeCaptions = ($jobModel === 'youtube');
 // error in methodFailures, and the operator can pick a different model.
 
 updateJob($db, $jobKey, ['job_status' => 'running', 'job_progress' => 5, 'job_message' => 'Starting transcription...']);
+wphase('start:' . $jobModel);
+wlog('item=' . $itemKey . ' model=' . $jobModel . ' site=' . ($site ?? '?') . ' video=' . ($videoId ?? '?'));
 
 $rows = [];
 $methodFailures = []; // collects "method_name: reason" so the final error is actionable
@@ -238,8 +357,19 @@ bailIfCancelled($db, $jobKey);
 // help with Botguard and incorrectly trigger the web-client path which requires
 // real auth — ios client works better without auth for non-restricted videos.
 $cookiesPath = '/tmp/youtube-cookies.txt';
-$cookiesContent = (file_exists($cookiesPath) && filesize($cookiesPath) > 0)
-    ? file_get_contents($cookiesPath) : '';
+// yt-dlp always tries to write the cookies file back after use. If the file
+// is owned by root (or otherwise not writable by www-data), yt-dlp aborts with
+// PermissionError. Guard: only pass --cookies when the file is actually writable
+// by the current process; otherwise fall back to the ios client (no auth).
+$cookiesContent = '';
+if (file_exists($cookiesPath) && filesize($cookiesPath) > 0) {
+    if (!is_writable($cookiesPath)) {
+        wlog('WARNING: cookies file not writable by www-data — skipping auth cookies '
+           . '(fix with: chown www-data:www-data /tmp/youtube-cookies.txt)');
+    } else {
+        $cookiesContent = (string)@file_get_contents($cookiesPath);
+    }
+}
 $haveCookies = $cookiesContent !== ''
     && (strpos($cookiesContent, 'SAPISID') !== false
         || strpos($cookiesContent, '__Secure-3PSID') !== false);
@@ -606,6 +736,10 @@ if (!$rows && !$wantYoutubeCaptions) {
                     ? buildKeywordBoostList($db, 100)
                     : [];
 
+                wphase('engine:' . $providerFamily . ':' . $jobModel);
+                wlog('calling provider=' . $providerFamily . ' audioMB=' . round($audioSizeMB, 1)
+                    . ' chunked=' . ($whisperChunked ? 'y' : 'n') . ' eta~' . $etaSeconds . 's — this is where the 2026-06-21 orphan died');
+                $__engineT0 = microtime(true);
                 switch ($providerFamily) {
                     case 'openai':
                         if ($whisperChunked) {
@@ -656,6 +790,8 @@ if (!$rows && !$wantYoutubeCaptions) {
                         $whisperErr = "unknown provider family: $providerFamily";
                         $rows = [];
                 }
+                wlog('provider=' . $providerFamily . ' returned ' . count($rows ?: []) . ' rows in '
+                    . round(microtime(true) - $__engineT0, 1) . 's' . ($whisperErr ? ' (err: ' . $whisperErr . ')' : ''));
                 // Only delete the audio if we downloaded it ourselves; preserve admin uploads
                 if (!$usedUploadedAudio) @unlink($audioPath);
                 if (!$rows) {
@@ -712,6 +848,7 @@ if (!$rows) {
         'job_error' => $detail,
         'job_completed_dtime' => date('c'),
     ]);
+    wlog('FAILED (no rows) — ' . ($methodFailures[count($methodFailures)-1] ?? 'unknown'));
     logMonitorEvent('transcript_worker', 'error',
         'Transcription failed for item ' . $itemKey,
         $detail);
@@ -732,7 +869,21 @@ bailIfCancelled($db, $jobKey);
 //
 // The live yy_feed_item_transcript is also never written here — that
 // table is reserved for human edits and the Initialize Transcript path.
-updateJob($db, $jobKey, ['job_progress' => 90, 'job_message' => 'Saving ' . count($rows) . ' segments (model=' . $jobModel . ')...']);
+wphase('save');
+wlog('saving ' . count($rows) . ' rows (model=' . $jobModel . ')');
+$total = count($rows);
+updateJob($db, $jobKey, ['job_progress' => 90, 'job_message' => 'Saving ' . $total . ' segments (model=' . $jobModel . ')...']);
+// Independent connection for LIVE save progress: the main $db is inside the
+// insert transaction below, so progress writes on it stay invisible to the
+// polling UI until commit. Best-effort — a failure here never blocks the save.
+$progressUpd = null;
+try {
+    $ph = getenv('PG_HOST') ?: 'localhost'; $pp = getenv('PG_PORT') ?: '5433';
+    $pn = getenv('PG_DB') ?: 'yada'; $pu = getenv('PG_USER') ?: 'postgres';
+    $pwd = getenv('PG_PASS') ?: 'yada_password';
+    $progressDb = new PDO("pgsql:host=$ph;port=$pp;dbname=$pn", $pu, $pwd, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $progressUpd = $progressDb->prepare("UPDATE yy_feed_item_transcript_job SET job_progress = ?, job_message = ? WHERE feed_item_transcript_job_key = ?");
+} catch (Exception $e) { $progressUpd = null; }
 $db->beginTransaction();
 try {
     $db->prepare("DELETE FROM yy_feed_item_transcript_auto      WHERE feed_item_key = ? AND feed_item_transcript_auto_model      = ?")->execute([$itemKey, $jobModel]);
@@ -748,6 +899,15 @@ try {
             ? (string)$r['speaker'] : null;
         $insAuto->execute([$itemKey, $r['segment'], mb_substr($r['text'], 0, 2000), $sort, $jobModel, $speaker]);
         $sort++;
+        // Live "K / N segments" tick (every 50 rows) on the side connection so
+        // the admin watches the count climb next to the ETA during long GIN-index
+        // saves. Best-effort; never disturbs the insert transaction.
+        if ($progressUpd && ($sort % 50) === 0) {
+            try {
+                $pct = 90 + (int)floor(9 * $sort / max(1, $total));
+                $progressUpd->execute([$pct, 'Saving ' . $sort . ' / ' . $total . ' segments (model=' . $jobModel . ')...', $jobKey]);
+            } catch (Exception $e) { /* best-effort progress */ }
+        }
     }
     $db->commit();
 } catch (Exception $e) {
@@ -761,25 +921,33 @@ try {
     exit(1);
 }
 
-// Auto-derive whisper-1-word-join when this run completed either of the
-// two source models AND both source models now have rows for this item.
+// Auto-derive the hybrid join models when this run completed any of their
+// source feeds AND those sources now have rows for this item. The word/segment
+// feeds may be OpenAI (whisper-1-*) or self-hosted GPU (gpu-whisper-large-v3*)
+// — resolveJoinSources() picks whichever exists:
+//   whisper-1-word-join      ← word-level whisper + youtube
+//   whisper-1-word-join-seg  ← word-level whisper + youtube + segment whisper
 // The CLI script build_whisper_word_join.php remains available for manual
 // runs; the worker calls the same buildWhisperWordJoin() helper inline.
-if (in_array($jobModel, ['whisper-1-word', 'youtube'], true)) {
-    $bothStmt = $db->prepare("
-        SELECT
-          EXISTS (SELECT 1 FROM yy_feed_item_transcript_auto WHERE feed_item_key = ? AND feed_item_transcript_auto_model = 'whisper-1-word') AS has_word,
-          EXISTS (SELECT 1 FROM yy_feed_item_transcript_auto WHERE feed_item_key = ? AND feed_item_transcript_auto_model = 'youtube')        AS has_yt
-    ");
-    $bothStmt->execute([$itemKey, $itemKey]);
-    $rowChk = $bothStmt->fetch();
-    if ($rowChk && $rowChk['has_word'] && $rowChk['has_yt']) {
+if (in_array($jobModel, ['whisper-1-word', 'gpu-whisper-large-v3-word', 'youtube', 'whisper-1-segment', 'gpu-whisper-large-v3'], true)) {
+    $src = resolveJoinSources($db, $itemKey);
+    if ($src['word'] && $src['has_yt']) {
         updateJob($db, $jobKey, ['job_progress' => 95, 'job_message' => 'Deriving whisper-1-word-join…']);
         try {
-            $joinedCount = buildWhisperWordJoin($db, $itemKey, 'youtube');
+            $joinedCount = buildWhisperWordJoin($db, $itemKey, 'youtube', false);
             error_log("transcript-worker: built $joinedCount whisper-1-word-join rows for item $itemKey");
         } catch (Throwable $e) {
             error_log("transcript-worker: whisper-1-word-join build failed for item $itemKey: " . $e->getMessage());
+        }
+        // The 3-feed variant additionally needs a segment-level whisper feed.
+        if ($src['seg']) {
+            updateJob($db, $jobKey, ['job_progress' => 97, 'job_message' => 'Deriving whisper-1-word-join-seg…']);
+            try {
+                $segJoinedCount = buildWhisperWordJoin($db, $itemKey, 'youtube', true);
+                error_log("transcript-worker: built $segJoinedCount whisper-1-word-join-seg rows for item $itemKey");
+            } catch (Throwable $e) {
+                error_log("transcript-worker: whisper-1-word-join-seg build failed for item $itemKey: " . $e->getMessage());
+            }
         }
     }
 }
@@ -790,6 +958,8 @@ updateJob($db, $jobKey, [
     'job_message' => 'Done — ' . count($rows) . ' segments',
     'job_completed_dtime' => date('c'),
 ]);
+wphase('complete');
+wlog('DONE — ' . count($rows) . ' segments saved for item ' . $itemKey . ' model ' . $jobModel);
 
 // ─────────────────────────────────────────────────────
 // Helpers

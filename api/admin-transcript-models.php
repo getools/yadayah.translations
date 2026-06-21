@@ -32,10 +32,61 @@
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/finalize-helpers.php'; // spawnCappedWorker via spawn-helpers indirectly
 require_once __DIR__ . '/spawn-helpers.php';
+require_once __DIR__ . '/transcript-helpers.php'; // resolveJoinSources() for hybrid readiness
 
 $user = requireAuth();
 $db = getDb();
 setCurrentUser($db, (int)$user['user_key']);
+
+// ── Orphaned-job reaper ──────────────────────────────────────────────────
+// A worker that dies abnormally (killed, segfault, dropped engine
+// connection) leaves its job pinned at job_status='running'. The single-
+// worker concurrency gate in poke/run counts rows WHERE job_status='running',
+// so ONE such orphan wedges the ENTIRE STT queue — every spawn is refused
+// with "worker already running" and no transcript can ever start again until
+// a human clears it by hand. Caught in the wild 2026-06-21: a
+// gpu-whisper-large-v3-turbo-word worker vanished mid word-level call (0 rows
+// written) and dead-locked the queue. So before any spawn-gate check we mark
+// as failed any 'running' job whose worker process is no longer alive.
+//
+// Safety / bias:
+//   - 90s grace on job_dtime so a just-spawned worker that hasn't finished
+//     booting is never reaped out from under itself.
+//   - Liveness via /proc/<pid> (owner-agnostic; dispatch PHP and the worker
+//     share the container PID namespace), posix_kill($pid,0) as fallback.
+//   - A reused PID belonging to an unrelated live process reads as "alive",
+//     so we UNDER-reap (leave a stuck job) rather than ever fail a healthy
+//     one. Worst case the operator re-pokes; we never kill a running worker.
+function reapOrphanedJobs($db) {
+    $stale = $db->query("SELECT feed_item_transcript_job_key AS k, job_worker_pid AS pid
+                           FROM yy_feed_item_transcript_job
+                          WHERE job_status = 'running'
+                            AND job_dtime < NOW() - INTERVAL '90 seconds'")->fetchAll(PDO::FETCH_ASSOC);
+    if (!$stale) return 0;
+    $reap = $db->prepare("UPDATE yy_feed_item_transcript_job
+                             SET job_status = 'failed',
+                                 job_completed_dtime = NOW(),
+                                 job_error = 'Orphaned: worker PID '
+                                     || COALESCE(job_worker_pid::text, '(none)')
+                                     || ' no longer alive — auto-reaped by dispatch guard',
+                                 job_message = 'Failed: orphaned worker (auto-reaped)'
+                           WHERE feed_item_transcript_job_key = ?
+                             AND job_status = 'running'");
+    $n = 0;
+    foreach ($stale as $row) {
+        $pid = (int)$row['pid'];
+        $alive = false;
+        if ($pid > 0) {
+            if (@file_exists("/proc/$pid")) {
+                $alive = true;
+            } elseif (function_exists('posix_kill') && @posix_kill($pid, 0)) {
+                $alive = true;
+            }
+        }
+        if (!$alive) { $reap->execute([$row['k']]); $n += $reap->rowCount(); }
+    }
+    return $n;
+}
 
 // Internal model codes map (in the worker) to the OpenAI model name plus
 // a timestamp_granularities setting. whisper-1 is exposed as TWO entries:
@@ -51,8 +102,17 @@ setCurrentUser($db, (int)$user['user_key']);
 // Five cloud transcription provider families, each enabled by a separate
 // API key in /opt/yada-www/.env. youtube uses yt-dlp + admin cookies.
 $AVAILABLE_MODELS = [
-    ['code' => 'gpu-whisper-large-v3',        'label' => 'Self-hosted faster-whisper large-v3 — segment timestamps (free, Puget GPU)'],
-    ['code' => 'gpu-whisper-large-v3-word',   'label' => 'Self-hosted faster-whisper large-v3 — word-level timestamps (free, Puget GPU)'],
+    ['code' => 'gpu-whisper-large-v3',            'label' => 'Self-hosted faster-whisper large-v3 — segment timestamps (free, Puget GPU)'],
+    ['code' => 'gpu-whisper-large-v3-word',       'label' => 'Self-hosted faster-whisper large-v3 — word-level timestamps (free, Puget GPU)'],
+    ['code' => 'gpu-whisper-large-v3-turbo',      'label' => 'Self-hosted faster-whisper large-v3-turbo — segment timestamps (free, fast, Puget GPU)'],
+    ['code' => 'gpu-whisper-large-v3-turbo-word', 'label' => 'Self-hosted faster-whisper large-v3-turbo — word-level timestamps (free, fast, Puget GPU)'],
+    ['code' => 'gpu-parakeet-tdt-0.6b-v2',        'label' => 'Self-hosted NVIDIA Parakeet TDT 0.6B v2 — segment timestamps (free, English, top accuracy, Puget GPU)'],
+    ['code' => 'gpu-parakeet-tdt-0.6b-v2-word',   'label' => 'Self-hosted NVIDIA Parakeet TDT 0.6B v2 — word-level timestamps (free, English, top accuracy, Puget GPU)'],
+    ['code' => 'gpu-whisperx',                    'label' => 'Self-hosted WhisperX (large-v3 + forced alignment) — segment timestamps (free, tight word timing, Puget GPU)'],
+    ['code' => 'gpu-whisperx-word',               'label' => 'Self-hosted WhisperX (large-v3 + forced alignment) — word-level timestamps (free, tight word timing, Puget GPU)'],
+    ['code' => 'gpu-whisperx-diarize',            'label' => 'Self-hosted WhisperX + speaker diarization (large-v3 + pyannote) — segment timestamps with speaker labels (free, Puget GPU)'],
+    ['code' => 'gpu-canary-1b-flash',             'label' => 'Self-hosted NVIDIA Canary 1B Flash — high-accuracy text (correction source; coarse 30s segments, free, Puget GPU)'],
+    ['code' => 'gpu-qwen2-audio',                 'label' => 'Self-hosted Qwen2-Audio 7B — high-accuracy text (correction source; audio-LLM, coarse 30s segments, free, Puget GPU)'],
     ['code' => 'whisper-1-segment',           'label' => 'OpenAI whisper-1 — segment timestamps ($0.006/min)'],
     ['code' => 'whisper-1-word',              'label' => 'OpenAI whisper-1 — word-level timestamps ($0.006/min)'],
     ['code' => 'groq-whisper-large-v3-turbo', 'label' => 'Groq whisper-large-v3-turbo (~$0.0004/min, fastest)'],
@@ -62,6 +122,18 @@ $AVAILABLE_MODELS = [
     ['code' => 'elevenlabs-scribe',           'label' => 'ElevenLabs Scribe (~$0.0067/min)'],
     ['code' => 'azure-speech-stt',            'label' => 'Azure Speech Fast Transcription (~$0.017/min, 5h/mo free)'],
     ['code' => 'youtube',                     'label' => 'YouTube auto-captions (free, requires fresh cookies)'],
+];
+
+// Derived "hybrid" models. These are NOT transcription jobs — they assemble
+// existing _auto rows into a combined transcript (see buildWhisperWordJoin()
+// in transcript-helpers.php). They are surfaced in the status list so the
+// Initialize-Transcript and view pickers can offer them, and accepted by the
+// run action (which enqueues a job the worker recognises and builds inline
+// rather than calling any STT provider). Kept OUT of $AVAILABLE_MODELS so the
+// Generate-Transcripts bulk popover never tries to "transcribe" them.
+$DERIVED_MODELS = [
+    ['code' => 'whisper-1-word-join',     'label' => 'Hybrid: word-level Whisper + YouTube (word timing, YouTube blocks)'],
+    ['code' => 'whisper-1-word-join-seg', 'label' => 'Hybrid: word-level Whisper + YouTube + segment-level Whisper (segment-disambiguated)'],
 ];
 
 $method = $_SERVER['REQUEST_METHOD'];
@@ -96,10 +168,32 @@ if ($method === 'GET' && $action === 'status') {
 
     $models = [];
     foreach ($AVAILABLE_MODELS as $m) {
+        $lr = $runByModel[$m['code']] ?? null;
+        $models[] = [
+            'code'     => $m['code'],
+            'label'    => $m['label'],
+            'last_run' => $lr,
+            'derived'  => false,
+            'ready'    => $lr !== null, // a raw model is usable once it has rows
+        ];
+    }
+    // Derived hybrids listed after the raw models. `ready` does NOT require the
+    // join to have been assembled yet — it's true as soon as the SOURCE feeds
+    // exist, because Initialize (and the worker) assemble the join on demand.
+    // `last_run` still reflects the last actual assembly (null if never built).
+    // Engine-agnostic readiness: a word/segment feed from EITHER the OpenAI
+    // (whisper-1-*) or self-hosted GPU (gpu-whisper-large-v3*) engine counts.
+    $jsrc = resolveJoinSources($db, $itemKey);
+    foreach ($DERIVED_MODELS as $m) {
+        $ready = ($m['code'] === 'whisper-1-word-join-seg')
+            ? ($jsrc['word'] && $jsrc['has_yt'] && $jsrc['seg'])
+            : ($jsrc['word'] && $jsrc['has_yt']);
         $models[] = [
             'code'     => $m['code'],
             'label'    => $m['label'],
             'last_run' => $runByModel[$m['code']] ?? null,
+            'derived'  => true,
+            'ready'    => $ready,
         ];
     }
 
@@ -225,9 +319,10 @@ if ($method === 'POST' && $action === 'poke') {
     // the oldest pending job. Idempotent — calling it while a worker is
     // already alive is a no-op. Used by the popover's auto-recovery and
     // by an operator clicking "Wake queue" when they see it's stuck.
+    $reaped = reapOrphanedJobs($db); // clear dead 'running' jobs that would wedge the gate
     $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
     if ($running > 0) {
-        jsonResponse(['ok' => true, 'spawned' => false, 'reason' => 'worker already running', 'running' => $running]);
+        jsonResponse(['ok' => true, 'spawned' => false, 'reason' => 'worker already running', 'running' => $running, 'reaped' => $reaped]);
     }
     $nextKey = (int)$db->query("SELECT feed_item_transcript_job_key
                                  FROM yy_feed_item_transcript_job
@@ -304,7 +399,9 @@ if ($method === 'POST' && $action === 'run') {
     $itemKey = (int)($data['item_key'] ?? 0);
     $model   = trim($data['model'] ?? '');
     if (!$itemKey) errorResponse('item_key required');
-    $valid = array_column($AVAILABLE_MODELS, 'code');
+    // Derived hybrids are valid run targets too — the worker recognises them
+    // and assembles existing _auto rows instead of calling an STT provider.
+    $valid = array_merge(array_column($AVAILABLE_MODELS, 'code'), array_column($DERIVED_MODELS, 'code'));
     if (!in_array($model, $valid, true)) errorResponse('invalid model: ' . $model);
 
     // Cancel any in-flight job for this item *of the same model* before
@@ -339,6 +436,7 @@ if ($method === 'POST' && $action === 'run') {
     // when the current worker exits its register_shutdown_function dequeues
     // the next one (see transcript-worker.php).
     $MAX_CONCURRENT_WORKERS = 1;
+    reapOrphanedJobs($db); // clear dead 'running' jobs so a single orphan can't block every new run
     $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
     if ($running < $MAX_CONCURRENT_WORKERS) {
         $workerScript = __DIR__ . '/transcript-worker.php';

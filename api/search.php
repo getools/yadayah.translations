@@ -123,9 +123,9 @@ function highlightSnippet(string $snippet, array $words, array $stripChars, arra
     $scan($words, []);                  // literal pass (strip-chars only)
 
     // Phonetic pass: mark whole (whitespace-delimited) words whose phonetic
-    // skeleton starts with a query skeleton, so an "etzah" search bolds the
-    // visible "etsah" / "ʿEtsah". Word-start match mirrors the search-side
-    // `paragraph_consonants ~ '(^| )SKEL'`.
+    // skeleton EQUALS a query skeleton, so an "etzah" search bolds the visible
+    // spelling variants "etsah" / "ʿEtsah" but not coincidental prefix-sharers.
+    // Mirrors the search-side whole-word match `paragraph_consonants ~ '(^| )SKEL( |$)'`.
     if (!empty($phoneticSkels)) {
         $chars = preg_split('//u', $snippet, -1, PREG_SPLIT_NO_EMPTY);
         $i = 0;
@@ -137,7 +137,7 @@ function highlightSnippet(string $snippet, array $words, array $stripChars, arra
             $wskel = phoneticSkel(implode('', array_slice($chars, $wstart, $i - $wstart)));
             if ($wskel !== '') {
                 foreach ($phoneticSkels as $qs) {
-                    if (strpos($wskel, $qs) === 0) { $marks[] = [$wstart, $i]; break; }
+                    if ($wskel === $qs) { $marks[] = [$wstart, $i]; break; }  // whole-word skeleton equality
                 }
             }
         }
@@ -474,8 +474,12 @@ if ($total > 0) {
     if (!empty($phonSkels) && !$tier1TimedOut) {
         $phonConds = [];
         foreach ($phonSkels as $ps) {
+            // Whole-word skeleton equality (not just prefix): the word's whole
+            // phonetic skeleton must equal the query's, so "etzah" (CH) matches
+            // spelling variants "etsah"/"ʿetsah" but NOT coincidental prefix
+            // sharers like "tsachaq" (CHK) or "tsahorym" (CHRM).
             $phonConds[]  = "p.paragraph_consonants ~ ?";
-            $phonParams[] = '(^| )' . $ps;
+            $phonParams[] = '(^| )' . $ps . '( |$)';
         }
         $glue = ($mode === 'any') ? ' OR ' : ' AND ';
         $phonWhere = 'WHERE (' . implode($glue, $phonConds) . ') AND ' . implode(' AND ', $filterConditions);

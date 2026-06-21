@@ -1560,6 +1560,66 @@ function ttsProviderTransport(array $cfg, int $providerKey): string {
 }
 
 /**
+ * Per-provider chunk sizing for self-hosted (gpu-tailnet) engines. Engines have
+ * very different optimal batch lengths: Coqui/XTTS & Chatterbox clip or drop
+ * words past their ~400-token (~250 char) cap and need SMALL chunks; Qwen3-Omni
+ * is an autoregressive LLM talker that produces coherent multi-sentence prosody
+ * and wants LARGE chunks (small chunks give audible seams between independent
+ * generate() calls). Stored per provider in
+ *   provider_settings.chunk = {"min":N,"target":N,"max":N}
+ * Absent keys fall back to the engine-aware defaults below. Returns
+ * ['min','target','max'], clamped + ordered to chunkTextForPreview's invariants
+ * (max is authoritative ≤600 ceiling; target ≤ max; min ≤ target).
+ */
+function ttsProviderChunkSizes(array $cfg, int $providerKey): array {
+    // SINGLE SOURCE OF TRUTH = the DB. Each provider's optimal batch sizes live
+    // in yy_provider.provider_settings->'chunk' {min,target,max}. Resolution
+    // order: this provider → provider 0 ("Default / fallback", the global
+    // default row) → a last-ditch safety (logged) so a totally unconfigured DB
+    // can't fatal a synth. There are NO per-engine size constants in code.
+    $readChunk = function (int $pk) use ($cfg) {
+        $p = $cfg['providers'][$pk] ?? null;
+        if (!$p) return null;
+        $s = json_decode((string)($p['provider_settings'] ?? '{}'), true) ?: [];
+        return (isset($s['chunk']) && is_array($s['chunk'])) ? $s['chunk'] : null;
+    };
+    $chunk = $readChunk($providerKey);
+    if ($chunk === null && $providerKey !== 0) $chunk = $readChunk(0);
+    if ($chunk === null) {
+        // DB has no chunk config anywhere — should never happen once provider 0
+        // is seeded. Log loudly; the validation rails below floor the empty
+        // values to a minimal-but-valid 10/20/40 so the call still produces
+        // audio (no hardcoded size default — fix the DB).
+        error_log("ttsProviderChunkSizes: no chunk config for provider $providerKey or provider 0 — seed yy_provider.provider_settings->chunk");
+        $chunk = [];
+    }
+    // Validation rails only (NOT size defaults): keep values sane + ordered so a
+    // bad DB edit can't break the splitter. max authoritative ≤600; target ≤ max;
+    // min ≤ target. Mirror chunkTextForPreview()'s clamp exactly.
+    $max    = max(40, min(600, (int)($chunk['max']    ?? 0)));
+    $target = max(20, min($max, (int)($chunk['target'] ?? 0)));
+    $min    = max(10, min($target, (int)($chunk['min'] ?? 0)));
+    return ['min' => $min, 'target' => $target, 'max' => $max];
+}
+
+/**
+ * True when a provider's previews must ALWAYS use the async worker path rather
+ * than the synchronous one. A heavy model whose cold load can exceed
+ * Cloudflare's ~100 s origin window (Qwen3-Omni ≈ 78 GB) would 524 on a sync
+ * preview the first time it's swapped into VRAM, so it goes through the polling
+ * worker (immune to the CDN clock, auto-plays, shows chunk progress) at any
+ * length. Explicit provider_settings.always_async wins; otherwise the qwen3
+ * engine defaults to on.
+ */
+function ttsProviderAlwaysAsync(array $cfg, int $providerKey): bool {
+    $p = $cfg['providers'][$providerKey] ?? null;
+    if (!$p) return false;
+    $settings = json_decode((string)($p['provider_settings'] ?? '{}'), true) ?: [];
+    if (array_key_exists('always_async', $settings)) return !empty($settings['always_async']);
+    return strtolower((string)($settings['engine'] ?? '')) === 'qwen3';
+}
+
+/**
  * Active tune list resolved for one provider. Each Print may have a default
  * row (provider_key=0) and an optional provider-specific override; the override
  * wins. Application order from loadTtsConfig is preserved. With only default
@@ -2198,94 +2258,43 @@ function localTtsSynthesizeChunked(array $cfg, array $seg, string $outputFormat,
     // startup-clipping of short paragraphs is a price they'd rather pay
     // than spoken-out warmup nonsense. Preview-time warmup lives in
     // admin-tts-preview.php so it doesn't bleed into chapter builds.
-    $sentences = splitSentencesForLocalTts((string)($seg['text'] ?? ''));
-    if (count($sentences) <= 1) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
-    $warmupChunks = 0;
+    // Chunk by the voice's PROVIDER chunk sizes (single source of truth:
+    // yy_provider.provider_settings->chunk via ttsProviderChunkSizes). This is
+    // the SAME splitter the preview path uses, so a book build and its preview
+    // chunk identically. No hardcoded sizes here.
+    $cs = ttsProviderChunkSizes($cfg, (int)($seg['provider_key'] ?? 0));
+    $chunks = chunkTextForPreview((string)($seg['text'] ?? ''), $cs['min'], $cs['target'], $cs['max']);
+    if (count($chunks) <= 1) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
 
     $bytes = '';
-    foreach ($sentences as $i => $sent) {
-        $sentSeg = $seg;
-        $sentSeg['text'] = $sent;
-        // Vary the seed per sentence so adjacent sentences don't sound
-        // mechanically identical, while staying reproducible from the
-        // base seed if the caller supplied one (tune-driven previews).
+    foreach ($chunks as $i => $chunk) {
+        $chunkSeg = $seg;
+        // A chunk ending mid-clause on a bare word makes engines trail off /
+        // clip / hallucinate — give the ENGINE TEXT a clean terminal period
+        // (the stored text is unchanged). Chunks already ending on terminal
+        // punctuation are left exactly as-is.
+        $endProbe = preg_replace('/[\s)"\x{201D}\x{2019}\x{0027}]+$/u', '', $chunk);
+        $chunkSeg['text'] = ($endProbe !== '' && !preg_match('/[.!?,;:\x{2014}\x{2013}]$/u', $endProbe))
+            ? rtrim($chunk) . '.' : $chunk;
+        // Vary the seed per chunk so adjacent chunks don't sound mechanically
+        // identical, while staying reproducible from a caller-supplied base seed.
         if (isset($seg['seed']) && $seg['seed'] !== null) {
-            $sentSeg['seed'] = ((int)$seg['seed'] + $i) % 1000;
+            $chunkSeg['seed'] = ((int)$seg['seed'] + $i) % 1000;
         }
-        $sentErr = '';
-        $b = localTtsSynthesizeRetry($cfg, $sentSeg, $outputFormat, $sentErr);
+        $cErr = '';
+        $b = localTtsSynthesizeRetry($cfg, $chunkSeg, $outputFormat, $cErr);
         if ($b === '') {
-            $err = "sentence " . ($i + 1) . " of " . count($sentences) . ": $sentErr";
+            $err = "chunk " . ($i + 1) . " of " . count($chunks) . ": $cErr";
             return '';
         }
-        // Drop the warmup chunk's audio (and seek to discard the leading
-        // clipped frames the engine would have produced anyway).
-        if ($i < $warmupChunks) continue;
         $bytes .= $b;
     }
     return $bytes;
 }
 
-/**
- * Split text at sentence boundaries, guarding common English abbreviations
- * so "Dr. Smith" / "U.S." / "e.g." don't trigger a split. Sentences
- * longer than 400 chars get a comma-level backstop split so we don't
- * accidentally hand Chatterbox an extreme outlier.
- */
-function splitSentencesForLocalTts(string $text): array {
-    $text = trim($text);
-    if ($text === '') return [];
-    static $ABBREVS = [
-        'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Jr.', 'Sr.', 'St.',
-        'vs.', 'etc.', 'e.g.', 'i.e.', 'cf.',
-        'Prof.', 'No.', 'Co.', 'Inc.', 'Ltd.',
-        'a.m.', 'p.m.', 'U.S.', 'U.K.', 'B.C.', 'A.D.',
-    ];
-    $marks = [];
-    foreach ($ABBREVS as $i => $abbr) {
-        $tok = "\x02AB" . $i . "\x02";
-        $marks[$tok] = $abbr;
-        $text = str_ireplace($abbr, $tok, $text);
-    }
-    // Sentence boundary: . ! ? followed by whitespace, then a non-lowercase
-    // character (the start of the next sentence — uppercase letter, quote,
-    // numeral, etc.). We don't require uppercase outright because YY content
-    // sometimes opens with "—" or a quotation mark.
-    $parts = preg_split('/(?<=[.!?])\s+(?=[^\s\p{Ll}])/u', $text);
-    $out = [];
-    foreach ($parts as $p) {
-        foreach ($marks as $tok => $abbr) $p = str_replace($tok, $abbr, $p);
-        $p = trim($p);
-        if ($p !== '') $out[] = $p;
-    }
-    // Backstop: cap individual chunks at ~250 chars by splitting on commas.
-    // YY paragraphs frequently have very long compound sentences with deep
-    // embedded parentheticals — a single sentence can easily exceed 250
-    // chars / 40+ words. Chatterbox's max_new_tokens caps a single synth
-    // at ~32 s of audio at 400 tokens (current setting), so chunks much
-    // over 250 chars get truncated mid-sentence ("not being read all the
-    // way to the end"). 250 chars ≈ 17-20s, safely under the cap.
-    $capped = [];
-    foreach ($out as $s) {
-        if (mb_strlen($s) <= 250) { $capped[] = $s; continue; }
-        foreach (preg_split('/(?<=,)\s+/u', $s) as $sp) {
-            $sp = trim($sp);
-            if ($sp !== '') $capped[] = $sp;
-        }
-    }
-    // Drop punctuation-only chunks. The local-engine pause converter (in
-    // buildLocalSegment) emits runs of "." for long pauses; the sentence
-    // splitter then treats each "." as a sentence boundary, producing
-    // tiny "."-only entries here. Synthesising silence costs an engine
-    // round-trip and contributes no audio — drop them. The neighbouring
-    // sentence already carries the trailing period so the natural pause
-    // is preserved.
-    $final = [];
-    foreach ($capped as $s) {
-        if (preg_match('/\p{L}|\d/u', $s)) $final[] = $s;
-    }
-    return $final ?: [$text];
-}
+// (splitSentencesForLocalTts removed 2026-06-20 — the build path now chunks via
+//  chunkTextForPreview() with the voice's PROVIDER chunk sizes, identical to the
+//  preview path, so there are no hardcoded sentence/250-char caps anywhere.)
 
 // ── Async preview jobs (admin-tts-preview-{worker,status}.php) ──────────
 // Rendered MP3s are stashed directly in the container's /tmp (shared between
@@ -2317,9 +2326,9 @@ function ttsEnqueuePreviewJob(\PDO $db, array $j): int {
             (int)($j['rate_pct'] ?? 0),
             (float)($j['pitch_st'] ?? 0),
             (int)($j['volume'] ?? 100),
-            (int)($j['min_chars'] ?? 80),
-            (int)($j['target_chars'] ?? 150),
-            (int)($j['max_chars'] ?? 250),
+            (int)($j['min_chars'] ?? 0),     // 0 = resolve from provider downstream
+            (int)($j['target_chars'] ?? 0),
+            (int)($j['max_chars'] ?? 0),
         ]);
         return (int)$stmt->fetchColumn();
     } catch (\Throwable $e) {
@@ -2332,11 +2341,18 @@ function ttsEnqueuePreviewJob(\PDO $db, array $j): int {
 // Progress is reported per CHUNK (not per paragraph): $progress(chunksDone,
 // chunksTotal) drives the UI's "chunk N of M". We pre-chunk every paragraph up
 // front to know the grand total before synthesis starts.
-function localRenderPreviewParagraphs(array $cfg, string $rawText, string $category, string $outputFormat, ?string &$err = null, ?callable $progress = null, int $minChars = 80, int $targetChars = 150, int $maxChars = 250): string {
+function localRenderPreviewParagraphs(array $cfg, string $rawText, string $category, string $outputFormat, ?string &$err = null, ?callable $progress = null, int $minChars = 0, int $targetChars = 0, int $maxChars = 0): string {
     $paras = ttsSplitPreviewParagraphs($rawText);
     $clean = [];
     foreach ($paras as $p) { $c = trim(ttsCleanPreviewText($p)); if ($c !== '') $clean[] = $c; }
     if (!$clean) { $err = 'no synthesizable text'; return ''; }
+
+    // Chunk sizes from the category's voice PROVIDER (single source of truth).
+    // 0/unset ⇒ resolve from yy_provider.provider_settings->chunk.
+    if ($minChars <= 0 || $targetChars <= 0 || $maxChars <= 0) {
+        $cs = ttsProviderChunkSizes($cfg, ttsResolveProviderKey($cfg, $category));
+        $minChars = $cs['min']; $targetChars = $cs['target']; $maxChars = $cs['max'];
+    }
 
     // Build segs + tally total chunk count for the progress denominator.
     $segs = [];
@@ -2438,7 +2454,7 @@ function trimLeadingSilencePreview(string $mp3): string {
 // Breakpoints: . ! ? ; : , (each needs a trailing space so "3.14"/"U.S.A" don't
 // split), em/en dash, spaced hyphen, ')' (break AFTER); '(' breaks BEFORE it so
 // a parenthetical starts a fresh chunk.
-function chunkTextForPreview(string $text, int $minChars = 80, int $targetChars = 150, int $maxChars = 250): array {
+function chunkTextForPreview(string $text, int $minChars, int $targetChars, int $maxChars): array {
     $text = trim((string)preg_replace('/\s+/u', ' ', $text));
     if ($text === '') return [];
     // Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
@@ -2501,7 +2517,7 @@ function chunkTextForPreview(string $text, int $minChars = 80, int $targetChars 
  * NO WARMUP, and trims LEADING silence only — never the trailing edge, so a
  * chunk's final word keeps its full release and isn't cut off at the join.
  */
-function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat, ?string &$err = null, int $maxChunks = 60, int $minChars = 80, int $targetChars = 150, int $maxChars = 250, ?callable $onChunk = null, bool $finalMp3 = true): string {
+function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat, ?string &$err = null, int $maxChunks = 60, int $minChars = 0, int $targetChars = 0, int $maxChars = 0, ?callable $onChunk = null, bool $finalMp3 = true): string {
     require_once __DIR__ . '/gpu-client.php';
     // Only mp3 final output is supported here; anything else uses the plain path.
     if (strpos($outputFormat, 'mp3') === false) return localTtsSynthesizeChunked($cfg, $seg, $outputFormat, $err);
@@ -2512,7 +2528,13 @@ function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat,
     $engine   = $settings['engine'] ?? ($prov['provider_model_id'] ?? '');
     if ($engine === '') { $err = 'provider ' . $seg['provider_key'] . ' has no engine name'; return ''; }
 
-    // Min / Target / Max are the operator-tunable chunk sizes (Voices fields).
+    // Chunk sizes come from the voice's PROVIDER (single source of truth).
+    // A caller may pass explicit sizes (the live Voices fields); 0/unset ⇒
+    // resolve from yy_provider.provider_settings->chunk via ttsProviderChunkSizes.
+    if ($minChars <= 0 || $targetChars <= 0 || $maxChars <= 0) {
+        $cs = ttsProviderChunkSizes($cfg, (int)$seg['provider_key']);
+        $minChars = $cs['min']; $targetChars = $cs['target']; $maxChars = $cs['max'];
+    }
     $chunks = chunkTextForPreview((string)($seg['text'] ?? ''), $minChars, $targetChars, $maxChars);
     if (!$chunks) { $err = 'no synthesizable text'; return ''; }
     if (count($chunks) > $maxChunks) $chunks = array_slice($chunks, 0, $maxChunks); // runaway safety only
@@ -2521,13 +2543,17 @@ function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat,
     // we only MP3-encode at the very end (once) — no compounding warble.
     $fmt = 'wav';
     foreach ($chunks as $i => $chunk) {
-        // XTTS stochastically CLIPS the last word (~15%) or hallucinates past the
-        // end when a chunk lacks trailing context (confirmed via STT). Appending a
-        // trailing ellipsis gives the model "room" to finish the real last word
-        // and stop — measured to roughly HALVE the drop rate (~17%→~8%) with no
-        // spoken artifact (unlike a dummy word, which leaks). The inter-chunk
-        // pause below is still sized off the ORIGINAL ending.
-        $engineText = rtrim($chunk) . ' ...';
+        // A chunk that ends mid-clause on a BARE WORD makes XTTS trail off / clip
+        // / hallucinate, so give it a clean period stop. Chunks that already end
+        // on punctuation are left EXACTLY as-is — no trailing ` ...` ellipsis,
+        // which XTTS renders as a stray artifact (heard at paragraph ends). The
+        // STT verify below is what now guarantees no clipped words, so the
+        // ellipsis is no longer needed for protection.
+        $engineText = $chunk;
+        $endProbe = preg_replace('/[\s)"\x{201D}\x{2019}\x{0027}]+$/u', '', $chunk);
+        if ($endProbe !== '' && !preg_match('/[.!?,;:\x{2014}\x{2013}]$/u', $endProbe)) {
+            $engineText = rtrim($chunk) . '.';
+        }
         $payload = [
             'provider' => $engine,
             'voice'    => $seg['voice'],
@@ -2541,23 +2567,22 @@ function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat,
         if (!empty($seg['style'])) $payload['style'] = (string)$seg['style'];
         if (array_key_exists('seed', $seg) && $seg['seed'] !== null) $payload['seed'] = (int)$seg['seed'];
 
-        // STT-verify chunks most likely to drop a word OR most noticeable when
-        // they do — (a) chunks ending mid-clause on a bare word (word-splits) and
-        // (b) the FINAL chunk — then re-render if ANY content word (end OR
-        // mid-chunk) didn't make it. Punctuation-ending interior chunks are
-        // trusted (the ellipsis covers their endings) to keep latency down. Per
-        // operator choice 2026-06-18; works best with short chunks (low Max).
+        // STT-verify EVERY chunk and re-render if a word was clipped/dropped —
+        // mid-chunk (any content word >=5 chars missing) or the last word (even a
+        // short one like "His"/"day", checked positionally near the transcript
+        // end). XTTS drops words on all chunk types, not just word-splits, so we
+        // can't trust punctuation-ending chunks either. Short chunks keep each
+        // transcription fast. Tiny <3-char last words are skipped (STT can't
+        // place them); respelled (tuned) last words may cost an extra try.
         $probe = preg_replace('/[\s)"\x{201D}\x{2019}\x{0027}]+$/u', '', $chunk);
-        $isWordSplit = ($probe !== '' && !preg_match('/[.!?,;:\x{2014}\x{2013}]$/u', $probe));
-        $isLast = ($i === count($chunks) - 1);
-        $verifyWords = [];
-        if ($isWordSplit || $isLast) {
-            // Content words >=5 chars (STT can't reliably place tiny words like
-            // "of"/"the", and proper-noun respellings would cause false retries).
-            preg_match_all('/[\p{L}\p{N}][\p{L}\p{N}\x{2019}\x{02BC}]{4,}/u', $probe, $wm);
-            $verifyWords = $wm[0];
+        preg_match_all('/[\p{L}\p{N}][\p{L}\p{N}\x{2019}\x{02BC}]{4,}/u', $probe, $wm);
+        $contentWords = $wm[0];                    // words >=5 chars (reliable for STT)
+        $endWord = '';
+        if (preg_match('/([\p{L}\p{N}][\p{L}\p{N}\x{2019}\x{02BC}]*)[.!?,;:\x{2014}\x{2013}]*$/u', $probe, $em)
+            && mb_strlen($em[1]) >= 3) {
+            $endWord = $em[1];
         }
-        $maxTries = $verifyWords ? 3 : 1;
+        $maxTries = ($contentWords || $endWord !== '') ? 3 : 1;
 
         $b = ''; $perr = '';
         for ($try = 0; $try < $maxTries; $try++) {
@@ -2571,8 +2596,7 @@ function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat,
                 sleep(1);
             }
             if ($b === '') break;
-            // Re-render if a content word was clipped/dropped anywhere in the chunk.
-            if (!$verifyWords || pvTranscriptHasWords($b, $verifyWords)) break;
+            if (pvVerifyChunk($b, $contentWords, $endWord)) break;   // re-render if a word didn't make it
         }
         if ($b === '') { $err = 'preview chunk ' . ($i + 1) . ' of ' . count($chunks) . ': ' . $perr; return ''; }
         // Raw chunk bytes — leading-silence trim happens once in the assembly
@@ -2597,14 +2621,15 @@ function pvChunkPauseMs(string $chunk): int {
     return 70;   // word-split / no punctuation — a minimal breath
 }
 
-// True if EVERY word in $words appears in the chunk's transcript — i.e. no word
-// (end OR mid-chunk) got clipped/dropped by the engine. A word matches a
-// transcript token exactly or via a shared >=4-char leading prefix (plural/tense
-// tolerance) — never arbitrary substring ("an" must not match "coven[an]t").
-// Trusts the audio (returns true) on any STT error so a transcription hiccup
-// never blocks a preview.
-function pvTranscriptHasWords(string $mp3, array $words): bool {
-    if ($mp3 === '' || !$words) return true;
+// Verify a chunk's audio against its text: every $contentWord must appear
+// somewhere in the transcript (catches mid-chunk drops), and $endWord (the
+// chunk's actual last word, even if short) must appear among the LAST few
+// transcript tokens (catches last-word clips). A word matches a token exactly
+// or via a shared >=4-char leading prefix (plural/tense) — never arbitrary
+// substring ("an" must not match "coven[an]t"). Trusts the audio (returns true)
+// on any STT error so a transcription hiccup never blocks a preview.
+function pvVerifyChunk(string $mp3, array $contentWords, string $endWord = ''): bool {
+    if ($mp3 === '' || (!$contentWords && $endWord === '')) return true;
     require_once __DIR__ . '/gpu-client.php';
     $f = tempnam(sys_get_temp_dir(), 'pvv') . '.mp3';
     if ($f === false) return true;
@@ -2618,18 +2643,19 @@ function pvTranscriptHasWords(string $mp3, array $words): bool {
     elseif (isset($r['body'])) { $j = json_decode((string)$r['body'], true); $t = is_array($j) ? (string)($j['text'] ?? '') : (string)$r['body']; }
     $norm = function ($s) { return trim((string)preg_replace('/[^\p{L}\p{N}]+/u', ' ', mb_strtolower($s))); };
     $tw = preg_split('/\s+/u', $norm($t));
-    foreach ($words as $word) {
-        $w = $norm($word);
-        if ($w === '') continue;
-        $found = false;
-        foreach ($tw as $x) {
+    $match = function ($w, $list) use ($norm) {
+        $w = $norm($w);
+        if ($w === '') return true;
+        foreach ($list as $x) {
             if ($x === '') continue;
-            if ($x === $w) { $found = true; break; }
+            if ($x === $w) return true;
             $minL = min(mb_strlen($x), mb_strlen($w));
-            if ($minL >= 4 && mb_substr($x, 0, $minL) === mb_substr($w, 0, $minL)) { $found = true; break; }
+            if ($minL >= 4 && mb_substr($x, 0, $minL) === mb_substr($w, 0, $minL)) return true;
         }
-        if (!$found) return false;   // a word is missing → the chunk dropped it
-    }
+        return false;
+    };
+    foreach ($contentWords as $word) { if (!$match($word, $tw)) return false; }   // mid-chunk drop
+    if ($endWord !== '' && !$match($endWord, array_slice($tw, -4))) return false;  // last-word clip
     return true;
 }
 

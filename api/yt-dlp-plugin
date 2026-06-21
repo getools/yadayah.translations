@@ -5,11 +5,25 @@
 # load external .py plugin files.
 #
 # Auto-installs pip + yt-dlp the first time it is called after a container
-# restart (takes ~10 s; subsequent calls are instant).
+# restart (takes ~10 s; subsequent calls are instant). This is a fallback —
+# the image bakes the yt_dlp module in (see Dockerfile), so normally this
+# branch never runs. It only fires if that bake is ever missing.
+#
+# The bootstrap is wrapped in an flock so that concurrent transcript jobs
+# hitting this wrapper right after a container restart can't run two pip
+# installs into the same site-packages at once. That race surfaced as
+# "ERROR: Could not install packages due to an OSError" and broke the
+# admin Feeds transcript-init feature for clients.
 if ! python3 -c 'import yt_dlp' 2>/dev/null; then
-    curl -s https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
-      && python3 /tmp/get-pip.py --break-system-packages -q \
-      && pip install yt-dlp --break-system-packages -q \
-      || exit 1
+    (
+      flock 9
+      # Re-check inside the lock: a sibling process may have just installed it.
+      if ! python3 -c 'import yt_dlp' 2>/dev/null; then
+          curl -s https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
+            && python3 /tmp/get-pip.py --break-system-packages -q --root-user-action=ignore \
+            && python3 -m pip install yt-dlp --break-system-packages -q --root-user-action=ignore \
+            || exit 1
+      fi
+    ) 9>/tmp/yt-dlp-bootstrap.lock || exit 1
 fi
 HOME=/var/www exec python3 -m yt_dlp --config-location /var/www/html/api/yt-dlp.conf "$@"

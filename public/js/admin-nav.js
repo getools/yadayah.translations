@@ -10,6 +10,15 @@ if (!document.getElementById('error-reporter-js')) {
     document.head.appendChild(s);
 }
 
+// Load shared full-message error/notice dialog (routes alert() through a modal
+// with a scrollable, copyable textarea so long errors are never truncated).
+if (!document.getElementById('admin-error-modal-js')) {
+    var em = document.createElement('script');
+    em.id = 'admin-error-modal-js';
+    em.src = '/js/admin-error-modal.js?v=1';
+    document.head.appendChild(em);
+}
+
 // Load dirty-tracking for Save buttons
 if (!document.getElementById('admin-dirty-js')) {
     var d = document.createElement('script');

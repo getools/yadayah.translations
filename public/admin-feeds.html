@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781791213">
+    <meta name="page-version" content="1782018774">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
@@ -91,7 +91,7 @@
 <div id="app" class="container" style="display:none">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=14"></script>
+<script src="/js/admin-nav.js?v=15"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -1691,8 +1691,8 @@ function openTranscript(itemKey) {
             + '</div>'
             + '<div style="flex:1;display:flex;flex-direction:column;gap:10px;min-width:0;">'
             + '<div id="t-table-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
-            + '<select id="t-view-select" autocomplete="off" onchange="onTranscriptViewChange(this.value)" title="Switch between the live editable transcript and any per-model _auto snapshot. Picking a model with no rows offers to generate it." style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;max-width:320px;background:#fff;"><option value="">Current (editable)</option></select>'
-            + '<button id="t-rerun-btn" onclick="rerunCurrentView()" title="Re-run the currently selected model. Writes to _auto only — live transcript is never touched." style="display:none;background:#27ae60;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Re-run</button>'
+            + '<select id="t-view-select" autocomplete="off" onchange="onTranscriptViewChange(this.value)" title="Switch between the live editable transcript and any per-model Baseline snapshot. Picking a model with no rows offers to generate it." style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;max-width:320px;background:#fff;"><option value="">Current (editable)</option></select>'
+            + '<button id="t-rerun-btn" onclick="rerunCurrentView()" title="Re-run the currently selected model. Writes to Baseline only — live transcript is never touched." style="display:none;background:#27ae60;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Re-run</button>'
             + '<button id="t-init-btn" onclick="openInitializeModal()" title="Pick one of the auto-transcribed model versions, apply the YadaYah correction pass, and copy it into the live transcript for editing" style="background:#31345A;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Initialize Transcript</button>'
             + '<button onclick="document.getElementById(\'t-upload-input\').click()" title="Upload an MP3 (or M4A/WAV/VTT/SRT) — used as the audio source for transcription instead of downloading from YouTube" style="background:#31345A;color:#fff;border:1px solid #31345A;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">↑ Upload MP3</button>'
             + '<input type="file" id="t-upload-input" accept=".mp3,.m4a,.opus,.wav,.ogg,.aac,.vtt,.srt" style="display:none;" onchange="uploadTranscriptSource(this)">'
@@ -1720,7 +1720,9 @@ function openTranscript(itemKey) {
             // handler can read its highlighted selection (if any) and
             // pre-fill the Find field.
             + '<button onmousedown="event.preventDefault()" onclick="openSearchReplaceFromButton()" style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;" title="Cross-transcript find/replace — pre-fills Find with any text you have highlighted in a transcript row">Search &amp; Replace</button>'
+            + '<button onclick="window.open(\'admin-transcript-compare.html?item_key=\' + _transcriptItemKey, \'_blank\')" style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;" title="Compare all Baseline (_auto) transcripts word-by-word; flag disagreements and save a majority-vote consensus-corrected version">Compare Baselines</button>'
             + '<button id="t-analyze-btn" onclick="openTranscriptAnalysis()" disabled style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;opacity:0.5;" title="No Whisper snapshot yet — re-run Transcribe Audio to capture one">Analyze Changes</button>'
+            + '<button onclick="openSmartCaptions()" style="background:#6c3fd6;color:#fff;border:1px solid #6c3fd6;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;" title="AI cleanup with the on-box LLM (learns from your edits) + resize lines into broadcast-sized caption cues">✨ Smart Captions</button>'
             + '</div>'
             + '<div id="t-upload-info" style="display:none;font-size:0.78rem;color:#666;background:#fffbe6;border:1px solid #ffe99e;border-radius:4px;padding:6px 10px;"></div>'
             + '<div id="t-find-bar" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;background:#f5f7fa;border:1px solid #e0e4ec;border-radius:4px;padding:6px 10px;">'
@@ -3157,8 +3159,17 @@ _genTxStartBgPoller();
 // selected provider) pair and surfaces per-row outcomes (skipped vs.
 // queued vs. failed).
 var TRANSCRIPT_GEN_MODELS = [
-    { code: 'gpu-whisper-large-v3',        label: 'Self-hosted faster-whisper large-v3 — segment timestamps (free, Puget GPU)' },
-    { code: 'gpu-whisper-large-v3-word',   label: 'Self-hosted faster-whisper large-v3 — word-level timestamps (free, Puget GPU)' },
+    { code: 'gpu-whisper-large-v3',            label: 'Self-hosted faster-whisper large-v3 — segment timestamps (free, Puget GPU)' },
+    { code: 'gpu-whisper-large-v3-word',       label: 'Self-hosted faster-whisper large-v3 — word-level timestamps (free, Puget GPU)' },
+    { code: 'gpu-whisper-large-v3-turbo',      label: 'Self-hosted faster-whisper large-v3-turbo — segment timestamps (free, fast, Puget GPU)' },
+    { code: 'gpu-whisper-large-v3-turbo-word', label: 'Self-hosted faster-whisper large-v3-turbo — word-level timestamps (free, fast, Puget GPU)' },
+    { code: 'gpu-parakeet-tdt-0.6b-v2',        label: 'Self-hosted NVIDIA Parakeet TDT 0.6B v2 — segment timestamps (free, English, top accuracy, Puget GPU)' },
+    { code: 'gpu-parakeet-tdt-0.6b-v2-word',   label: 'Self-hosted NVIDIA Parakeet TDT 0.6B v2 — word-level timestamps (free, English, top accuracy, Puget GPU)' },
+    { code: 'gpu-whisperx',                    label: 'Self-hosted WhisperX (large-v3 + forced alignment) — segment timestamps (free, tight word timing, Puget GPU)' },
+    { code: 'gpu-whisperx-word',               label: 'Self-hosted WhisperX (large-v3 + forced alignment) — word-level timestamps (free, tight word timing, Puget GPU)' },
+    { code: 'gpu-whisperx-diarize',            label: 'Self-hosted WhisperX + speaker diarization (large-v3 + pyannote) — segment timestamps with speaker labels (free, Puget GPU)' },
+    { code: 'gpu-canary-1b-flash',             label: 'Self-hosted NVIDIA Canary 1B Flash — high-accuracy text (correction source; coarse 30s segments, free, Puget GPU)' },
+    { code: 'gpu-qwen2-audio',                 label: 'Self-hosted Qwen2-Audio 7B — high-accuracy text (correction source; audio-LLM, coarse 30s segments, free, Puget GPU)' },
     { code: 'whisper-1-segment',           label: 'OpenAI whisper-1 — segment timestamps ($0.006/min)' },
     { code: 'whisper-1-word',              label: 'OpenAI whisper-1 — word-level timestamps ($0.006/min)' },
     { code: 'groq-whisper-large-v3-turbo', label: 'Groq whisper-large-v3-turbo (~$0.0004/min, fastest)' },
@@ -3193,7 +3204,7 @@ function openGenerateTranscriptsPopover() {
     }).join('');
 
     overlay.innerHTML =
-        '<div style="background:#fff;border-radius:10px;width:100%;max-width:640px;box-shadow:0 8px 32px rgba(0,0,0,0.25);">'
+        '<div style="background:#fff;border-radius:10px;width:100%;max-width:980px;box-shadow:0 8px 32px rgba(0,0,0,0.25);">'
       +   '<div style="display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:#f8f8f8;border-radius:10px 10px 0 0;border-bottom:1px solid #ddd;">'
       +     '<h3 style="margin:0;font-size:1rem;color:#31345A;">Generate Transcripts</h3>'
       +     '<button onclick="closeGenerateTranscriptsPopover()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;line-height:1;">&times;</button>'
@@ -3208,7 +3219,7 @@ function openGenerateTranscriptsPopover() {
       +     '</div>'
       +     '<label style="display:flex;align-items:center;gap:8px;margin-bottom:14px;font-size:0.85rem;color:#555;cursor:pointer;">'
       +       '<input type="checkbox" id="gen-tx-force" style="margin:0;">'
-      +       '<span>Re-generate even if an _auto transcript for this (item, system) pair already exists. Default: skip already-generated pairs.</span>'
+      +       '<span>Re-generate even if a Baseline transcript for this (item, system) pair already exists. Default: skip already-generated pairs.</span>'
       +     '</label>'
       +     '<div id="gen-tx-results" style="display:none;margin-bottom:14px;max-height:280px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:6px;padding:8px 12px;background:#fff;font-size:0.82rem;font-family:monospace;"></div>'
       +     '<div style="display:flex;gap:8px;justify-content:flex-end;">'
@@ -4451,11 +4462,11 @@ function showGenerateOfferPopover(code, label) {
     pop.style.left = rect.left + 'px';
     pop.style.top  = (rect.bottom + 6) + 'px';
     pop.innerHTML =
-        '<div style="margin-bottom:8px;">No <strong>_auto</strong> transcript yet for<br><strong>' + esc(label) + '</strong>.</div>'
-      + '<div style="margin-bottom:10px;color:#666;font-size:0.78rem;">Generation writes only to <code>yy_feed_item_transcript_auto</code>. Your live, editable transcript will not be touched.</div>'
+        '<div style="margin-bottom:8px;">No <strong>Baseline</strong> transcript yet for<br><strong>' + esc(label) + '</strong>.</div>'
+      + '<div style="margin-bottom:10px;color:#666;font-size:0.78rem;">Raw base transcript will be created. Editable transcript will not be touched.</div>'
       + '<div style="display:flex;gap:8px;justify-content:flex-end;">'
       +   '<button type="button" id="t-gen-cancel" style="background:#fff;border:1px solid #ccc;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:0.82rem;">Cancel</button>'
-      +   '<button type="button" id="t-gen-go" style="background:#27ae60;color:#fff;border:none;padding:5px 14px;border-radius:4px;cursor:pointer;font-weight:600;font-size:0.82rem;">Generate _auto</button>'
+      +   '<button type="button" id="t-gen-go" style="background:#27ae60;color:#fff;border:none;padding:5px 14px;border-radius:4px;cursor:pointer;font-weight:600;font-size:0.82rem;">Generate Baseline</button>'
       + '</div>';
     document.body.appendChild(pop);
 
@@ -4501,7 +4512,7 @@ function runAutoForModel(code) {
         _transcriptJobKey = d.job_key;
         document.getElementById('t-progress').style.display = '';
         var msgEl = document.getElementById('t-msg');
-        if (msgEl) msgEl.textContent = 'Generating _auto for ' + code + '…';
+        if (msgEl) msgEl.textContent = 'Generating Baseline for ' + code + '…';
         if (_transcriptPollTimer) clearInterval(_transcriptPollTimer);
         _transcriptPollTimer = setInterval(pollJob, 2000);
     });
@@ -4557,16 +4568,26 @@ function openInitializeModal() {
             var anyAvailable = false;
             var html = '';
             d.models.forEach(function(m) {
-                var has = !!m.last_run;
+                // `ready` (when present) governs selectability: a derived hybrid
+                // is ready as soon as its SOURCE feeds exist — Initialize
+                // assembles the join on demand, so it needn't be pre-built.
+                var has = (typeof m.ready !== 'undefined') ? !!m.ready : !!m.last_run;
                 if (has) anyAvailable = true;
-                var lastTxt = has
-                    ? new Date(m.last_run).toLocaleString()
-                    : '<span style="color:#999;">no rows — run this model first via the picker</span>';
+                var lastTxt;
+                if (m.last_run) {
+                    lastTxt = 'Last run: ' + new Date(m.last_run).toLocaleString();
+                } else if (m.derived && has) {
+                    lastTxt = '<span style="color:#27ae60;">ready — assembled from existing feeds on Initialize</span>';
+                } else if (m.derived) {
+                    lastTxt = '<span style="color:#999;">needs its source feeds (word-level Whisper + YouTube' + (m.code === 'whisper-1-word-join-seg' ? ' + segment-level Whisper' : '') + ') first</span>';
+                } else {
+                    lastTxt = '<span style="color:#999;">no rows — run this model first via the picker</span>';
+                }
                 html += '<label style="display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid #f0f0f0;cursor:' + (has ? 'pointer' : 'not-allowed') + ';opacity:' + (has ? '1' : '0.55') + ';">'
                     +   '<input type="radio" name="init-pick" value="' + esc(m.code) + '"' + (has ? '' : ' disabled') + ' onchange="document.getElementById(\'init-go-btn\').disabled=false;document.getElementById(\'init-go-btn\').style.opacity=\'1\';">'
                     +   '<div style="flex:1;">'
                     +     '<div style="font-weight:600;color:#31345A;">' + esc(m.label) + '</div>'
-                    +     '<div style="font-size:0.75rem;color:#666;">Last run: ' + lastTxt + '</div>'
+                    +     '<div style="font-size:0.75rem;color:#666;">' + lastTxt + '</div>'
                     +   '</div>'
                     + '</label>';
             });
@@ -4577,6 +4598,7 @@ function openInitializeModal() {
         });
 }
 function closeInitializeModal() {
+    if (typeof _initCleanup === 'function') _initCleanup();
     var ov = document.getElementById('init-overlay'); if (ov) ov.style.display = 'none';
 }
 // ── Speakers ──────────────────────────────────────────────────────────────
@@ -5249,6 +5271,14 @@ function renderBookmarksModalTable() {
     tbody.innerHTML = html;
 }
 
+// The Initialize promote is heavy on long episodes (60-230s — past Cloudflare's
+// ~100s proxy window), so admin-transcript-init.php now enqueues a job and runs
+// a detached worker. We watch admin-transcript-init-sse.php, which PUSHES the
+// result when the worker finishes (no polling), with a status-poll fallback if
+// the browser can't hold an EventSource.
+var _initES = null;
+function _initCleanup() { if (_initES) { try { _initES.close(); } catch (e) {} _initES = null; } }
+
 function doInitialize() {
     var picked = document.querySelector('#init-list input[name="init-pick"]:checked');
     if (!picked) return;
@@ -5258,22 +5288,76 @@ function doInitialize() {
     var statusEl = document.getElementById('init-status');
     var btn = document.getElementById('init-go-btn');
     btn.disabled = true; btn.style.opacity = '0.5';
-    statusEl.textContent = 'Initializing…';
+    statusEl.textContent = 'Initializing… (long episodes take a minute — this updates automatically when it finishes)';
+    _initCleanup();
     fetch(API + '/admin-transcript-init.php', {
         method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ item_key: _transcriptItemKey, model: model })
     }).then(function(r){ return safeJson(r); }).then(function(d) {
-        if (d.error) { statusEl.innerHTML = '<span style="color:#c00;">✗ ' + esc(d.error) + '</span>'; btn.disabled = false; btn.style.opacity = '1'; return; }
-        statusEl.innerHTML = '<span style="color:#27ae60;">✓ ' + esc(d.message || ('Wrote ' + d.rows_written + ' rows.')) + '</span>';
-        // After initializing, switch back to live (editable) view and refresh.
-        _transcriptView = '';
-        _transcriptReadonly = false;
-        var sel = document.getElementById('t-view-select');
-        if (sel) sel.value = '';
-        updateTranscriptRerunBtn();
-        if (_transcriptItemKey) loadTranscript();
-        setTimeout(closeInitializeModal, 1500);
+        if (!d || d.error) { _initFail((d && d.error) || 'request failed'); return; }
+        if (d.async && d.job_key) { _initWatch(d.job_key, model); return; }
+        _initSucceed(model, d.rows_written, d.message);   // backward-compat: sync response
+    }).catch(function(){ _initFail('network error'); });
+}
+
+// Watch a queued Initialize job over SSE; the server pushes 'done'/'failed'.
+function _initWatch(jobKey, model) {
+    _initCleanup();
+    var es;
+    try { es = new EventSource(API + '/admin-transcript-init-sse.php?job_key=' + jobKey, { withCredentials: true }); }
+    catch (e) { _initPoll(jobKey, model); return; }   // SSE unavailable → poll fallback
+    _initES = es;
+    es.addEventListener('done', function(ev) {
+        _initCleanup();
+        var rows = 0; try { rows = (JSON.parse(ev.data) || {}).rows_written || 0; } catch (e) {}
+        _initSucceed(model, rows, null);
     });
+    es.addEventListener('failed', function(ev) {
+        _initCleanup();
+        var err = 'Initialize failed'; try { err = (JSON.parse(ev.data) || {}).error || err; } catch (e) {}
+        _initFail(err);
+    });
+    // Native transport errors (no .data) just mean it's reconnecting between the
+    // short LISTEN windows — keep waiting. Only if the browser gives up entirely
+    // (CLOSED) do we fall back to polling.
+    es.addEventListener('error', function() {
+        if (es.readyState === 2) { _initCleanup(); _initPoll(jobKey, model); }
+    });
+}
+
+// Fallback when SSE can't be held: poll the status endpoint until terminal.
+function _initPoll(jobKey, model) {
+    var tries = 0;
+    var timer = setInterval(function() {
+        tries++;
+        fetch(API + '/admin-transcript-init.php?action=status&job_key=' + jobKey, { credentials:'include' })
+            .then(function(r){ return safeJson(r); }).then(function(d) {
+                if (!d) return;
+                if (d.job_status === 'done') { clearInterval(timer); _initSucceed(model, d.job_rows_written, null); }
+                else if (d.job_status === 'error') { clearInterval(timer); _initFail(d.job_error || 'Initialize failed'); }
+                else if (tries > 200) { clearInterval(timer); }   // ~10 min cap
+            }).catch(function(){});
+    }, 3000);
+}
+
+function _initSucceed(model, rows, message) {
+    var statusEl = document.getElementById('init-status');
+    if (statusEl) statusEl.innerHTML = '<span style="color:#27ae60;">✓ ' + esc(message || ('Initialized live transcript from ' + model + ' (' + (rows || 0) + ' rows).')) + '</span>';
+    // Switch back to the live (editable) view and refresh.
+    _transcriptView = '';
+    _transcriptReadonly = false;
+    var sel = document.getElementById('t-view-select');
+    if (sel) sel.value = '';
+    updateTranscriptRerunBtn();
+    if (_transcriptItemKey) loadTranscript();
+    setTimeout(closeInitializeModal, 1500);
+}
+
+function _initFail(err) {
+    var statusEl = document.getElementById('init-status');
+    if (statusEl) statusEl.innerHTML = '<span style="color:#c00;">✗ ' + esc(err) + '</span>';
+    var btn = document.getElementById('init-go-btn');
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
 }
 
 // Parse a Postgres timestamp-with-timezone string into millis. Postgres
@@ -5316,7 +5400,7 @@ function startSmoothTicker() {
         bar.style.width = pct.toFixed(1) + '%';
         // Re-render the ETA suffix so it counts down even between polls.
         if (msg && msg.textContent) {
-            msg.textContent = msg.textContent.replace(/ \(ETA [^)]+\)| — finishing up…/, '') + etaSuffix(_txServerPct);
+            msg.textContent = msg.textContent.replace(/ \(ETA [^)]+\)| — finishing up…/g, '') + etaSuffix(_txServerPct);
         }
     }, 500);
 }
@@ -5404,7 +5488,7 @@ function updateJobUI(job) {
                 _txJobStartMs = Date.now(); // restart elapsed counter for this stage
             }
         }
-        if (msg) msg.textContent = newMsg + etaSuffix(srvPct);
+        if (msg) msg.textContent = newMsg.replace(/ \(ETA [^)]+\)| — finishing up…/g, '') + etaSuffix(srvPct);
         // Server-driven bar for download (job_progress moves on its own as
         // yt-dlp prints percentages); smoothed bar for Whisper phase, where
         // job_progress is a single 70% jump that holds until rows return.
@@ -5432,6 +5516,46 @@ function updateJobUI(job) {
     }
 }
 
+var _txLastError = '';   // full text of the most recent failed job's error (Details popover)
+function showTranscriptErrorPopover() {
+    var ov = document.getElementById('t-err-overlay');
+    if (ov) ov.remove();
+    ov = document.createElement('div');
+    ov.id = 't-err-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1100;display:flex;align-items:center;justify-content:center;padding:40px 20px;';
+    ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
+    var box = document.createElement('div');
+    box.style.cssText = 'background:#fff;border-radius:10px;width:100%;max-width:820px;box-shadow:0 8px 32px rgba(0,0,0,0.25);display:flex;flex-direction:column;max-height:80vh;';
+    var head = document.createElement('div');
+    head.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#f8f8f8;border-radius:10px 10px 0 0;border-bottom:1px solid #ddd;';
+    var h = document.createElement('h3');
+    h.textContent = 'Transcription error detail';
+    h.style.cssText = 'margin:0;font-size:0.95rem;color:#31345A;';
+    var hx = document.createElement('button');
+    hx.innerHTML = '&times;';
+    hx.style.cssText = 'background:none;border:none;font-size:1.3rem;cursor:pointer;line-height:1;';
+    hx.addEventListener('click', function(){ ov.remove(); });
+    head.appendChild(h); head.appendChild(hx);
+    var ta = document.createElement('textarea');
+    ta.readOnly = true;
+    ta.value = _txLastError || '(no error detail captured)';
+    ta.style.cssText = 'margin:14px 16px 0;min-height:320px;font-family:monospace;font-size:0.8rem;white-space:pre;overflow:auto;border:1px solid #ccc;border-radius:4px;padding:10px;resize:vertical;';
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;padding:12px 16px;';
+    var copyBtn = document.createElement('button');
+    copyBtn.textContent = 'Copy';
+    copyBtn.style.cssText = 'padding:6px 14px;background:#f0f0f0;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:0.85rem;';
+    copyBtn.addEventListener('click', function(){ ta.select(); try { navigator.clipboard.writeText(ta.value); } catch (e) { try { document.execCommand('copy'); } catch (e2) {} } copyBtn.textContent = 'Copied'; setTimeout(function(){ copyBtn.textContent = 'Copy'; }, 1200); });
+    var closeBtn = document.createElement('button');
+    closeBtn.textContent = 'Close';
+    closeBtn.style.cssText = 'padding:6px 14px;background:#31345A;color:#fff;border:1px solid #31345A;border-radius:4px;cursor:pointer;font-size:0.85rem;';
+    closeBtn.addEventListener('click', function(){ ov.remove(); });
+    btnRow.appendChild(copyBtn); btnRow.appendChild(closeBtn);
+    box.appendChild(head); box.appendChild(ta); box.appendChild(btnRow);
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+}
+
 function renderLastResultNote(job) {
     var noteId = 't-last-result';
     var existing = document.getElementById(noteId);
@@ -5449,9 +5573,12 @@ function renderLastResultNote(job) {
     wrapper.id = noteId;
     var ago = when ? new Date(when).toLocaleString() : 'previously';
     var bg, color, label;
+    var fullErr = '';
     if (job.job_status === 'failed') {
         bg = '#fdecea'; color = '#7a1c0c';
-        label = 'Last attempt failed (' + ago + '): ' + esc((job.job_error || job.job_message || 'Unknown').substring(0, 200));
+        fullErr = String(job.job_error || job.job_message || 'Unknown');
+        _txLastError = fullErr;
+        label = 'Last attempt failed (' + ago + '): ' + esc(fullErr.substring(0, 200)) + (fullErr.length > 200 ? '\u2026' : '');
     } else if (job.job_status === 'complete') {
         bg = '#e8f5e9'; color = '#1b5e20';
         label = '&#10003; Last run complete (' + ago + ')' + (job.job_message ? ': ' + esc(job.job_message) : '');
@@ -5462,7 +5589,11 @@ function renderLastResultNote(job) {
         return;
     }
     wrapper.style.cssText = 'background:' + bg + ';color:' + color + ';padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:0.82rem;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;';
+    var detailsBtn = (job.job_status === 'failed' && fullErr.length > 200)
+        ? '<button onclick="showTranscriptErrorPopover()" style="background:rgba(0,0,0,0.07);border:1px solid currentColor;color:inherit;cursor:pointer;font-size:0.72rem;border-radius:4px;padding:2px 8px;white-space:nowrap;opacity:0.85;" title="View the full error detail">Details</button>'
+        : '';
     wrapper.innerHTML = '<div style="flex:1;">' + label + '</div>'
+        + detailsBtn
         + '<button onclick="try{sessionStorage.setItem(\'' + dismissKey.replace(/'/g, "\\'") + '\',\'1\');}catch(e){} this.parentNode.remove();" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.1rem;opacity:0.6;padding:0 4px;" title="Dismiss">&times;</button>';
     // Anchor the banner just after the progress block (which is the next
     // anchor that still exists after the layout was reorganized).
@@ -6205,6 +6336,322 @@ function openSearchReplaceFromButton() {
     } else {
         openSearchReplace();
     }
+}
+
+// ─── Smart Captions: AI cleanup (on-box LLM) + caption re-sizing ────────────
+// Backend: api/admin-transcript-captionfit.php. Every Apply is snapshotted
+// server-side (yy_transcript_snapshot) so it is reversible via "Revert…".
+var _scMode = null;        // 'ai' | 'fit' — what the Apply button will commit
+var _scAiResults = [];     // [{key,old,new,changed}]
+var _scFitCues = [];       // [{segment,text,chars,lines}]
+
+function scEndpoint() { return API + '/admin-transcript-captionfit.php'; }
+function scPost(body) {
+    return fetch(scEndpoint(), {
+        method: 'POST', credentials: 'include', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(Object.assign({item_key: _transcriptItemKey}, body))
+    }).then(function(r){ return safeJson(r); });
+}
+function scGet(action) {
+    return fetch(scEndpoint() + '?action=' + action + '&item_key=' + encodeURIComponent(_transcriptItemKey) + '&_=' + Date.now(),
+        {credentials: 'include', cache: 'no-store'}).then(function(r){ return safeJson(r); });
+}
+function scVal(id) { var e = document.getElementById(id); return e ? e.value : ''; }
+function scNum(id) { return parseFloat(scVal(id)); }
+function scSetStatus(t) { var e = document.getElementById('sc-status'); if (e) e.textContent = t || ''; }
+function scShowProgress(pct) {
+    var w = document.getElementById('sc-progress'); var b = document.getElementById('sc-bar');
+    if (w) w.style.display = 'block'; if (b) b.style.width = Math.max(0, Math.min(100, pct)) + '%';
+}
+function scHideProgress() { var w = document.getElementById('sc-progress'); if (w) w.style.display = 'none'; }
+function scEnableApply(on) {
+    var b = document.getElementById('sc-apply-btn');
+    if (b) { b.disabled = !on; b.style.opacity = on ? '1' : '0.5'; }
+}
+function scResetPreview() {
+    var p = document.getElementById('sc-preview'); if (p) p.innerHTML = '';
+    _scMode = null; _scAiResults = []; _scFitCues = [];
+    scEnableApply(false); scHideProgress(); scSetStatus('');
+}
+
+function openSmartCaptions() {
+    if (!_transcriptItemKey) { alert('Open a transcript first.'); return; }
+    if (typeof pauseTranscriptVideo === 'function') pauseTranscriptVideo();
+    var ov = document.getElementById('sc-overlay');
+    if (!ov) {
+        ov = document.createElement('div');
+        ov.id = 'sc-overlay';
+        ov.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10001;justify-content:center;align-items:flex-start;padding:20px;overflow-y:auto;';
+        var ipt = 'padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;width:64px;';
+        var btn = 'border:1px solid #ccc;background:#fff;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:0.85rem;';
+        ov.innerHTML = [
+            '<div style="background:#fff;border-radius:10px;padding:20px;max-width:1100px;width:100%;margin-top:20px;">',
+              '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">',
+                '<h3 style="margin:0;font-size:1.05rem;color:#31345A;">✨ Smart Captions — AI Cleanup &amp; Caption Sizing</h3>',
+                '<button id="sc-close" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">×</button>',
+              '</div>',
+              '<div style="font-size:0.8rem;color:#777;margin-bottom:12px;">Operates on the <b>Current (editable)</b> transcript. Each Apply saves a snapshot first — use <b>Revert…</b> to undo.</div>',
+              // Section A — AI cleanup
+              '<div style="border:1px solid #e6e1f5;background:#faf8ff;border-radius:8px;padding:12px;margin-bottom:12px;">',
+                '<div style="font-weight:600;color:#5a2fb8;margin-bottom:8px;">1 · AI Cleanup <span style="font-weight:400;color:#888;font-size:0.8rem;">— on-box LLM, primed with your saved corrections &amp; glossary (learns from your edits)</span></div>',
+                '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">',
+                  '<label style="font-size:0.8rem;color:#555;">Model</label>',
+                  '<select id="sc-model" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;max-width:340px;"></select>',
+                  '<button id="sc-ai-btn" style="' + btn + 'border-color:#6c3fd6;color:#6c3fd6;font-weight:600;">Preview AI cleanup</button>',
+                '</div>',
+              '</div>',
+              // Section B — caption sizing
+              '<div style="border:1px solid #e0e4ec;background:#f7f9fc;border-radius:8px;padding:12px;margin-bottom:12px;">',
+                '<div style="font-weight:600;color:#31345A;margin-bottom:8px;">2 · Caption Sizing <span style="font-weight:400;color:#888;font-size:0.8rem;">— re-flow into broadcast-sized cues</span></div>',
+                '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:0.8rem;color:#555;">',
+                  '<label>Timing source <select id="sc-source" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;"></select></label>',
+                  '<label>Max chars/line <input id="sc-maxchars" type="number" min="10" max="80" style="' + ipt + '"></label>',
+                  '<label>Max lines <input id="sc-maxlines" type="number" min="1" max="4" style="' + ipt + '"></label>',
+                  '<label>Max secs <input id="sc-maxsecs" type="number" min="1" max="15" step="0.5" style="' + ipt + '"></label>',
+                  '<label>Min secs <input id="sc-minsecs" type="number" min="0.3" max="5" step="0.1" style="' + ipt + '"></label>',
+                  '<label>Reading cps <input id="sc-cps" type="number" min="5" max="30" style="' + ipt + '"></label>',
+                  '<label style="display:flex;align-items:center;gap:4px;"><input id="sc-breakpunct" type="checkbox"> Break at punctuation</label>',
+                  '<label style="display:flex;align-items:center;gap:4px;"><input id="sc-dedup" type="checkbox"> Remove duplicate/overlap</label>',
+                  '<button id="sc-fit-btn" style="' + btn + 'border-color:#31345A;color:#31345A;font-weight:600;">Preview sizing</button>',
+                '</div>',
+              '</div>',
+              // Combined + revert
+              '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">',
+                '<button id="sc-pipeline-btn" style="' + btn + 'background:#6c3fd6;color:#fff;border-color:#6c3fd6;font-weight:600;">⚡ Clean + Resize (one pass)</button>',
+                '<button id="sc-revert-btn" style="' + btn + '">↶ Revert…</button>',
+                '<span id="sc-status" style="font-size:0.82rem;color:#666;margin-left:auto;"></span>',
+              '</div>',
+              '<div id="sc-progress" style="display:none;height:6px;background:#eee;border-radius:3px;overflow:hidden;margin-bottom:10px;"><div id="sc-bar" style="height:100%;width:0;background:#6c3fd6;transition:width .2s;"></div></div>',
+              '<div id="sc-preview" style="max-height:48vh;overflow-y:auto;border:1px solid #e0e0e0;border-radius:6px;font-size:0.82rem;"></div>',
+              '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">',
+                '<button id="sc-cancel-btn" style="' + btn + '">Close</button>',
+                '<button id="sc-apply-btn" disabled style="background:#27ae60;color:#fff;border:none;padding:8px 18px;border-radius:4px;cursor:pointer;font-weight:600;opacity:0.5;">Apply</button>',
+              '</div>',
+            '</div>'
+        ].join('');
+        document.body.appendChild(ov);
+        ov.onclick = function(e){ if (e.target === ov) closeSmartCaptions(); };
+        document.getElementById('sc-close').onclick = closeSmartCaptions;
+        document.getElementById('sc-cancel-btn').onclick = closeSmartCaptions;
+        document.getElementById('sc-ai-btn').onclick = scAiPreview;
+        document.getElementById('sc-fit-btn').onclick = scFitPreview;
+        document.getElementById('sc-pipeline-btn').onclick = scPipeline;
+        document.getElementById('sc-revert-btn').onclick = scRevert;
+        document.getElementById('sc-apply-btn').onclick = scApply;
+    }
+    ov.style.display = 'flex';
+    scResetPreview();
+    scLoadConfig();
+}
+function closeSmartCaptions() { var ov = document.getElementById('sc-overlay'); if (ov) ov.style.display = 'none'; }
+
+function scLoadConfig() {
+    scGet('config').then(function(d){
+        if (!d || d.error) { scSetStatus(d && d.error ? d.error : 'Failed to load config'); return; }
+        var m = document.getElementById('sc-model');
+        m.innerHTML = (d.llm_models || []).map(function(x){
+            return '<option value="' + esc(x.code) + '">' + esc(x.label) + '</option>'; }).join('');
+        var s = document.getElementById('sc-source');
+        s.innerHTML = (d.timing_sources || []).map(function(x){
+            return '<option value="' + esc(x.code) + '">' + esc(x.label || x.code) + '</option>'; }).join('');
+        var c = d.caption_defaults || {};
+        document.getElementById('sc-maxchars').value = c.max_chars != null ? c.max_chars : 42;
+        document.getElementById('sc-maxlines').value = c.max_lines != null ? c.max_lines : 2;
+        document.getElementById('sc-maxsecs').value  = c.max_secs  != null ? c.max_secs  : 7;
+        document.getElementById('sc-minsecs').value  = c.min_secs  != null ? c.min_secs  : 1.2;
+        document.getElementById('sc-cps').value      = c.cps       != null ? c.cps       : 17;
+        document.getElementById('sc-breakpunct').checked = c.break_punct !== false;
+        document.getElementById('sc-dedup').checked      = c.dedup !== false;
+        scSetStatus(d.live_rows + ' lines in the current transcript.');
+    });
+}
+
+function scGuardEditable() {
+    if (_transcriptReadonly) {
+        alert('Smart Captions edits the live transcript. Switch the view selector to "Current (editable)" first.');
+        return false;
+    }
+    return true;
+}
+
+function scAiPreview() {
+    if (!scGuardEditable()) return;
+    _scMode = 'ai'; _scAiResults = []; scEnableApply(false);
+    var model = scVal('sc-model');
+    scSetStatus('Contacting on-box LLM (first chunk can take ~45s to warm the model)…');
+    scShowProgress(2);
+    function next(offset) {
+        return scPost({action: 'ai_chunk', model: model, offset: offset, limit: 40}).then(function(d){
+            if (!d || d.error) { scHideProgress(); scSetStatus('Error: ' + (d ? d.error : 'no response')); return; }
+            _scAiResults = _scAiResults.concat(d.results || []);
+            var total = d.total || _scAiResults.length;
+            scShowProgress(total ? Math.round(_scAiResults.length / total * 100) : 100);
+            scSetStatus('Cleaned ' + _scAiResults.length + ' / ' + total + ' lines…');
+            scRenderAi();
+            if (d.next !== null && d.next !== undefined) return next(d.next);
+            scHideProgress();
+            var changed = _scAiResults.filter(function(r){ return r.changed; }).length;
+            scSetStatus(changed + ' line(s) changed. Tick the ones to keep and press Apply.');
+            scEnableApply(changed > 0);
+        });
+    }
+    next(0).catch(function(e){ scHideProgress(); scSetStatus('AI cleanup failed: ' + e.message); });
+}
+
+function scRenderAi() {
+    var changed = _scAiResults.filter(function(r){ return r.changed; });
+    var p = document.getElementById('sc-preview');
+    if (!changed.length) { p.innerHTML = '<div style="padding:10px;color:#888;">No corrections suggested yet…</div>'; return; }
+    var rows = changed.map(function(r){
+        return '<tr style="border-top:1px solid #eee;">'
+            + '<td style="padding:6px 8px;vertical-align:top;"><input type="checkbox" id="sc-ai-' + r.key + '" checked></td>'
+            + '<td style="padding:6px 8px;vertical-align:top;color:#b00;text-decoration:line-through;">' + esc(r.old) + '</td>'
+            + '<td style="padding:6px 8px;vertical-align:top;color:#0a0;">' + esc(r.new) + '</td>'
+            + '</tr>';
+    }).join('');
+    p.innerHTML = '<table style="width:100%;border-collapse:collapse;">'
+        + '<thead><tr style="background:#f5f5f5;font-size:0.75rem;color:#666;"><th style="padding:5px 8px;text-align:left;width:28px;">✓</th><th style="padding:5px 8px;text-align:left;">Original</th><th style="padding:5px 8px;text-align:left;">AI correction</th></tr></thead>'
+        + '<tbody>' + rows + '</tbody></table>';
+}
+
+function scFitPreview() {
+    if (!scGuardEditable()) return;
+    _scMode = 'fit';
+    scSetStatus('Computing caption sizing…');
+    var body = {action: 'fit_preview', source: scVal('sc-source'),
+        max_chars: scNum('sc-maxchars'), max_lines: scNum('sc-maxlines'),
+        max_secs: scNum('sc-maxsecs'), min_secs: scNum('sc-minsecs'), cps: scNum('sc-cps'),
+        break_punct: document.getElementById('sc-breakpunct').checked,
+        dedup: document.getElementById('sc-dedup').checked};
+    scPost(body).then(function(d){
+        if (!d || d.error) { scSetStatus('Error: ' + (d ? d.error : 'no response')); return; }
+        _scFitCues = d.cues || [];
+        scRenderFit();
+        scSetStatus(d.count + ' cues from ' + d.in_words + ' words (' + d.source + '). Review and Apply.');
+        scEnableApply(_scFitCues.length > 0);
+    });
+}
+
+function scRenderFit() {
+    var p = document.getElementById('sc-preview');
+    if (!_scFitCues.length) { p.innerHTML = '<div style="padding:10px;color:#888;">No cues.</div>'; return; }
+    p.innerHTML = _scFitCues.map(function(c){
+        var over = c.chars > (scNum('sc-maxchars') * scNum('sc-maxlines'));
+        return '<div style="padding:6px 10px;border-top:1px solid #eee;display:flex;gap:10px;">'
+            + '<span style="font-family:monospace;color:#888;flex:0 0 92px;">' + esc(c.segment) + '</span>'
+            + '<span style="flex:1;white-space:pre-wrap;">' + esc(c.text) + '</span>'
+            + '<span style="flex:0 0 64px;text-align:right;color:' + (over ? '#b00' : '#aaa') + ';font-size:0.75rem;">' + c.chars + 'c/' + c.lines + 'L</span>'
+            + '</div>';
+    }).join('');
+}
+
+function scApply() {
+    if (_scMode === 'ai') return scAiApply();
+    if (_scMode === 'fit') return scFitApply();
+}
+
+function scAiApply() {
+    var changes = [];
+    _scAiResults.forEach(function(r){
+        if (!r.changed) return;
+        var cb = document.getElementById('sc-ai-' + r.key);
+        if (cb && cb.checked) changes.push({key: r.key, text: r.new});
+    });
+    if (!changes.length) { alert('No corrections selected.'); return; }
+    scEnableApply(false);
+    scSetStatus('Applying ' + changes.length + ' correction(s)…');
+    scPost({action: 'ai_apply', changes: changes}).then(function(d){
+        if (!d || d.error) { alert(d ? d.error : 'apply failed'); scEnableApply(true); return; }
+        scSetStatus('Applied ' + d.updated + ' correction(s). Snapshot #' + d.snapshot_key + ' saved.');
+        loadTranscript();
+        scResetPreview();
+    });
+}
+
+function scFitApply() {
+    if (!_scFitCues.length) return;
+    if (!confirm('Replace the current ' + 'transcript lines with ' + _scFitCues.length + ' re-sized caption cues? A snapshot is saved first so you can revert.')) return;
+    scEnableApply(false);
+    scSetStatus('Applying caption sizing…');
+    var cues = _scFitCues.map(function(c){ return {segment: c.segment, text: c.text}; });
+    scPost({action: 'fit_apply', cues: cues}).then(function(d){
+        if (!d || d.error) { alert(d ? d.error : 'apply failed'); scEnableApply(true); return; }
+        scSetStatus('Applied ' + d.inserted + ' cues. Snapshot #' + d.snapshot_key + ' saved.');
+        loadTranscript();
+        scResetPreview();
+    });
+}
+
+function scPipeline() {
+    if (!scGuardEditable()) return;
+    if (!confirm('Clean + Resize runs AI cleanup, applies ALL its corrections, then re-sizes the captions — applying both in one pass. A snapshot is saved before each step so you can revert. Continue?')) return;
+    var model = scVal('sc-model');
+    scSetStatus('Step 1/2 · AI cleanup…'); scShowProgress(2);
+    var all = [];
+    function next(offset) {
+        return scPost({action: 'ai_chunk', model: model, offset: offset, limit: 40}).then(function(d){
+            if (!d || d.error) throw new Error(d ? d.error : 'no response');
+            all = all.concat(d.results || []);
+            scShowProgress(d.total ? Math.round(all.length / d.total * 100) : 100);
+            if (d.next !== null && d.next !== undefined) return next(d.next);
+        });
+    }
+    next(0).then(function(){
+        var changes = all.filter(function(r){ return r.changed; }).map(function(r){ return {key: r.key, text: r.new}; });
+        if (!changes.length) return null;
+        scSetStatus('Step 1/2 · applying ' + changes.length + ' corrections…');
+        return scPost({action: 'ai_apply', changes: changes});
+    }).then(function(){
+        scSetStatus('Step 2/2 · caption sizing…');
+        return scPost({action: 'fit_preview', source: 'current',
+            max_chars: scNum('sc-maxchars'), max_lines: scNum('sc-maxlines'),
+            max_secs: scNum('sc-maxsecs'), min_secs: scNum('sc-minsecs'), cps: scNum('sc-cps'),
+            break_punct: document.getElementById('sc-breakpunct').checked,
+            dedup: document.getElementById('sc-dedup').checked});
+    }).then(function(d){
+        if (!d || d.error) throw new Error(d ? d.error : 'fit failed');
+        var cues = (d.cues || []).map(function(c){ return {segment: c.segment, text: c.text}; });
+        if (!cues.length) throw new Error('no cues produced');
+        return scPost({action: 'fit_apply', cues: cues});
+    }).then(function(d){
+        if (!d || d.error) throw new Error(d ? d.error : 'apply failed');
+        scHideProgress();
+        scSetStatus('Done — AI cleanup + caption sizing applied. Use Revert… to undo.');
+        loadTranscript();
+        scResetPreview();
+    }).catch(function(e){ scHideProgress(); scSetStatus('Pipeline error: ' + e.message); });
+}
+
+function scRevert() {
+    scGet('snapshots').then(function(d){
+        if (!d || d.error) { scSetStatus(d ? d.error : 'failed'); return; }
+        var items = d.items || [];
+        var p = document.getElementById('sc-preview');
+        _scMode = null; scEnableApply(false);
+        if (!items.length) { p.innerHTML = '<div style="padding:10px;color:#888;">No snapshots yet — they are created automatically before each Apply.</div>'; return; }
+        p.innerHTML = '<div style="padding:8px 10px;font-weight:600;color:#31345A;">Restore a previous version:</div>'
+            + items.map(function(it){
+                return '<div style="padding:6px 10px;border-top:1px solid #eee;display:flex;gap:10px;align-items:center;">'
+                    + '<span style="font-family:monospace;color:#888;flex:0 0 120px;">' + esc(it.dtime) + '</span>'
+                    + '<span style="flex:1;">' + esc(it.snapshot_reason || '') + ' <span style="color:#aaa;">(' + it.snapshot_rows + ' rows)</span></span>'
+                    + '<button data-snap="' + it.snapshot_key + '" style="border:1px solid #ccc;background:#fff;padding:4px 12px;border-radius:4px;cursor:pointer;">Restore</button>'
+                    + '</div>';
+            }).join('');
+        Array.prototype.forEach.call(p.querySelectorAll('button[data-snap]'), function(b){
+            b.onclick = function(){ scDoRestore(parseInt(b.getAttribute('data-snap'), 10)); };
+        });
+    });
+}
+
+function scDoRestore(snapKey) {
+    if (!snapKey || !confirm('Restore this snapshot? The current version is snapshotted first, so this is also reversible.')) return;
+    scSetStatus('Restoring snapshot #' + snapKey + '…');
+    scPost({action: 'restore', snapshot_key: snapKey}).then(function(d){
+        if (!d || d.error) { alert(d ? d.error : 'restore failed'); return; }
+        scSetStatus('Restored ' + d.restored + ' rows from snapshot #' + snapKey + '.');
+        loadTranscript();
+        scResetPreview();
+    });
 }
 
 function openSearchReplace() {

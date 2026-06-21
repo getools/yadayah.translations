@@ -16,9 +16,21 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # `--remote-components ejs:github` in api/transcript-worker.php). Both must
 # live in the image — installing them inside the running container would be
 # wiped on `docker compose up -d` recreates.
+#
+# Two yt-dlp installs are needed:
+#   1. the compiled /usr/local/bin/yt-dlp binary (ships its own interpreter), and
+#   2. the pip `yt_dlp` Python module, which the api/yt-dlp-plugin wrapper runs
+#      via `python3 -m yt_dlp` so external .py plugins (bgutil POT provider) load.
+# The module MUST be baked here: if it is only installed at request time, a
+# container restart wipes it and the first concurrent transcript jobs race to
+# reinstall it, failing with "Could not install packages due to an OSError".
 RUN curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
         -o /usr/local/bin/yt-dlp \
     && chmod +x /usr/local/bin/yt-dlp \
+    && curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
+    && python3 /tmp/get-pip.py --break-system-packages -q --root-user-action=ignore \
+    && python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore yt-dlp \
+    && rm /tmp/get-pip.py \
     && curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
         -o /tmp/deno.zip \
     && unzip -q /tmp/deno.zip -d /usr/local/bin \

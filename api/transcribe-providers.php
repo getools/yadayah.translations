@@ -415,8 +415,10 @@ function providerNativeModel(string $code): string {
         case 'deepgram-nova-3':             return 'nova-3';
         case 'assemblyai-universal-2':      return 'universal';
         case 'elevenlabs-scribe':           return 'scribe_v1';
-        case 'gpu-whisper-large-v3':        return 'large-v3';
-        case 'gpu-whisper-large-v3-word':   return 'large-v3';
+        case 'gpu-whisper-large-v3':            return 'large-v3';
+        case 'gpu-whisper-large-v3-word':       return 'large-v3';
+        case 'gpu-whisper-large-v3-turbo':      return 'large-v3-turbo';
+        case 'gpu-whisper-large-v3-turbo-word': return 'large-v3-turbo';
         default:                            return $code;
     }
 }
@@ -431,18 +433,60 @@ function providerNativeModel(string $code): string {
  * back is not allowed. If the Puget box is down, the job fails with an
  * actionable error and the operator can re-pick a provider deliberately.
  *
- *   $model: 'gpu-whisper-large-v3'      → segment-level rows
- *           'gpu-whisper-large-v3-word' → word-level rows (sub-second)
- *   $err is set on failure; the return value is [] on hard error.
+ *   $model: 'gpu-whisper-large-v3'            → large-v3,       segment-level rows
+ *           'gpu-whisper-large-v3-word'       → large-v3,       word-level rows (sub-second)
+ *           'gpu-whisper-large-v3-turbo'      → large-v3-turbo, segment-level rows
+ *           'gpu-whisper-large-v3-turbo-word' → large-v3-turbo, word-level rows
+ *           'gpu-parakeet-tdt-0.6b-v2[-word]' → Parakeet (NeMo) engine
+ *   Any code ending in '-word' yields word-level rows. The gateway path + the
+ *   engine model id are resolved from the code via gpuEngineRoute(); every
+ *   self-hosted engine speaks the same JSON contract, so the parsing below is
+ *   shared. $err is set on failure; the return value is [] on hard error.
  */
+function gpuEngineRoute(string $code): array {
+    // Map a gpu-* code → [gateway path, engine model id ('' = engine default),
+    // word-level flag]. New self-hosted engines are added here + in the catalog
+    // (admin-transcript-models.php) — nothing else on the web side changes.
+    $word = str_ends_with($code, '-word');
+    $base = $word ? substr($code, 0, -strlen('-word')) : $code;
+    switch ($base) {
+        case 'gpu-whisper-large-v3':
+            return ['path' => '/stt/transcribe',          'model' => 'large-v3',       'word' => $word];
+        case 'gpu-whisper-large-v3-turbo':
+            return ['path' => '/stt/transcribe',          'model' => 'large-v3-turbo', 'word' => $word];
+        case 'gpu-parakeet-tdt-0.6b-v2':
+            return ['path' => '/stt-parakeet/transcribe', 'model' => '',               'word' => $word];
+        case 'gpu-whisperx':
+            return ['path' => '/stt-whisperx/transcribe', 'model' => '',               'word' => $word];
+        case 'gpu-whisperx-diarize':
+            // Speaker-labelled segments ("[SPEAKER_xx] …"); segment-level only.
+            return ['path' => '/stt-whisperx/transcribe', 'model' => '', 'word' => false, 'diarize' => true];
+        case 'gpu-canary-1b-flash':
+            // High-accuracy text source (no native timestamps; coarse chunked
+            // segments). Used standalone or as a correction reference.
+            return ['path' => '/stt-canary/transcribe', 'model' => '', 'word' => false];
+        case 'gpu-qwen2-audio':
+            // Audio-LLM text source (different model family → diverse second
+            // reference for word correction). Coarse chunked segments.
+            return ['path' => '/stt-qwen/transcribe', 'model' => '', 'word' => false];
+        default:
+            // Unknown gpu code → faster-whisper engine with the bare model name.
+            return ['path' => '/stt/transcribe', 'model' => providerNativeModel($code), 'word' => $word];
+    }
+}
+
 function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offsetSecs = 0, ?string &$err = null, string $model = 'gpu-whisper-large-v3', ?PDO $db = null, int $jobKey = 0): array {
     require_once __DIR__ . '/gpu-client.php';
-    $wantWord = ($model === 'gpu-whisper-large-v3-word');
+    $route    = gpuEngineRoute($model);
+    $wantWord = $route['word'];
     $r = gpuTranscribe($audioPath, [
         'language'        => '',                   // auto-detect
         'word_timestamps' => $wantWord ? true : false,
         'vad_filter'      => true,
         'initial_prompt'  => $prompt,
+        'model'           => $route['model'],      // engine picks this model ('' = default)
+        'path'            => $route['path'],       // engine's gateway route
+        'diarize'         => $route['diarize'] ?? false, // whisperx speaker labels
         'timeout'         => 1800,                 // long audio fine on Blackwell
     ]);
     if (!$r['ok']) {
@@ -472,7 +516,16 @@ function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offse
         foreach ($data['segments'] ?? [] as $seg) {
             $text = trim((string)($seg['text'] ?? ''));
             if ($text === '') continue;
-            $rows[] = ['segment' => secsToInterval((int)$seg['start'] + $offsetSecs), 'text' => $text];
+            // whisperx diarization returns a per-segment 'speaker' AND prefixes
+            // the text with "[SPEAKER_xx] ". Store the speaker in its own column
+            // (like deepgram/assemblyai) and strip the inline tag so the text
+            // stays clean for captions/word-join/search. No-op for plain whisper
+            // engines (no speaker field, no tag).
+            $speaker = (isset($seg['speaker']) && $seg['speaker'] !== '') ? (string)$seg['speaker'] : null;
+            $text = preg_replace('/^\[SPEAKER_[0-9]+\]\s*/', '', $text);
+            $row = ['segment' => secsToInterval((int)$seg['start'] + $offsetSecs), 'text' => trim($text)];
+            if ($speaker !== null) $row['speaker'] = $speaker;
+            $rows[] = $row;
         }
     }
     if (!$rows && !empty($data['text'])) {

@@ -127,6 +127,14 @@ function applyOneReplacement(string $text, array $rep): string {
         // User-authored regex — slash-escape only the delimiter.
         $pattern = '/' . str_replace('/', '\\/', $wrong) . '/u' . $flags;
     } else {
+        // Fast path: a literal `wrong` can only match if it appears as a
+        // substring of $text (true for word-boundary too — \bwrong\b still
+        // requires the literal present). Skip the (costly /u) regex entirely
+        // when it cannot possibly match. Behaviour-preserving.
+        $present = empty($rep['case_sensitive'])
+            ? (stripos($text, $wrong) !== false)
+            : (strpos($text, $wrong) !== false);
+        if (!$present) return $text;
         $escaped = preg_quote($wrong, '/');
         $pattern = !empty($rep['word_boundary'])
             ? '/\b' . $escaped . '\b/u' . $flags
@@ -134,6 +142,26 @@ function applyOneReplacement(string $text, array $rep): string {
     }
     $result = @preg_replace($pattern, $right, $text);
     return $result === null ? $text : $result;
+}
+
+/**
+ * Insert many rows with a handful of multi-row INSERT statements instead of
+ * one network round-trip per row. On long transcripts (3k+ rows) the per-row
+ * form dominated wall-clock and helped push the Initialize endpoint past
+ * Cloudflare's 100s edge timeout.
+ *
+ * $baseSql is everything up to and including 'VALUES'. $rowPh is the per-row
+ * tuple (e.g. '(?, ?::interval, ?, ?, ?)'). $rows is a list of flat parameter
+ * arrays, one per row, each matching the placeholder count in $rowPh.
+ */
+function batchInsertRows(PDO $db, string $baseSql, string $rowPh, array $rows, int $perChunk = 500): void {
+    if (!$rows) return;
+    foreach (array_chunk($rows, $perChunk) as $chunk) {
+        $placeholders = implode(',', array_fill(0, count($chunk), $rowPh));
+        $flat = [];
+        foreach ($chunk as $r) { foreach ($r as $v) $flat[] = $v; }
+        $db->prepare($baseSql . ' ' . $placeholders)->execute($flat);
+    }
 }
 
 /**
@@ -274,12 +302,46 @@ function applyCorrectionsAcrossRows(PDO $db, array $rows): array {
 }
 
 /**
- * Build the 'whisper-1-word-join' _auto rows for a feed_item from existing
- * whisper-1-word + reference-model (default 'youtube') _auto data. The
- * resulting rows are per-phrase (not per-word) but keep whisper-1-word's
- * word-precise start timestamps, with punctuation copied off the matched
- * reference tokens. Returns the number of rows written (0 if the inputs
- * are missing).
+ * Resolve which already-generated _auto feeds drive the hybrid join for an
+ * item. The hybrid needs WORD-LEVEL whisper timestamps for its base and can
+ * optionally use SEGMENT-LEVEL whisper as a disambiguation aid. Either the
+ * OpenAI (whisper-1-*) or the self-hosted GPU (gpu-whisper-large-v3*) engine
+ * qualifies, so an operator who transcribed with the free GPU models gets the
+ * same hybrids as one who used OpenAI.
+ *
+ * Returns ['word' => ?code, 'seg' => ?code, 'has_yt' => bool]; word/seg are
+ * the chosen model codes (null when that family has no rows for the item).
+ * Segment preference follows the chosen word engine so both readings come
+ * from the same pass of the audio where possible.
+ */
+function resolveJoinSources(PDO $db, int $itemKey): array {
+    $st = $db->prepare("SELECT DISTINCT feed_item_transcript_auto_model AS m
+                          FROM yy_feed_item_transcript_auto WHERE feed_item_key = ?");
+    $st->execute([$itemKey]);
+    $have = [];
+    foreach ($st->fetchAll() as $r) $have[$r['m']] = true;
+
+    $word = null;
+    foreach (['whisper-1-word', 'gpu-whisper-large-v3-word'] as $w) {
+        if (isset($have[$w])) { $word = $w; break; }
+    }
+    $segPref = ($word === 'gpu-whisper-large-v3-word')
+        ? ['gpu-whisper-large-v3', 'whisper-1-segment']
+        : ['whisper-1-segment', 'gpu-whisper-large-v3'];
+    $seg = null;
+    foreach ($segPref as $s) { if (isset($have[$s])) { $seg = $s; break; } }
+
+    return ['word' => $word, 'seg' => $seg, 'has_yt' => isset($have['youtube'])];
+}
+
+/**
+ * Build the 'whisper-1-word-join' _auto rows for a feed_item from an existing
+ * word-level whisper feed + reference-model (default 'youtube') _auto data.
+ * The word feed is whichever word-level whisper exists for the item (OpenAI
+ * or GPU — see resolveJoinSources). The resulting rows are per-phrase (not
+ * per-word) but keep the word feed's word-precise start timestamps, with
+ * punctuation copied off the matched reference tokens. Returns the number of
+ * rows written (0 if the inputs are missing).
  *
  * Algorithm: for each reference row at time T with next ref at T', restrict
  * the candidate whisper words to those with start times in
@@ -288,8 +350,25 @@ function applyCorrectionsAcrossRows(PDO $db, array $rows): array {
  * is [first matched whisper idx .. last matched]. The first match gets the
  * row's segment timestamp. See build_whisper_word_join.php for the CLI
  * wrapper.
+ *
+ * Optional third feed — $useSeg: when true, the output is written under the
+ * model name 'whisper-1-word-join-seg' and an extra disambiguation pass kicks
+ * in during anchoring, using whichever SEGMENT-level whisper feed exists.
+ * Whisper-segment is the SAME audio read by whisper as the word feed, so its
+ * word order agrees closely, but its rows are far too long to use as block
+ * boundaries (that stays youtube's job). It is used ONLY as an alignment aid:
+ *   (a) its row time-spans bucket each youtube line to the whisper segment
+ *       the audio actually belongs to, so a repeated common token in youtube
+ *       cannot pull the anchor into a neighbouring segment; and
+ *   (b) a bigram check (first token + the next one) confirms the anchor, so a
+ *       lone repeated "the"/"to" will not anchor unless the following word
+ *       also lines up.
+ * When $useSeg is false the function behaves exactly as the proven two-feed
+ * (word + youtube) join. When $useSeg is true but no segment feed exists, it
+ * returns 0 (the seg variant cannot be built without its source) so the
+ * caller can report the missing feed.
  */
-function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube'): int {
+function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube', bool $useSeg = false): int {
     $loadAuto = function (string $model) use ($db, $itemKey): array {
         $st = $db->prepare("
             SELECT feed_item_transcript_segment::text AS segment,
@@ -302,9 +381,22 @@ function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube
         $st->execute([$itemKey, $model]);
         return $st->fetchAll();
     };
-    $wordRows = $loadAuto('whisper-1-word');
+    // Resolve which engine's feeds back this join (OpenAI or GPU whisper).
+    $src = resolveJoinSources($db, $itemKey);
+    $wordModel = $src['word'];
+    if (!$wordModel) return 0;
+    $wordRows = $loadAuto($wordModel);
     $refRows  = $loadAuto($refModel);
     if (!$wordRows || !$refRows) return 0;
+
+    // Optional whisper-segment disambiguation source (see docblock). Loaded
+    // only for the 3-feed variant; a request with no segment feed available
+    // is a hard miss so the caller can surface "generate segment-level
+    // whisper first" rather than silently producing the 2-feed join under
+    // the seg model name.
+    $segModel = $useSeg ? $src['seg'] : null;
+    $segRows  = $segModel ? $loadAuto($segModel) : [];
+    if ($useSeg && !$segRows) return 0;
 
     $norm = function (string $s): string {
         return trim(mb_strtolower($s), " \t\n\r.,;:!?\"()[]<>");
@@ -321,11 +413,31 @@ function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube
 
     $times = array_map(function ($r) use ($secs) { return $secs((string)$r['segment']); }, $wordRows);
     $nw = count($wordRows);
+    // Precompute the normalized form of every whisper word ONCE. The anchor
+    // scan below compares each whisper word against many ref tokens across
+    // many ref rows, so re-running mb_strtolower per comparison dominated the
+    // runtime on long episodes (~58s for a 78-min item). Same values, computed
+    // once → ~10x faster.
+    $wordNorm = array_map(function ($r) use ($norm) { return $norm((string)$r['text']); }, $wordRows);
     $firstIdxAtOrAfter = function (float $T, int $startIdx) use ($times, $nw): int {
         for ($i = $startIdx; $i < $nw; $i++) if ($times[$i] >= $T) return $i;
         return $nw;
     };
     $nr = count($refRows);
+
+    // whisper-segment span lookup (3-feed variant only). Returns the
+    // [thisStart, nextStart) time window of the whisper segment covering T,
+    // used to bucket each youtube line to the right segment of audio.
+    $segStarts = array_map(function ($r) use ($secs) { return $secs((string)$r['segment']); }, $segRows);
+    $nsg = count($segStarts);
+    $segSpanFor = function (float $T) use ($segStarts, $nsg): array {
+        if ($nsg === 0) return [-INF, INF];
+        $idx = 0;
+        for ($i = 0; $i < $nsg; $i++) { if ($segStarts[$i] <= $T) $idx = $i; else break; }
+        $start = $segStarts[$idx];
+        $end   = ($idx + 1 < $nsg) ? $segStarts[$idx + 1] : INF;
+        return [$start, $end];
+    };
 
     // ── Phase 1: pick an anchor whisper index for each reference row ──
     // The anchor is the FIRST whisper word that "belongs" to that ref row.
@@ -361,16 +473,43 @@ function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube
             $maxIdx = min($nw, $minIdx + 1);
         }
 
-        // Try content match first — first ref token that matches any
-        // whisper word in [minIdx, maxIdx).
         $anchor = -1;
-        foreach ($refTokens as $tok) {
-            $rn = $norm($tok);
-            if ($rn === '') continue;
-            for ($i = $minIdx; $i < $maxIdx; $i++) {
-                if ($norm((string)$wordRows[$i]['text']) === $rn) {
-                    $anchor = $i;
-                    break 2;
+
+        // Seg-assisted disambiguation (3-feed variant). Prefer a position
+        // where the ref row's first token AND the next token both line up
+        // with consecutive whisper words, and whose whisper time sits inside
+        // the segment span covering T. This resolves repeated common tokens
+        // that the single-token match below would anchor on the wrong
+        // instance. Falls through to the base match if no bigram confirms.
+        if ($segRows) {
+            list($segS, $segE) = $segSpanFor($T);
+            $SEG_PAD = 0.75; // tolerate small word/segment timestamp drift at the seams
+            for ($ti = 0; $ti + 1 < count($refTokens) && $anchor < 0; $ti++) {
+                $rn  = $norm($refTokens[$ti]);
+                $rn2 = $norm($refTokens[$ti + 1]);
+                if ($rn === '' || $rn2 === '') continue;
+                for ($i = $minIdx; $i < $maxIdx; $i++) {
+                    if ($times[$i] < $segS - $SEG_PAD || $times[$i] > $segE + $SEG_PAD) continue;
+                    if ($wordNorm[$i] !== $rn) continue;
+                    if ($i + 1 < $nw && $wordNorm[$i + 1] === $rn2) {
+                        $anchor = $i;
+                        break 2;
+                    }
+                }
+            }
+        }
+
+        // Base content match — first ref token that matches any whisper word
+        // in [minIdx, maxIdx). Also the seg variant's fallback.
+        if ($anchor < 0) {
+            foreach ($refTokens as $tok) {
+                $rn = $norm($tok);
+                if ($rn === '') continue;
+                for ($i = $minIdx; $i < $maxIdx; $i++) {
+                    if ($wordNorm[$i] === $rn) {
+                        $anchor = $i;
+                        break 2;
+                    }
                 }
             }
         }
@@ -389,12 +528,20 @@ function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube
     }
 
     // ── Phase 2: each ref row's group = [anchor_i .. next_anchor - 1] ──
-    // Stitch whisper words together. When the claimed range is too sparse
-    // (fewer whisper words than the ref row would suggest), fall back to
-    // the ref row's own text — that handles spans where whisper missed the
-    // audio entirely and the row would otherwise contain a stray word or
-    // two. Fallback rows use the REF row's segment timestamp, so they sit
-    // where the captions say the speech happened.
+    // Stitch whisper words together. The anchors strictly increase and each
+    // group ends one word before the next anchor, so the groups partition the
+    // whisper word stream contiguously: every whisper word lands in exactly
+    // one row and no word is emitted twice.
+    //
+    // The OUTPUT TEXT IS ALWAYS WHISPER WORDS — never the reference (youtube)
+    // text. Youtube's only jobs are (a) to mark the row boundaries / timing
+    // and (b) to lend trailing punctuation to the matched whisper words below.
+    // It must NOT contribute the words themselves. An earlier "sparse window"
+    // fallback substituted the youtube row's own text whenever its window held
+    // few whisper words; on real items that fired on ~76% of rows, so the join
+    // became mostly duplicated youtube captions interleaved with the whisper
+    // rows. That fallback is deliberately gone: a thin window simply yields the
+    // one or two whisper words it actually contains.
     $result = [];
     for ($yi = 0; $yi < $nr; $yi++) {
         $start = $anchors[$yi];
@@ -407,28 +554,15 @@ function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube
 
         preg_match_all('/\S+/u', (string)$refRows[$yi]['text'], $mm);
         $refTokens = $mm[0] ?? [];
-        $refTokenCount = count($refTokens);
-        $wordCount = $end - $start + 1;
-        $sparse = $wordCount < max(2, (int)ceil($refTokenCount * 0.4));
 
-        if ($sparse) {
-            // Sparse-window fallback: substitute the ref row's text and
-            // tag with the ref row's own timestamp.
-            $result[] = [
-                'segment' => $refRows[$yi]['segment'],
-                'text'    => (string)$refRows[$yi]['text'],
-            ];
-            continue;
-        }
-
-        // Normal path: greedy match for punctuation transfer.
+        // Greedy match for punctuation transfer (text still comes from whisper).
         $alignMap = [];
         $localWs = $start;
         foreach ($refTokens as $rti => $tok) {
             $rn = $norm($tok);
             if ($rn === '') continue;
             for ($i = $localWs; $i <= $end; $i++) {
-                if ($norm((string)$wordRows[$i]['text']) === $rn) {
+                if ($wordNorm[$i] === $rn) {
                     $alignMap[$i] = $rti;
                     $localWs = $i + 1;
                     break;
@@ -450,21 +584,22 @@ function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube
         ];
     }
 
-    $model = 'whisper-1-word-join';
+    $model = $useSeg ? 'whisper-1-word-join-seg' : 'whisper-1-word-join';
     $db->beginTransaction();
     try {
         $db->prepare("DELETE FROM yy_feed_item_transcript_auto      WHERE feed_item_key = ? AND feed_item_transcript_auto_model      = ?")->execute([$itemKey, $model]);
         $db->prepare("DELETE FROM yy_feed_item_transcript_autoclean WHERE feed_item_key = ? AND feed_item_transcript_autoclean_model = ?")->execute([$itemKey, $model]);
-        $ins = $db->prepare("
-            INSERT INTO yy_feed_item_transcript_auto
-                (feed_item_key, feed_item_transcript_segment, feed_item_transcript_text, feed_item_transcript_sort, feed_item_transcript_auto_model)
-            VALUES (?, ?::interval, ?, ?, ?)
-        ");
+        // _auto has no triggers, so batched multi-row inserts are a pure
+        // round-trip win (per-row inserts were a big chunk of the 524 budget).
+        $insRows = [];
         $sort = 0;
         foreach ($result as $r) {
-            $ins->execute([$itemKey, $r['segment'], mb_substr($r['text'], 0, 2000), $sort, $model]);
+            $insRows[] = [$itemKey, $r['segment'], mb_substr($r['text'], 0, 2000), $sort, $model];
             $sort++;
         }
+        batchInsertRows($db,
+            "INSERT INTO yy_feed_item_transcript_auto (feed_item_key, feed_item_transcript_segment, feed_item_transcript_text, feed_item_transcript_sort, feed_item_transcript_auto_model) VALUES",
+            '(?, ?::interval, ?, ?, ?)', $insRows);
         $db->commit();
     } catch (Throwable $e) {
         if ($db->inTransaction()) $db->rollBack();

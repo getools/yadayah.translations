@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="page-version" content="1782020350">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcript Comparison — Yada Admin</title>
+<!-- Admin page: intentionally loads NO public navigation/search bundles. -->
+<style>
+  :root { --bg:#f4f5fa; --card:#fff; --line:#e1e3ee; --ink:#23264a; --muted:#6b6f8c;
+          --accent:#31345A; --hot:#fff3cd; --hotline:#e0b400; --pick:#d6f5dd; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--accent); color:#fff; padding:12px 18px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:1.05rem; margin:0; font-weight:700; }
+  header input { padding:6px 9px; border:none; border-radius:5px; font-size:0.9rem; width:130px; }
+  button { font:inherit; cursor:pointer; border:none; border-radius:5px; padding:7px 14px; font-weight:600; }
+  .btn-go { background:#27ae60; color:#fff; } .btn-go:hover { background:#219150; }
+  .btn-sec { background:#fff; color:var(--accent); border:1px solid var(--line); }
+  .wrap { max-width:1100px; margin:18px auto; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:9px; padding:16px; margin-bottom:16px; }
+  .pickrow { display:flex; gap:24px; flex-wrap:wrap; }
+  .pickcol h3 { margin:0 0 8px; font-size:0.85rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .eng { display:block; margin:3px 0; font-size:0.9rem; }
+  .eng small { color:var(--muted); }
+  .stats { font-size:0.9rem; color:var(--muted); margin:4px 0 12px; }
+  .stats b { color:var(--ink); }
+  .legend { font-size:0.8rem; color:var(--muted); margin-bottom:10px; }
+  .legend .sw { display:inline-block; padding:1px 6px; border-radius:3px; margin:0 4px; }
+  .transcript { line-height:2.1; font-size:1.02rem; }
+  .w { padding:1px 2px; border-radius:3px; }
+  .w.diff { background:var(--hot); border-bottom:2px solid var(--hotline); cursor:pointer; }
+  .w.resolved { background:var(--pick); border-bottom:2px solid #4caf50; cursor:pointer; }
+  .ts { color:#aab; font-size:0.72rem; vertical-align:super; margin-right:1px; user-select:none; }
+  .pop { position:absolute; z-index:50; background:#fff; border:1px solid var(--line); border-radius:8px;
+         box-shadow:0 8px 28px rgba(20,22,50,.22); padding:8px; min-width:240px; }
+  .pop .opt { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:6px 8px; border-radius:5px; cursor:pointer; }
+  .pop .opt:hover { background:#f0f2fb; }
+  .pop .opt .who { font-size:0.72rem; color:var(--muted); }
+  .pop .opt .val { font-weight:600; }
+  .pop .opt.cons { background:#eef7ff; }
+  .pop .custom { display:flex; gap:6px; margin-top:6px; }
+  .pop .custom input { flex:1; padding:5px 7px; border:1px solid var(--line); border-radius:5px; font:inherit; }
+  .muted { color:var(--muted); }
+  #msg { font-size:0.9rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🆚 Transcript Comparison</h1>
+  <label>Item key <input id="itemKey" type="number" placeholder="e.g. 2970469"></label>
+  <button class="btn-go" onclick="loadEngines()">Load engines</button>
+  <span id="msg"></span>
+</header>
+
+<div class="wrap">
+  <div class="card" id="pickCard" style="display:none;">
+    <div class="pickrow">
+      <div class="pickcol">
+        <h3>Primary (keeps timestamps)</h3>
+        <div id="primaryList"></div>
+      </div>
+      <div class="pickcol">
+        <h3>Compare against</h3>
+        <div id="refList"></div>
+      </div>
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn-go" onclick="runCompare()">Compare</button>
+      <label style="margin-left:14px;font-size:0.82rem;color:var(--ink);cursor:pointer;"><input type="checkbox" id="ignoreGaps" onchange="onIgnoreGapsChange()"> ignore ∅-only mismatches <span class="muted">(a baseline is blank while the rest agree)</span></label>
+      <button class="btn-sec" onclick="saveCorrected()" id="saveBtn" style="display:none;">Save as “consensus-corrected”</button>
+    </div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <div class="stats" id="stats"></div>
+    <div class="legend">
+      <span class="sw" style="background:var(--hot);border-bottom:2px solid var(--hotline);">engines disagree (click to choose)</span>
+      <span class="sw" style="background:var(--pick);border-bottom:2px solid #4caf50;">resolved</span>
+      <button class="btn-sec" style="padding:3px 8px;font-size:0.8rem;" onclick="applyAllConsensus()">Accept all consensus</button>
+    </div>
+    <div class="transcript" id="transcript"></div>
+  </div>
+</div>
+
+<script>
+const API = '/api/admin-transcript-compare.php';
+let ENGINES = [], DATA = null;
+const overrides = {};   // i -> chosen word
+let IGNORE_GAPS = false;   // on: a slot whose only mismatch is a blank (∅) ref counts as agreeing
+function normTokJs(w){ return String(w==null?'':w).toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''); }
+// Effective agreement: server 'agree', OR (ignore-gaps on AND every NON-blank ref matches the primary).
+function effAgree(s){
+  if (s.agree) return true;
+  if (!IGNORE_GAPS || !DATA) return false;
+  const pn = normTokJs(s.primary);
+  for (const r of DATA.refs){
+    const rv = s.refs[r.code];
+    if (rv==null || rv==='' || rv==='∅') continue;   // blank baseline — ignore
+    if (normTokJs(rv) !== pn) return false;              // a real (non-blank) disagreement remains
+  }
+  return true;
+}
+function onIgnoreGapsChange(){
+  IGNORE_GAPS = !!document.getElementById('ignoreGaps').checked;
+  try { localStorage.setItem('tcmp_ignore_gaps', IGNORE_GAPS ? '1' : '0'); } catch(e){}
+  if (DATA) renderTranscript();
+}
+
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function setMsg(m, err){ const e=document.getElementById('msg'); e.textContent=m||''; e.style.color = err?'#ffd2d2':'#cfe'; }
+
+function qsItem(){
+  const u = new URL(location.href); const k = u.searchParams.get('item_key');
+  if (k) document.getElementById('itemKey').value = k;
+}
+
+async function loadEngines(){
+  const item = +document.getElementById('itemKey').value;
+  if (!item){ setMsg('Enter an item key', true); return; }
+  setMsg('Loading…');
+  try {
+    const r = await fetch(`${API}?action=engines&item_key=${item}`, {credentials:'include'});
+    const d = await r.json();
+    if (d.error){ setMsg(d.error, true); return; }
+    ENGINES = d.engines || [];
+    if (!ENGINES.length){ setMsg('No transcripts for this item yet', true); return; }
+    renderPickers(d.suggested_primary);
+    setMsg(`${ENGINES.length} engine(s) available`);
+  } catch(e){ setMsg('Load failed: '+e.message, true); }
+}
+
+function renderPickers(suggested){
+  const pl = document.getElementById('primaryList'), rl = document.getElementById('refList');
+  pl.innerHTML=''; rl.innerHTML='';
+  // Restore the operator's last-used picks (global, like other admin areas).
+  // Only codes that actually exist for THIS item are re-applied.
+  let savedPrimary = null, savedRefs = [];
+  try { savedPrimary = localStorage.getItem('tcmp_primary'); savedRefs = JSON.parse(localStorage.getItem('tcmp_refs')||'[]'); } catch(e){}
+  if (!Array.isArray(savedRefs)) savedRefs = [];
+  const codes = ENGINES.map(e=>e.code);
+  const primarySel = (savedPrimary && codes.includes(savedPrimary)) ? savedPrimary : suggested;
+  ENGINES.forEach(e => {
+    const tag = e.word_level ? '<small> · word-level</small>' : '<small> · '+e.rows+' rows</small>';
+    const pr = document.createElement('label'); pr.className='eng';
+    pr.innerHTML = `<input type="radio" name="primary" value="${esc(e.code)}" onchange="savePicks()" ${e.code===primarySel?'checked':''}> ${esc(e.label)}${tag}`;
+    pl.appendChild(pr);
+    const rf = document.createElement('label'); rf.className='eng';
+    rf.innerHTML = `<input type="checkbox" name="ref" value="${esc(e.code)}" onchange="savePicks()" ${savedRefs.includes(e.code)?'checked':''}> ${esc(e.label)}${tag}`;
+    rl.appendChild(rf);
+  });
+  document.getElementById('pickCard').style.display='';
+}
+// Persist the current primary + ref selection so the next visit restores them.
+function savePicks(){
+  try {
+    const primary = (document.querySelector('input[name=primary]:checked')||{}).value || '';
+    const refs = Array.from(document.querySelectorAll('input[name=ref]:checked')).map(c=>c.value);
+    localStorage.setItem('tcmp_primary', primary);
+    localStorage.setItem('tcmp_refs', JSON.stringify(refs));
+  } catch(e){}
+}
+
+async function runCompare(){
+  const item = +document.getElementById('itemKey').value;
+  const primary = (document.querySelector('input[name=primary]:checked')||{}).value;
+  const refs = Array.from(document.querySelectorAll('input[name=ref]:checked')).map(c=>c.value).filter(c=>c!==primary);
+  if (!primary){ setMsg('Pick a primary', true); return; }
+  if (!refs.length){ setMsg('Pick at least one engine to compare', true); return; }
+  setMsg('Comparing…');
+  for (const k in overrides) delete overrides[k];
+  try {
+    const r = await fetch(`${API}?action=compare&item_key=${item}&primary=${encodeURIComponent(primary)}&refs=${encodeURIComponent(refs.join(','))}`, {credentials:'include'});
+    const d = await r.json();
+    if (d.error){ setMsg(d.error, true); return; }
+    DATA = d;
+    renderTranscript();
+    setMsg('');
+  } catch(e){ setMsg('Compare failed: '+e.message, true); }
+}
+
+function fmtTime(t){ const m=Math.floor(t/60), s=Math.floor(t%60); return m+':'+String(s).padStart(2,'0'); }
+
+function renderTranscript(){
+  document.getElementById('resultCard').style.display='';
+  document.getElementById('saveBtn').style.display='';
+  const refCodes = DATA.refs.map(r=>r.code);
+  let disCount = 0, hiddenGaps = 0;
+  DATA.slots.forEach(s => { if (!effAgree(s)) disCount++; else if (!s.agree) hiddenGaps++; });
+  document.getElementById('stats').innerHTML =
+    `Primary <b>${esc(DATA.primary.label)}</b> · comparing ${DATA.refs.length} engine(s) · ` +
+    `<b>${DATA.stats.words}</b> words · <b>${disCount}</b> disagreements` +
+    (IGNORE_GAPS && hiddenGaps ? ` <span class="muted">(${hiddenGaps} ∅-only hidden)</span>` : '');
+  const host = document.getElementById('transcript');
+  host.innerHTML='';
+  let lastTs = -999;
+  DATA.slots.forEach(s => {
+    if (s.t - lastTs >= 15){ const ts=document.createElement('span'); ts.className='ts'; ts.textContent=fmtTime(s.t); host.appendChild(ts); lastTs=s.t; }
+    const ag = effAgree(s);
+    const sp = document.createElement('span');
+    sp.className = 'w' + (ag ? '' : (overrides[s.i]!=null ? ' resolved' : ' diff'));
+    sp.dataset.i = s.i;
+    sp.textContent = (overrides[s.i]!=null ? overrides[s.i] : s.primary) + ' ';
+    if (!ag) sp.onclick = ev => openChooser(ev, s, refCodes);
+    host.appendChild(sp);
+  });
+}
+
+let openPop=null;
+function closePop(){ if(openPop){ openPop.remove(); openPop=null; document.removeEventListener('click', outside, true);} }
+function outside(ev){ if(openPop && !openPop.contains(ev.target) && !ev.target.classList.contains('w')) closePop(); }
+
+function openChooser(ev, s, refCodes){
+  ev.stopPropagation(); closePop();
+  const pop = document.createElement('div'); pop.className='pop';
+  const opts = [];
+  opts.push({who:'Primary ('+DATA.primary.label+')', val:s.primary});
+  DATA.refs.forEach(r => opts.push({who:r.label, val:(s.refs[r.code]||'∅')}));
+  // de-dup identical values but keep provenance
+  let html = `<div class="opt cons" data-v="${esc(s.consensus)}"><span class="who">consensus</span><span class="val">${esc(s.consensus)}</span></div>`;
+  opts.forEach(o => { html += `<div class="opt" data-v="${esc(o.val==='∅'?'':o.val)}"><span class="who">${esc(o.who)}</span><span class="val">${esc(o.val)}</span></div>`; });
+  html += `<div class="custom"><input placeholder="type a correction…"><button class="btn-go" style="padding:5px 10px;">Set</button></div>`;
+  pop.innerHTML = html;
+  document.body.appendChild(pop);
+  const rect = ev.target.getBoundingClientRect();
+  pop.style.left = Math.min(rect.left+window.scrollX, window.scrollX+window.innerWidth-pop.offsetWidth-12)+'px';
+  pop.style.top = (rect.bottom+window.scrollY+4)+'px';
+  pop.querySelectorAll('.opt').forEach(o => o.onclick = () => { choose(s.i, o.dataset.v); });
+  const ci = pop.querySelector('.custom input'), cb = pop.querySelector('.custom button');
+  cb.onclick = () => { if(ci.value.trim()!=='') choose(s.i, ci.value.trim()); };
+  ci.onkeydown = e => { if(e.key==='Enter' && ci.value.trim()!=='') choose(s.i, ci.value.trim()); };
+  openPop = pop;
+  setTimeout(()=>document.addEventListener('click', outside, true),0);
+}
+
+function choose(i, val){
+  const slot = DATA.slots.find(s=>s.i===i);
+  // choosing the primary's own value clears the override (back to default)
+  if (val === slot.primary) delete overrides[i]; else overrides[i] = val;
+  closePop();
+  // surgical update of just this span
+  const sp = document.querySelector(`.w[data-i="${i}"]`);
+  if (sp){
+    sp.textContent = (overrides[i]!=null ? overrides[i] : slot.primary)+' ';
+    sp.className = 'w' + (overrides[i]!=null ? ' resolved' : ' diff');
+  }
+}
+
+function applyAllConsensus(){
+  DATA.slots.forEach(s => { if(!effAgree(s) && s.consensus!==s.primary) overrides[s.i]=s.consensus; });
+  renderTranscript();
+}
+
+async function saveCorrected(){
+  if (!DATA){ return; }
+  const item = +document.getElementById('itemKey').value;
+  setMsg('Saving…');
+  try {
+    const r = await fetch(API, {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'apply', item_key:item, primary:DATA.primary.code, overrides})});
+    const d = await r.json();
+    if (d.error){ setMsg(d.error, true); return; }
+    setMsg(`Saved ${d.written} words as “${d.model}” — pick it in the transcript view to Initialize.`);
+  } catch(e){ setMsg('Save failed: '+e.message, true); }
+}
+
+try { if (localStorage.getItem('tcmp_ignore_gaps')==='1'){ IGNORE_GAPS=true; var _ig=document.getElementById('ignoreGaps'); if(_ig) _ig.checked=true; } } catch(e){}
+qsItem();
+if (document.getElementById('itemKey').value) loadEngines();
+</script>
+</body>
+</html>

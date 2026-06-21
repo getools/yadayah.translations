@@ -149,11 +149,101 @@ function gpuTranscribe(string $audioPath, array $opts = []): array {
         'vad_filter'      => !empty($opts['vad_filter']      ?? true) ? 'true' : 'false',
     ];
     if (!empty($opts['initial_prompt'])) $form['initial_prompt'] = $opts['initial_prompt'];
+    // Optional engine-specific model id (e.g. 'large-v3-turbo'). Only sent when
+    // set so the default-model behaviour is unchanged for existing callers.
+    if (!empty($opts['model'])) $form['model'] = $opts['model'];
+    // Optional speaker diarization (whisperx engine). Only sent when requested.
+    if (!empty($opts['diarize'])) $form['diarize'] = 'true';
 
-    return gpuRequest('POST', '/stt/transcribe', [
+    // Gateway path. Defaults to the faster-whisper engine at /stt/transcribe;
+    // other self-hosted engines (parakeet, whisperx, canary, …) live behind
+    // their own gateway routes (/stt-parakeet/transcribe, …) but speak the
+    // same {language,duration,text,segments[]} JSON contract.
+    $path = $opts['path'] ?? '/stt/transcribe';
+
+    return gpuRequest('POST', $path, [
         'multipart' => $form,
         'timeout'   => (int)($opts['timeout'] ?? 900),
     ]);
+}
+
+// ── LLM (Ollama on the box) ───────────────────────────────────────────────
+// The box runs Ollama (host :11434) with multilingual instruct models already
+// pulled (qwen2.5:72b is strong on Hebrew). It is NOT behind the bearer-token
+// gateway (which only routes /tts and /stt), so these helpers talk to Ollama
+// directly over the private tailnet. Override the URL with GPU_OLLAMA_URL.
+// Like every other helper here: never throws, returns a normalized array.
+
+function gpuOllamaUrl(): string {
+    $u = readEnv('GPU_OLLAMA_URL');
+    return $u !== '' ? rtrim($u, '/') : 'http://100.88.122.21:11434';
+}
+
+/** Small dedicated curl for Ollama (no gateway, no bearer token). */
+function gpuOllamaRequest(string $method, string $path, ?array $json, int $timeout): array {
+    $url = gpuOllamaUrl() . '/' . ltrim($path, '/');
+    $ch = curl_init($url);
+    $co = [
+        CURLOPT_CUSTOMREQUEST  => strtoupper($method),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_FOLLOWLOCATION => false,
+    ];
+    if ($json !== null) {
+        $co[CURLOPT_HTTPHEADER] = ['Content-Type: application/json'];
+        $co[CURLOPT_POSTFIELDS] = json_encode($json, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+    curl_setopt_array($ch, $co);
+    $body   = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $cerr   = curl_error($ch);
+    curl_close($ch);
+    if (($body === false || $status === 0) && $cerr) {
+        return ['ok' => false, 'status' => $status, 'error' => 'connection failed: ' . $cerr];
+    }
+    if ($status >= 400) {
+        $decoded = json_decode((string)$body, true);
+        $detail  = is_array($decoded) ? ($decoded['error'] ?? '') : trim((string)$body);
+        return ['ok' => false, 'status' => $status, 'error' => 'HTTP ' . $status . ($detail ? ' — ' . $detail : '')];
+    }
+    $data = json_decode((string)$body, true);
+    if (!is_array($data)) return ['ok' => false, 'status' => $status, 'error' => 'non-JSON response', 'body' => $body];
+    return ['ok' => true, 'status' => $status, 'data' => $data];
+}
+
+/** Liveness + model list for the box's LLM. */
+function gpuLlmHealth(int $timeout = 15): array {
+    $r = gpuOllamaRequest('GET', '/api/tags', null, $timeout);
+    if (!$r['ok']) return $r;
+    $models = array_map(fn($m) => $m['name'] ?? '', $r['data']['models'] ?? []);
+    return ['ok' => true, 'status' => 200, 'models' => array_values(array_filter($models))];
+}
+
+/**
+ * Chat-complete against an Ollama model. Non-streaming.
+ *   $messages: [['role'=>'system','content'=>…], ['role'=>'user','content'=>…], …]
+ *   $opts:  temperature (float, default 0.1), num_ctx (int), keep_alive (str,
+ *           default '15m' to keep the model warm across a multi-chunk run),
+ *           json (bool — force a JSON-object response), timeout (s, default 300).
+ * On success returns ['ok'=>true,'content'=>string,'data'=>{full ollama resp}].
+ */
+function gpuLlmChat(string $model, array $messages, array $opts = []): array {
+    $payload = [
+        'model'      => $model,
+        'messages'   => $messages,
+        'stream'     => false,
+        'keep_alive' => $opts['keep_alive'] ?? '15m',
+        'options'    => array_merge(
+            ['temperature' => (float)($opts['temperature'] ?? 0.1)],
+            isset($opts['num_ctx']) ? ['num_ctx' => (int)$opts['num_ctx']] : []
+        ),
+    ];
+    if (!empty($opts['json'])) $payload['format'] = 'json';
+    $r = gpuOllamaRequest('POST', '/api/chat', $payload, (int)($opts['timeout'] ?? 300));
+    if (!$r['ok']) return $r;
+    $content = $r['data']['message']['content'] ?? '';
+    return ['ok' => true, 'status' => 200, 'content' => (string)$content, 'data' => $r['data']];
 }
 
 /**
@@ -281,7 +371,10 @@ function gpuRegisterBuiltinVoice(array $params, int $timeout = 30): array {
         }
     }
     $form = [];
-    foreach (['provider','code','label','description','language','gender','voice_id','lang_code'] as $k) {
+    foreach (['provider','code','label','description','language','gender','voice_id','lang_code',
+              // Qwen3-Omni voice-character knobs (engine clamps + ignores per other providers)
+              'instruct','talker_temperature','talker_top_p','talker_top_k',
+              'talker_repetition_penalty','talker_do_sample'] as $k) {
         if (isset($params[$k])) $form[$k] = (string)$params[$k];
     }
     return gpuRequest('POST', '/tts/voices/builtin', ['multipart' => $form, 'timeout' => $timeout]);
@@ -385,7 +478,13 @@ if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
     $show = function ($r) { fwrite(STDOUT, json_encode($r, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n"); };
     if (!gpuConfigured()) { $show(['ok'=>false,'error'=>'set GPU_BASE_URL and GPU_API_TOKEN in .env first']); exit(2); }
     if ($cmd === 'health') {
-        $show(['tts' => gpuHealth('tts'), 'stt' => gpuHealth('stt')]);
+        $show(['tts' => gpuHealth('tts'), 'stt' => gpuHealth('stt'), 'llm' => gpuLlmHealth()]);
+    } elseif ($cmd === 'llm') {
+        $model = $argv[3] ?? 'qwen2.5:72b';
+        $show(gpuLlmChat($model, [
+            ['role' => 'system', 'content' => 'Fix transcription errors only. Output the corrected line verbatim with no commentary.'],
+            ['role' => 'user',   'content' => $argv[2] ?? 'the concept of teshuva and the mitzvah of tzedaka'],
+        ], ['timeout' => 120]));
     } elseif ($cmd === 'stt') {
         $show(gpuTranscribe($argv[2] ?? '', ['language' => $argv[3] ?? '']));
     } elseif ($cmd === 'tts') {

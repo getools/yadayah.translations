@@ -108,12 +108,18 @@ $providerKey = ttsResolveProviderKey($cfg, $resolvedCat);
 $transport   = ttsProviderTransport($cfg, $providerKey);
 $usesSsml    = ($transport === 'azure-ssml');
 
-// Operator-tunable chunk sizing (Voices page Min / Target / Max fields).
-// Clamped + ordered server-side (chunkTextForPreview re-clamps too).
-// Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
-$chunkMax    = max(40, min(600, (int)($data['chunk_max'] ?? 250)));
-$chunkTarget = max(20, min($chunkMax, (int)($data['chunk_target'] ?? 150)));
-$chunkMin    = max(10, min($chunkTarget, (int)($data['chunk_min'] ?? 80)));
+// Chunk sizing for self-hosted engines comes from the voice's PROVIDER (single
+// source of truth: yy_provider.provider_settings->chunk via ttsProviderChunkSizes
+// — each engine has its own optimal batch length). These are only used on the
+// gpu-tailnet paths; cloud providers (Azure/ElevenLabs/Inworld) synth the whole
+// utterance in one call and don't chunk. NO hardcoded size defaults here.
+$chunkMin = $chunkTarget = $chunkMax = 0;
+if ($transport === 'gpu-tailnet') {
+    $pcs         = ttsProviderChunkSizes($cfg, $providerKey);
+    $chunkMin    = $pcs['min'];
+    $chunkTarget = $pcs['target'];
+    $chunkMax    = $pcs['max'];
+}
 
 // Length guard, per engine. Self-hosted engines render long selections in the
 // background (chunked whole-paragraph, see below), so there's no hard preview
@@ -130,8 +136,15 @@ if (mb_strlen($text) > $previewCharMax) {
 // background worker that renders the FULL selection whole-paragraph (no chunk
 // cap) and stash an async job; the browser polls admin-tts-preview-status.php.
 // Cloud providers synth fast and keep the synchronous path at any length.
+//
+// A heavy engine flagged always-async (Qwen3-Omni: a ~78 GB cold load into VRAM
+// can blow past Cloudflare's 100 s even for a one-word preview, → 524) ALWAYS
+// goes async, regardless of length. The async worker is immune to the CDN clock,
+// auto-plays when done, and reports chunk progress — so the admin clicks Play
+// exactly as with any other voice; it just renders via polling.
 const PREVIEW_SYNC_CHAR_MAX = 1100;
-if ($transport === 'gpu-tailnet' && mb_strlen($text) > PREVIEW_SYNC_CHAR_MAX) {
+$forceAsync = ($transport === 'gpu-tailnet') && ttsProviderAlwaysAsync($cfg, $providerKey);
+if ($transport === 'gpu-tailnet' && ($forceAsync || mb_strlen($text) > PREVIEW_SYNC_CHAR_MAX)) {
     $jobKey = ttsEnqueuePreviewJob($db, [
         'tts_key'    => $ttsKey,
         'user_key'   => (int)$user['user_key'],
