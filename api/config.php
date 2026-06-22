@@ -25,6 +25,34 @@ if (!$IS_CLI) {
         http_response_code(204);
         exit;
     }
+
+    // Banned users may stay authenticated but lose EVERY logged-in privilege:
+    // we neutralize their session here so the rest of this request treats them
+    // as an anonymous visitor. From this one place, requireAuth() returns 401,
+    // community-session.php returns user:null (so the UI shows the logged-out
+    // state), and every endpoint that gates on $_SESSION['user_key'] denies
+    // them. Timed bans auto-lift via user_banned_until. Fail open on any DB
+    // error so a database hiccup never logs the whole site out.
+    if (!empty($_SESSION['user_key'])) {
+        try {
+            $banStmt = getDb()->prepare(
+                "SELECT 1 FROM yy_user
+                  WHERE user_key = ?
+                    AND user_banned_flag = TRUE
+                    AND (user_banned_until IS NULL OR user_banned_until > NOW())"
+            );
+            $banStmt->execute([(int)$_SESSION['user_key']]);
+            if ($banStmt->fetchColumn()) {
+                unset(
+                    $_SESSION['user_key'], $_SESSION['user_code'],
+                    $_SESSION['user_name'], $_SESSION['user_name_display'],
+                    $_SESSION['user_avatar'], $_SESSION['oauth_provider']
+                );
+            }
+        } catch (Throwable $e) {
+            // Database unavailable — do not lock anyone out.
+        }
+    }
 }
 
 if (!function_exists('readEnv')) {
