@@ -97,29 +97,44 @@ register_shutdown_function(function () use ($jobKey) {
     try {
         $MAX_CONCURRENT_WORKERS = 1;
         $db = getDb();  // fresh connection — the worker's own may be in a bad state at shutdown
-        // Exclude self from the in-flight count. If the worker exits via a
-        // fatal error before flipping its own status to completed/failed,
-        // its row still reads 'running' and would deadlock the cap=1 queue.
-        $stmt = $db->prepare("SELECT COUNT(*) FROM yy_feed_item_transcript_job
-                               WHERE job_status = 'running'
-                                 AND feed_item_transcript_job_key != ?");
-        $stmt->execute([(int)$jobKey]);
-        $running = (int)$stmt->fetchColumn();
-        if ($running >= $MAX_CONCURRENT_WORKERS) return;
-        $nextKey = $db->query("SELECT feed_item_transcript_job_key
-                                  FROM yy_feed_item_transcript_job
-                                 WHERE job_status = 'pending'
-                                 ORDER BY feed_item_transcript_job_key
-                                 LIMIT 1")->fetchColumn();
-        if (!$nextKey) return;
-        $workerScript = __DIR__ . '/transcript-worker.php';
-        $logFile = sys_get_temp_dir() . '/transcript_' . $nextKey . '.log';
-        $pid = spawnCappedWorker($workerScript, [(string)$nextKey], $logFile, [
-            'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
-        ]);
-        if ($pid > 0) {
-            $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
-               ->execute([$pid, $nextKey]);
+        // Serialize the dequeue against admin-transcript-models.php's run/poke
+        // dispatch (same advisory-lock key) and claim the slot synchronously,
+        // so a worker exit and a concurrent run-POST can never both spawn a
+        // second worker. Enforces the strict "one STT worker at a time" rule.
+        $WORKER_SLOT_LOCK = 742001;
+        $db->query('SELECT pg_advisory_lock(' . $WORKER_SLOT_LOCK . ')');
+        try {
+            // Exclude self from the in-flight count. If the worker exits via a
+            // fatal error before flipping its own status to completed/failed,
+            // its row still reads 'running' and would deadlock the cap=1 queue.
+            $stmt = $db->prepare("SELECT COUNT(*) FROM yy_feed_item_transcript_job
+                                   WHERE job_status = 'running'
+                                     AND feed_item_transcript_job_key != ?");
+            $stmt->execute([(int)$jobKey]);
+            $running = (int)$stmt->fetchColumn();
+            if ($running >= $MAX_CONCURRENT_WORKERS) return;
+            $nextKey = $db->query("SELECT feed_item_transcript_job_key
+                                      FROM yy_feed_item_transcript_job
+                                     WHERE job_status = 'pending'
+                                     ORDER BY feed_item_transcript_job_key
+                                     LIMIT 1")->fetchColumn();
+            if (!$nextKey) return;
+            $workerScript = __DIR__ . '/transcript-worker.php';
+            $logFile = sys_get_temp_dir() . '/transcript_' . $nextKey . '.log';
+            $pid = spawnCappedWorker($workerScript, [(string)$nextKey], $logFile, [
+                'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
+            ]);
+            if ($pid > 0) {
+                // Claim the slot now (status='running'), not just the pid, so a
+                // run-POST waiting on the lock counts it before the new worker
+                // reaches its own 'running' update ~1s into boot.
+                $db->prepare("UPDATE yy_feed_item_transcript_job
+                                 SET job_status = 'running', job_worker_pid = ?
+                               WHERE feed_item_transcript_job_key = ? AND job_status = 'pending'")
+                   ->execute([$pid, $nextKey]);
+            }
+        } finally {
+            $db->query('SELECT pg_advisory_unlock(' . $WORKER_SLOT_LOCK . ')');
         }
     } catch (Throwable $e) {
         error_log("transcript-worker shutdown dequeue failed: " . $e->getMessage());

@@ -32,6 +32,48 @@ if ($method === 'POST') {
     $action = $data['action'] ?? $action;
 }
 
+// ── TTS build concurrency gate ───────────────────────────────────────────
+// TTS builds are serialized (cap 1) on the GPU box. A burst of build POSTs
+// (e.g. start_all, or two quick clicks) would otherwise each read running=0
+// — a freshly-spawned worker doesn't flip its row to 'running' until ~1s into
+// boot — and all spawn at once, overloading the TTS engine. The advisory lock
+// makes count-and-claim atomic. We "claim" by setting tts_audio_worker_pid;
+// a pending row WITH a pid already counts as an occupied slot (the worker's
+// queue-promoter only ever picks pending rows whose pid IS NULL). Separate
+// lock key from STT (742001) — TTS and STT may use the GPU concurrently.
+const TTS_BUILD_LOCK = 742002;
+
+// Builds occupying a worker slot: actively running, OR pending but already
+// assigned a worker pid (spawned and booting — not yet flipped to 'running').
+function ttsActiveBuilds(PDO $db): int {
+    return (int)$db->query("SELECT COUNT(*) FROM yy_tts_audio
+                             WHERE tts_audio_status = 'running'
+                                OR (tts_audio_status = 'pending' AND tts_audio_worker_pid IS NOT NULL)")
+                   ->fetchColumn();
+}
+
+// Under the build lock: if a slot is open (active < cap), spawn a worker for
+// $audioKey and claim the slot by recording its pid. $extraArgs e.g. ['retry'].
+// Returns true if a worker was spawned, false if it should stay queued.
+function ttsClaimBuildSlot(PDO $db, int $audioKey, array $extraArgs = [], int $maxConcurrent = 1): bool {
+    $workerScript = __DIR__ . '/admin-tts-build-worker.php';
+    if (!file_exists($workerScript)) return false;
+    $db->query('SELECT pg_advisory_lock(' . TTS_BUILD_LOCK . ')');
+    try {
+        if (ttsActiveBuilds($db) >= $maxConcurrent) return false;
+        $logFile = sys_get_temp_dir() . '/tts_build_' . $audioKey . '.log';
+        $pid = spawnCappedWorker($workerScript, array_merge([(string)$audioKey], $extraArgs), $logFile, [
+            'cpu_secs' => 3600, 'mem_mb' => 1500, 'nice' => 10,
+        ]);
+        if ($pid <= 0) return false;
+        $db->prepare("UPDATE yy_tts_audio SET tts_audio_worker_pid = ? WHERE tts_audio_key = ?")
+           ->execute([$pid, $audioKey]);
+        return true;
+    } finally {
+        $db->query('SELECT pg_advisory_unlock(' . TTS_BUILD_LOCK . ')');
+    }
+}
+
 if ($method === 'GET' && $action === 'status') {
     $audioKey = (int)($_GET['tts_audio_key'] ?? 0);
     if (!$audioKey) errorResponse('tts_audio_key required');
@@ -221,20 +263,8 @@ if ($action === 'start') {
     // status; the next worker to finish will pick it up via the queue
     // promotion at the end of admin-tts-build-worker.php.
     $maxConcurrent = 1;
-    $running = (int)$db->query("SELECT COUNT(*) FROM yy_tts_audio WHERE tts_audio_status = 'running'")->fetchColumn();
-    $queued  = false;
-    $workerScript = __DIR__ . '/admin-tts-build-worker.php';
-    if ($running < $maxConcurrent && file_exists($workerScript)) {
-        $logFile = sys_get_temp_dir() . '/tts_build_' . $audioKey . '.log';
-        $pid = spawnCappedWorker($workerScript, [(string)$audioKey], $logFile, [
-            'cpu_secs' => 3600, 'mem_mb' => 1500, 'nice' => 10,
-        ]);
-        if ($pid > 0) {
-            $db->prepare("UPDATE yy_tts_audio SET tts_audio_worker_pid = ? WHERE tts_audio_key = ?")
-               ->execute([$pid, $audioKey]);
-        }
-    } else {
-        $queued = true;
+    $queued = !ttsClaimBuildSlot($db, $audioKey, [], $maxConcurrent);
+    if ($queued) {
         $db->prepare("UPDATE yy_tts_audio SET tts_audio_message = ? WHERE tts_audio_key = ?")
            ->execute(["Queued — waiting for an open slot (limit: $maxConcurrent concurrent)", $audioKey]);
     }
@@ -371,23 +401,12 @@ if ($action === 'start_all') {
     // Spawn workers up to the cap. Anything still pending is picked up by
     // the queue-promoter at the end of admin-tts-build-worker.php.
     $maxConcurrent = 1;
-    $running = (int)$db->query("SELECT COUNT(*) FROM yy_tts_audio WHERE tts_audio_status = 'running'")->fetchColumn();
-    $workerScript = __DIR__ . '/admin-tts-build-worker.php';
     $spawned = 0;
-    if (file_exists($workerScript)) {
-        foreach ($audioKeys as $ak) {
-            if ($running >= $maxConcurrent) break;
-            $logFile = sys_get_temp_dir() . '/tts_build_' . $ak . '.log';
-            $pid = spawnCappedWorker($workerScript, [(string)$ak], $logFile, [
-                'cpu_secs' => 3600, 'mem_mb' => 1500, 'nice' => 10,
-            ]);
-            if ($pid > 0) {
-                $db->prepare("UPDATE yy_tts_audio SET tts_audio_worker_pid = ? WHERE tts_audio_key = ?")
-                   ->execute([$pid, $ak]);
-                $spawned++;
-                $running++;
-            }
-        }
+    foreach ($audioKeys as $ak) {
+        // Each claim re-checks the slot under the lock; once the cap is hit the
+        // rest stay 'pending' and get promoted by the worker's queue-promoter.
+        if (ttsClaimBuildSlot($db, $ak, [], $maxConcurrent)) { $spawned++; }
+        else { break; }
     }
     jsonResponse([
         'queued'     => count($audioKeys),
@@ -475,20 +494,8 @@ if ($action === 'retry_failed') {
     ")->execute([$audioKey]);
 
     $maxConcurrent = 1;
-    $running = (int)$db->query("SELECT COUNT(*) FROM yy_tts_audio WHERE tts_audio_status = 'running'")->fetchColumn();
-    $queued = false;
-    $workerScript = __DIR__ . '/admin-tts-build-worker.php';
-    if ($running < $maxConcurrent && file_exists($workerScript)) {
-        $logFile = sys_get_temp_dir() . '/tts_build_' . $audioKey . '.log';
-        $pid = spawnCappedWorker($workerScript, [(string)$audioKey, 'retry'], $logFile, [
-            'cpu_secs' => 3600, 'mem_mb' => 1500, 'nice' => 10,
-        ]);
-        if ($pid > 0) {
-            $db->prepare("UPDATE yy_tts_audio SET tts_audio_worker_pid = ? WHERE tts_audio_key = ?")
-               ->execute([$pid, $audioKey]);
-        }
-    } else {
-        $queued = true;
+    $queued = !ttsClaimBuildSlot($db, $audioKey, ['retry'], $maxConcurrent);
+    if ($queued) {
         $db->prepare("UPDATE yy_tts_audio SET tts_audio_message = ? WHERE tts_audio_key = ?")
            ->execute(["Queued — waiting for an open slot (limit: $maxConcurrent concurrent)", $audioKey]);
     }
@@ -752,21 +759,8 @@ function ttsWipePartsDir(int $audioKey): void {
 // Returns true if spawned, false if left queued.
 function ttsTrySpawn(PDO $db, int $audioKey): bool {
     $maxConcurrent = 1;
-    $running = (int)$db->query("SELECT COUNT(*) FROM yy_tts_audio WHERE tts_audio_status = 'running'")->fetchColumn();
-    $workerScript = __DIR__ . '/admin-tts-build-worker.php';
-    if ($running >= $maxConcurrent || !file_exists($workerScript)) {
-        $db->prepare("UPDATE yy_tts_audio SET tts_audio_message = ? WHERE tts_audio_key = ?")
-           ->execute(["Queued — waiting for an open slot (limit: $maxConcurrent concurrent)", $audioKey]);
-        return false;
-    }
-    $logFile = sys_get_temp_dir() . '/tts_build_' . $audioKey . '.log';
-    $pid = spawnCappedWorker($workerScript, [(string)$audioKey], $logFile, [
-        'cpu_secs' => 3600, 'mem_mb' => 1500, 'nice' => 10,
-    ]);
-    if ($pid > 0) {
-        $db->prepare("UPDATE yy_tts_audio SET tts_audio_worker_pid = ? WHERE tts_audio_key = ?")
-           ->execute([$pid, $audioKey]);
-        return true;
-    }
+    if (ttsClaimBuildSlot($db, $audioKey, [], $maxConcurrent)) return true;
+    $db->prepare("UPDATE yy_tts_audio SET tts_audio_message = ? WHERE tts_audio_key = ?")
+       ->execute(["Queued — waiting for an open slot (limit: $maxConcurrent concurrent)", $audioKey]);
     return false;
 }

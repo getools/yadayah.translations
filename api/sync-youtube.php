@@ -7,10 +7,20 @@
  * Web:   GET /api/sync-youtube.php?key=yada2026sync
  */
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/feed-helpers.php';
 if (session_status() === PHP_SESSION_NONE) session_start();
 
 $db = getDb();
 $isCli = php_sapi_name() === 'cli';
+// CLI sync processes thousands of items and legitimately takes longer than the
+// 120s web-request safety net set in config.php. Override to 10 minutes here.
+if ($isCli) {
+    $db->exec("SET statement_timeout = '600s'");
+}
+
+// Hashtag parse rules (shared engine): seeded vlog/basics defaults + every
+// active Items section's include-hashtag template. Cached per request.
+$parseRules = getHashtagParseRules($db);
 
 if (!$isCli && !defined('SYNC_CALLED_FROM_PARENT')) {
     $secret = $_GET['key'] ?? '';
@@ -19,8 +29,16 @@ if (!$isCli && !defined('SYNC_CALLED_FROM_PARENT')) {
     }
 }
 
-// Find all active YouTube feeds
-$feeds = $db->query("SELECT feed_key, feed_name, feed_account_id, feed_api_key, feed_api_endpoint FROM yy_feed WHERE lower(feed_site_code) = 'youtube' AND feed_active_flag = TRUE ORDER BY feed_key")->fetchAll();
+// Optional single-feed scope. CLI: argv[1]; web: ?feed_key=N. 0/absent = all
+// active YouTube feeds (the cron behavior). The admin "Sync" button passes one
+// key so a manual sync only touches the clicked channel (and its privacy sweep
+// + page rebuild stay scoped, keeping the run short).
+$onlyFeedKey = (int)($isCli ? ($argv[1] ?? 0) : ($_GET['feed_key'] ?? 0));
+
+// Find active YouTube feeds (all, or just the requested one)
+$feedWhere = "lower(feed_site_code) = 'youtube' AND feed_active_flag = TRUE";
+if ($onlyFeedKey) $feedWhere .= " AND feed_key = " . $onlyFeedKey;
+$feeds = $db->query("SELECT feed_key, feed_name, feed_account_id, feed_api_key, feed_api_endpoint FROM yy_feed WHERE $feedWhere ORDER BY feed_key")->fetchAll();
 if (!$feeds) {
     $msg = 'No active YouTube feeds found';
     if ($isCli) { echo "$msg\n"; exit; }
@@ -109,40 +127,16 @@ foreach ($feeds as $feed) {
                 $cleanTitle = html_entity_decode($cleanTitle, ENT_QUOTES | ENT_HTML5, 'UTF-8');
             } while ($cleanTitle !== $prev);
 
-            // Auto-detect #vlog|[slug]|[episode] → Vlog (page 1) categories
-            // and #basics|[slug]|[episode] → Basics (page 20) categories.
-            // Plain #basics or #Basics hashtags do NOT auto-categorize — that's admin-managed.
-            // A video can have categories on multiple pages; the legacy feed_item_category_key
-            // stores only the first match.
-            $categoryAssignments = []; // [['category_key' => N, 'episode' => '###', 'page_key' => P], ...]
+            // Parse hashtag templates (e.g. #vlog|[category]|[episode]) from the
+            // title + description. Categories are resolved/auto-created per page;
+            // captured episode/date/title/sort are applied below via
+            // applyParsedItemFields with most-recent-wins arbitration.
             $searchText = $cleanTitle . "\n" . ($v['description'] ?? '');
-            $tagPatterns = [
-                ['regex' => '/#vlog\|([^|\s]+)\|(\d+)/i', 'page_key' => 1],
-                ['regex' => '/#basics\|([^|\s]+)\|(\d+)/i', 'page_key' => 20],
-            ];
-            foreach ($tagPatterns as $tp) {
-                if (!preg_match_all($tp['regex'], $searchText, $htMatches, PREG_SET_ORDER)) continue;
-                $seenSlugs = [];
-                foreach ($htMatches as $htMatch) {
-                    $catSlug = strtolower(trim($htMatch[1]));
-                    $key = $tp['page_key'] . ':' . $catSlug;
-                    if (isset($seenSlugs[$key])) continue;
-                    $seenSlugs[$key] = true;
-                    $epNum = $htMatch[2];
-                    $catLookup = $db->prepare("SELECT category_key FROM yy_feed_page_category WHERE page_key = ? AND category_slug = ?");
-                    $catLookup->execute([$tp['page_key'], $catSlug]);
-                    $catKey = $catLookup->fetchColumn() ?: null;
-                    if (!$catKey) {
-                        $catTitle = ucwords(str_replace('-', ' ', $catSlug));
-                        $catIns = $db->prepare("INSERT INTO yy_feed_page_category (page_key, category_title, category_slug, category_sort) VALUES (?, ?, ?, 0) ON CONFLICT (page_key, category_slug) DO UPDATE SET category_revision_dtime = NOW() RETURNING category_key");
-                        $catIns->execute([$tp['page_key'], $catTitle, $catSlug]);
-                        $catKey = (int)$catIns->fetchColumn();
-                    }
-                    $categoryAssignments[] = ['category_key' => (int)$catKey, 'episode' => $epNum, 'page_key' => $tp['page_key']];
-                }
-            }
-            // Episode number falls back to first match's episode for the legacy feed_item_episode column
-            $episode = $categoryAssignments[0]['episode'] ?? null;
+            $parse = applyHashtagTemplates($db, $searchText, $parseRules);
+            // feed_item_episode is owned by applyParsedItemFields (provenance-
+            // aware). Pass NULL into the upsert so COALESCE preserves whatever
+            // is there; the reconcile step sets/keeps the winning value.
+            $episode = null;
 
             // Build tags from hashtags found in title + description
             // Place #vlog first so the starts-with filter (#vlog*) works on the comma-separated string
@@ -165,7 +159,10 @@ foreach ($feeds as $feed) {
             // OLD imported title (so manual edits are never overwritten).
             $autoOverride = null;
             if (preg_match('/#\w/', $cleanTitle)) {
-                $autoOverride = preg_replace('/#vlog\|[^|\s]+\|\d+/i', '', $cleanTitle); // remove #vlog|slug|episode
+                $autoOverride = $cleanTitle;
+                foreach ($parseRules as $pr) {                                   // remove any matched #tag|…|… template
+                    $autoOverride = preg_replace($pr['regex'], '', $autoOverride);
+                }
                 $autoOverride = preg_replace('/#[a-zA-Z][a-zA-Z0-9_-]+/', '', $autoOverride); // remove plain hashtags
                 $autoOverride = preg_replace('/\s{2,}/', ' ', $autoOverride);
                 $autoOverride = trim(preg_replace('/^[~\-\s]+|[~\-\s]+$/', '', $autoOverride));
@@ -214,28 +211,16 @@ foreach ($feeds as $feed) {
                 else $totalUpdated++;
             }
 
-            // Populate yy_feed_item_category, scoped per page.
-            // We only delete/replace rows for the page_keys our hashtags actually touched —
-            // this prevents #vlog hashtags from wiping out Basics-page (or other pages')
-            // category assignments that admins may have set independently.
-            if ($categoryAssignments) {
+            // Apply parsed captures (episode/date/title/sort) + category
+            // assignments. Each field is arbitrated by most-recent-wins
+            // (hashtag vs. admin edit) and category rows are replaced only for
+            // the page_keys our templates actually touched, so other pages'
+            // admin assignments are never wiped.
+            if (($parse['fields'] || $parse['categories'])) {
                 $itemKeyStmt = $db->prepare("SELECT feed_item_key FROM yy_feed_item WHERE feed_key = ? AND feed_item_external_id = ?");
                 $itemKeyStmt->execute([$feedKey, $videoId]);
                 $itemKey = (int)($itemKeyStmt->fetchColumn() ?: 0);
-                if ($itemKey) {
-                    // Collect distinct page_keys from current matches
-                    $touchedPages = array_values(array_unique(array_map(function($ca) { return (int)$ca['page_key']; }, $categoryAssignments)));
-                    // Delete only rows for those pages
-                    $placeholders = implode(',', array_fill(0, count($touchedPages), '?'));
-                    $delSql = "DELETE FROM yy_feed_item_category WHERE feed_item_key = ? AND category_key IN (SELECT category_key FROM yy_feed_page_category WHERE page_key IN ($placeholders))";
-                    $delStmt = $db->prepare($delSql);
-                    $delStmt->execute(array_merge([$itemKey], $touchedPages));
-                    // Insert fresh assignments
-                    $catUp = $db->prepare("INSERT INTO yy_feed_item_category (feed_item_key, category_key, feed_item_category_episode) VALUES (?, ?, ?) ON CONFLICT (feed_item_key, category_key) DO UPDATE SET feed_item_category_episode = EXCLUDED.feed_item_category_episode");
-                    foreach ($categoryAssignments as $ca) {
-                        $catUp->execute([$itemKey, $ca['category_key'], $ca['episode']]);
-                    }
-                }
+                if ($itemKey) applyParsedItemFields($db, $itemKey, $parse);
             }
         }
     } catch (Exception $e) {
@@ -275,12 +260,13 @@ foreach ($feeds as $feed) {
 // privacyStatus 'private' => Restricted. Falls back to a thumbnail-404 probe
 // only when no API key is configured. yy_feed_item_check records the per-item
 // last-checked time + result so the queue cycles fairly (200/run × 3/day).
+$restrictFeedFilter = $onlyFeedKey ? (" AND fi.feed_key = " . $onlyFeedKey) : "";
 $restrictStmt = $db->query("
     SELECT fi.feed_item_key, fi.feed_item_thumbnail, fi.feed_item_external_id
     FROM yy_feed_item fi
     LEFT JOIN yy_feed_item_check c USING (feed_item_key)
     WHERE fi.feed_item_active_flag = TRUE AND fi.feed_item_restricted_flag = FALSE
-      AND fi.feed_item_thumbnail LIKE 'https://i.ytimg.com/%'
+      AND fi.feed_item_thumbnail LIKE 'https://i.ytimg.com/%'$restrictFeedFilter
     ORDER BY c.feed_item_last_checked_dtime ASC NULLS FIRST,
              fi.feed_item_publish_import_dtime DESC
     LIMIT 200

@@ -237,6 +237,12 @@ CommunityTopics.loadTopics = function(page, category, opts) {
     var el = document.getElementById('topic-list-content');
     if (!el) return;
 
+    // Claim the topic-list render slot. Both this and CommunitySearch.search()
+    // write here; the last one initiated must win regardless of which network
+    // response lands first (fixes the initial page-load list clobbering search).
+    Community._listSeq = (Community._listSeq || 0) + 1;
+    var _seq = Community._listSeq;
+
     var url = '/api/community-topics.php?page=' + page;
     if (typeof CommunityAuth !== 'undefined' && CommunityAuth._showDeletions) url += '&show_deleted=1';
     if (category) url += '&category=' + encodeURIComponent(category);
@@ -285,6 +291,7 @@ CommunityTopics.loadTopics = function(page, category, opts) {
                 html += '</div>';
             }
         }
+        if (_seq !== Community._listSeq) return;  // a newer list/search render superseded us
         el.innerHTML = html;
     });
 };

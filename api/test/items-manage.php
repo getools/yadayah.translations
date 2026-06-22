@@ -251,10 +251,12 @@ if ($action === 'item' && $method === 'PUT') {
     $f = []; $p = [];
     if (isset($d['sort'])) {
         $f[] = 'feed_item_sort = ?'; $p[] = (int)$d['sort'];
+        stampManualField($db, $key, 'sort');        // most-recent-wins vs hashtag
     }
     if (array_key_exists('episode', $d)) {
         $f[] = 'feed_item_episode = ?';
         $p[] = ($d['episode'] !== null && $d['episode'] !== '') ? trim($d['episode']) : null;
+        stampManualField($db, $key, 'episode');
     }
     // Category → yy_feed_item_category, page-scoped (one per page per item).
     if (array_key_exists('category_key', $d)) {
@@ -265,6 +267,7 @@ if ($action === 'item' && $method === 'PUT') {
             $db->prepare("INSERT INTO yy_feed_item_category (feed_item_key, category_key) VALUES (?, ?) ON CONFLICT (feed_item_key, category_key) DO NOTHING")
                ->execute([$key, $catKey]);
         }
+        stampManualField($db, $key, 'category:' . $pageKey);
     }
     if ($f) {
         $f[] = 'feed_item_revision_dtime = NOW()'; $p[] = $key;

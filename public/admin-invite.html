@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781995293">
+    <meta name="page-version" content="1782136809">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Invite Admin - Yada Yah</title>
@@ -79,12 +79,20 @@
         <div style="background:#fff;border-radius:10px;padding:24px;max-width:450px;width:90%;">
             <h3 style="margin:0 0 16px;font-size:1.1rem;color:#31345A;">New Category</h3>
             <div style="margin-bottom:12px;">
-                <label style="font-size:0.85rem;font-weight:600;color:#555;display:block;margin-bottom:4px;">Title</label>
+                <label style="font-size:0.85rem;font-weight:600;color:#555;display:block;margin-bottom:4px;">Label</label>
                 <input type="text" id="add-cat-title" style="width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;box-sizing:border-box;">
             </div>
-            <div style="margin-bottom:16px;">
-                <label style="font-size:0.85rem;font-weight:600;color:#555;display:block;margin-bottom:4px;">Subtitle</label>
+            <div style="margin-bottom:12px;">
+                <label style="font-size:0.85rem;font-weight:600;color:#555;display:block;margin-bottom:4px;">Sublabel</label>
                 <input type="text" id="add-cat-subtitle" style="width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;box-sizing:border-box;">
+            </div>
+            <div style="margin-bottom:12px;">
+                <label style="font-size:0.85rem;font-weight:600;color:#555;display:block;margin-bottom:4px;">Description</label>
+                <textarea id="add-cat-description" rows="2" style="width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;box-sizing:border-box;resize:vertical;"></textarea>
+            </div>
+            <div style="margin-bottom:16px;">
+                <label style="font-size:0.85rem;font-weight:600;color:#555;display:block;margin-bottom:4px;">Code <span style="font-weight:400;color:#999;">(optional &mdash; hashtag link; auto-derived from label if blank)</span></label>
+                <input type="text" id="add-cat-code" placeholder="e.g. messiah" style="width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;box-sizing:border-box;">
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;">
                 <button class="btn btn-sm" style="padding:6px 16px;" onclick="closeAddCat()">Cancel</button>

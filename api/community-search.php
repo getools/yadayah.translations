@@ -44,10 +44,7 @@ $stmt = $db->prepare("
     LEFT JOIN yy_user u ON t.user_key = u.user_key
     {$categoryJoin}
     WHERE t.topic_active_flag = TRUE
-      AND (
-          to_tsvector('english', COALESCE(t.topic_title, '') || ' ' || COALESCE(t.topic_body, '') || ' ' || COALESCE(t.topic_body_html, ''))
-          @@ plainto_tsquery('english', ?)
-      )
+      AND t.topic_search_vector @@ plainto_tsquery('english', ?)
       {$categoryWhere}
     ORDER BY t.topic_dtime DESC
     LIMIT ? OFFSET ?
@@ -85,8 +82,7 @@ $stmt = $db->prepare("
     {$replyCategoryJoin}
     LEFT JOIN yy_user u ON r.user_key = u.user_key
     WHERE r.reply_active_flag = TRUE
-      AND to_tsvector('english', COALESCE(r.reply_body, '') || ' ' || COALESCE(r.reply_body_html, ''))
-          @@ plainto_tsquery('english', ?)
+      AND r.reply_search_vector @@ plainto_tsquery('english', ?)
       {$replyCategoryWhere}
     ORDER BY r.reply_dtime DESC
     LIMIT ? OFFSET ?

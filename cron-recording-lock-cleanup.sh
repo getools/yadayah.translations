@@ -73,8 +73,14 @@ PSQL="docker exec -i yada-postgres-prod psql -U postgres -d yada -t -A"
 cancelled=0
 while IFS='|' read -r jkey pid; do
     [ -z "$jkey" ] && continue
-    if [ -n "$pid" ] && [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then
-        continue  # PID still alive, leave it
+    # Worker PIDs are CONTAINER pids (transcript-worker.php runs inside
+    # yada-www-web-1), so liveness must be checked in the container — a host
+    # kill -0 always reads "dead" for them and would falsely cancel a
+    # legitimately long-running transcription (a >2h wall-clock job whose
+    # worker is alive but mostly blocked waiting on the GPU engine; the 40-min
+    # worker cap is CPU time, not wall time, so long episodes can exceed 2h).
+    if [ -n "$pid" ] && [ "$pid" -gt 0 ] && docker exec yada-www-web-1 test -d "/proc/$pid" 2>/dev/null; then
+        continue  # worker still alive in the container — leave it
     fi
     $PSQL -c "UPDATE yy_feed_item_transcript_job
               SET job_status='cancelled',

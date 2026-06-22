@@ -88,6 +88,49 @@ function reapOrphanedJobs($db) {
     return $n;
 }
 
+// Serializes the "is a slot free? then spawn" decision across concurrent
+// dispatches. Generate Baselines fires one run-POST per checked engine
+// *simultaneously*; without this, all of them read job_status='running'
+// count = 0 (a freshly-spawned worker doesn't flip its own row to 'running'
+// until ~1s into boot, see transcript-worker.php) and every one spawns a
+// worker — N STT models land on the single GPU at once → CUDA OOM. Holding
+// this advisory lock around count-and-claim makes the cap=1 gate atomic.
+// The same key is used by transcript-worker.php's shutdown-dequeue so a
+// worker exit and a fresh run-POST can never both spawn.
+const TRANSCRIPT_WORKER_LOCK = 742001;
+function withWorkerSlotLock($db, callable $fn) {
+    $db->query('SELECT pg_advisory_lock(' . TRANSCRIPT_WORKER_LOCK . ')');
+    try { return $fn(); }
+    finally { $db->query('SELECT pg_advisory_unlock(' . TRANSCRIPT_WORKER_LOCK . ')'); }
+}
+
+// Under the slot lock: if no worker is running, spawn one on $jobKey and
+// CLAIM the slot synchronously by flipping the row to 'running' right now —
+// so the next dispatch waiting on the lock counts it before the worker
+// reaches its own 'running' update. Returns the running-worker count after
+// the decision; $spawned is set by-ref to whether we started a worker.
+function claimWorkerSlot($db, int $jobKey, bool &$spawned): int {
+    return withWorkerSlotLock($db, function () use ($db, $jobKey, &$spawned) {
+        $spawned = false;
+        reapOrphanedJobs($db); // clear dead 'running' jobs so one orphan can't wedge the queue
+        $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
+        if ($running >= 1) return $running;            // slot taken — leave $jobKey pending
+        $workerScript = __DIR__ . '/transcript-worker.php';
+        if (!file_exists($workerScript)) return $running;
+        $logFile = sys_get_temp_dir() . '/transcript_' . $jobKey . '.log';
+        $pid = spawnCappedWorker($workerScript, [(string)$jobKey], $logFile, [
+            'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
+        ]);
+        if ($pid <= 0) return $running;                // spawn failed — leave pending, caller reports queued
+        $db->prepare("UPDATE yy_feed_item_transcript_job
+                         SET job_status = 'running', job_worker_pid = ?
+                       WHERE feed_item_transcript_job_key = ? AND job_status = 'pending'")
+           ->execute([$pid, $jobKey]);
+        $spawned = true;
+        return $running + 1;
+    });
+}
+
 // Internal model codes map (in the worker) to the OpenAI model name plus
 // a timestamp_granularities setting. whisper-1 is exposed as TWO entries:
 //   whisper-1-segment — phrase-level row per Whisper segment
@@ -144,6 +187,15 @@ if ($method === 'POST') {
     $action = $data['action'] ?? $action;
 }
 
+if ($method === 'GET' && $action === 'live_count') {
+    // Row count of the LIVE editable transcript for an item (to warn before
+    // a consensus Initialize Edits would reset existing edits).
+    $itemKey = (int)($_GET['item_key'] ?? 0);
+    if (!$itemKey) errorResponse('item_key required');
+    $cnt = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript WHERE feed_item_key = " . $itemKey)->fetchColumn();
+    jsonResponse(['live_rows' => $cnt]);
+}
+
 if ($method === 'GET' && $action === 'status') {
     $itemKey = (int)($_GET['item_key'] ?? 0);
     if (!$itemKey) errorResponse('item_key required');
@@ -155,15 +207,18 @@ if ($method === 'GET' && $action === 'status') {
     // MAX(revision_dtime) across every row for the (item, model) pair.
     $stmt = $db->prepare("
         SELECT feed_item_transcript_auto_model AS model,
-               MAX(feed_item_transcript_revision_dtime) AS last_run
+               MAX(feed_item_transcript_revision_dtime) AS last_run,
+               COUNT(*) AS rows
           FROM yy_feed_item_transcript_auto
          WHERE feed_item_key = ?
          GROUP BY feed_item_transcript_auto_model
     ");
     $stmt->execute([$itemKey]);
     $runByModel = [];
+    $rowsByModel = [];
     foreach ($stmt->fetchAll() as $r) {
-        $runByModel[$r['model']] = $r['last_run'];
+        $runByModel[$r['model']]  = $r['last_run'];
+        $rowsByModel[$r['model']] = (int)$r['rows'];
     }
 
     $models = [];
@@ -173,6 +228,7 @@ if ($method === 'GET' && $action === 'status') {
             'code'     => $m['code'],
             'label'    => $m['label'],
             'last_run' => $lr,
+            'rows'     => $rowsByModel[$m['code']] ?? 0,
             'derived'  => false,
             'ready'    => $lr !== null, // a raw model is usable once it has rows
         ];
@@ -192,6 +248,7 @@ if ($method === 'GET' && $action === 'status') {
             'code'     => $m['code'],
             'label'    => $m['label'],
             'last_run' => $runByModel[$m['code']] ?? null,
+            'rows'     => $rowsByModel[$m['code']] ?? 0,
             'derived'  => true,
             'ready'    => $ready,
         ];
@@ -336,15 +393,11 @@ if ($method === 'POST' && $action === 'poke') {
     if (!file_exists($workerScript)) {
         errorResponse('transcript-worker.php missing from ' . __DIR__);
     }
-    $logFile = sys_get_temp_dir() . '/transcript_' . $nextKey . '.log';
-    $pid = spawnCappedWorker($workerScript, [(string)$nextKey], $logFile, [
-        'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
-    ]);
-    if ($pid > 0) {
-        $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
-           ->execute([$pid, $nextKey]);
-    }
-    jsonResponse(['ok' => true, 'spawned' => $pid > 0, 'job_key' => $nextKey, 'pid' => $pid]);
+    // Spawn under the same atomic gate as `run` so a manual/auto poke can't
+    // race a concurrent run-POST into a second worker.
+    $spawned = false;
+    $running = claimWorkerSlot($db, $nextKey, $spawned);
+    jsonResponse(['ok' => true, 'spawned' => $spawned, 'job_key' => $nextKey, 'running' => $running, 'reaped' => $reaped]);
 }
 
 if ($method === 'POST' && $action === 'retry') {
@@ -435,28 +488,19 @@ if ($method === 'POST' && $action === 'run') {
     // queue ordering deterministic. New jobs over the cap stay 'pending';
     // when the current worker exits its register_shutdown_function dequeues
     // the next one (see transcript-worker.php).
-    $MAX_CONCURRENT_WORKERS = 1;
-    reapOrphanedJobs($db); // clear dead 'running' jobs so a single orphan can't block every new run
-    $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
-    if ($running < $MAX_CONCURRENT_WORKERS) {
-        $workerScript = __DIR__ . '/transcript-worker.php';
-        if (file_exists($workerScript)) {
-            $logFile = sys_get_temp_dir() . '/transcript_' . $jobKey . '.log';
-            $pid = spawnCappedWorker($workerScript, [(string)$jobKey], $logFile, [
-                'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
-            ]);
-            if ($pid > 0) {
-                $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
-                   ->execute([$pid, $jobKey]);
-            }
-        }
-        jsonResponse(['job_key' => $jobKey, 'model' => $model, 'queued' => false, 'running' => $running + 1]);
+    // Atomic cap=1 gate. claimWorkerSlot() holds an advisory lock while it
+    // counts running workers and (if the slot is free) spawns + claims it,
+    // so a burst of parallel run-POSTs can never start more than one worker.
+    $spawned = false;
+    $running = claimWorkerSlot($db, $jobKey, $spawned);
+    if ($spawned) {
+        jsonResponse(['job_key' => $jobKey, 'model' => $model, 'queued' => false, 'running' => $running]);
     } else {
-        // Leave row as 'pending' — workers picking up next job on their
-        // own exit will dequeue this in FIFO order.
+        // Slot busy (or spawn failed) — leave row 'pending'. The running
+        // worker's shutdown-dequeue will pick this up in FIFO order.
         $db->prepare("UPDATE yy_feed_item_transcript_job
                         SET job_message = ? WHERE feed_item_transcript_job_key = ?")
-           ->execute([sprintf('Queued — %d workers busy, will start when a slot frees', $running), $jobKey]);
+           ->execute([sprintf('Queued — %d worker busy, will start when the slot frees', $running), $jobKey]);
         jsonResponse(['job_key' => $jobKey, 'model' => $model, 'queued' => true, 'running' => $running]);
     }
 }

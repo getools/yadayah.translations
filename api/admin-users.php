@@ -81,24 +81,28 @@ switch ($method) {
         if (!$input || empty($input['user_key'])) errorResponse('user_key required');
         $key = (int)$input['user_key'];
 
-        // Update user fields
-        $stmt = $db->prepare("
-            UPDATE yy_user SET
-                user_code = :code,
-                user_name_display = :name_display,
-                user_handle = :handle,
-                user_email = :email,
-                user_bio = :bio
-            WHERE user_key = :key
-        ");
-        $stmt->execute([
-            'code' => $input['user_code'] ?? '',
-            'name_display' => $input['user_name_display'] ?? '',
-            'handle' => $input['user_handle'] ?? null,
-            'email' => $input['user_email'] ?? '',
-            'bio' => $input['user_bio'] ?? null,
-            'key' => $key,
-        ]);
+        // Update only the profile fields that were actually supplied.
+        // (Ban/mute toggles send a partial PUT with no profile fields — never
+        //  overwrite name/code/email/handle/bio with blanks in that case.)
+        $fieldMap = [
+            'user_code'         => 'user_code',
+            'user_name_display' => 'user_name_display',
+            'user_handle'       => 'user_handle',
+            'user_email'        => 'user_email',
+            'user_bio'          => 'user_bio',
+        ];
+        $sets = [];
+        $params = ['key' => $key];
+        foreach ($fieldMap as $inKey => $col) {
+            if (array_key_exists($inKey, $input)) {
+                $sets[] = "$col = :$inKey";
+                $params[$inKey] = $input[$inKey];
+            }
+        }
+        if ($sets) {
+            $stmt = $db->prepare("UPDATE yy_user SET " . implode(', ', $sets) . " WHERE user_key = :key");
+            $stmt->execute($params);
+        }
 
         // Update ban status
         if (isset($input['banned'])) {

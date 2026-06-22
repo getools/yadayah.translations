@@ -170,6 +170,28 @@ if ($method === 'GET' && !empty($_GET['page_feeds'])) {
     jsonResponse(['page_feeds' => $stmt->fetchAll(), 'pages' => $pages]);
 }
 
+// GET latest sync status for a feed — polled by the UI while an async
+// (background) sync runs. Returns the most recent yy_feed_sync row for the
+// feed plus elapsed seconds. Counts are only populated when the run finishes
+// (sync-youtube.php writes them in one UPDATE at the end), so a 'running' row
+// carries elapsed time only.
+if ($method === 'GET' && isset($_GET['sync_status'])) {
+    $feedKey = (int)($_GET['feed_key'] ?? 0);
+    if (!$feedKey) errorResponse('feed_key required');
+    $stmt = $db->prepare("
+        SELECT feed_sync_key, feed_sync_status, feed_sync_items_found,
+               feed_sync_items_inserted, feed_sync_items_updated, feed_sync_error,
+               feed_sync_start_dtime, feed_sync_end_dtime,
+               EXTRACT(EPOCH FROM (COALESCE(feed_sync_end_dtime, NOW()) - feed_sync_start_dtime))::int AS elapsed_secs
+        FROM yy_feed_sync
+        WHERE feed_key = ?
+        ORDER BY feed_sync_key DESC
+        LIMIT 1
+    ");
+    $stmt->execute([$feedKey]);
+    jsonResponse(['sync' => $stmt->fetch() ?: null]);
+}
+
 // GET - list all feeds with their schedules
 if ($method === 'GET') {
     $feedKey = $_GET['feed_key'] ?? null;
@@ -432,16 +454,24 @@ if ($method === 'PUT') {
     $syncScript = $syncScripts[$site] ?? null;
 
     if ($syncScript && file_exists($syncScript)) {
-        if ($site === 'facebook') {
-            // Facebook is long-running — run in background, fully detached.
-            // Capped at 15min CPU / 800MB virt so a stuck Facebook sync can't
-            // peg the box.
+        if ($site === 'facebook' || $site === 'youtube') {
+            // Long-running — run fully detached in the background. A full
+            // YouTube channel sync (up to 2000 videos via the Data API +
+            // privacy sweep + page rebuild) takes ~2-4 min, well past
+            // Cloudflare's 100s edge timeout, so a synchronous run always
+            // 524'd the browser even though it finished server-side. Detaching
+            // lets the PUT return immediately; the UI polls ?sync_status=1.
+            // YouTube is scoped to just the clicked feed (passed as argv[1]);
+            // Facebook syncs all FB feeds. Capped at 15min CPU so a stuck sync
+            // can't peg the box.
             require_once __DIR__ . '/spawn-helpers.php';
             $logFile = sys_get_temp_dir() . '/sync_feed_' . $feedKey . '.log';
-            spawnCappedWorker($syncScript, [], $logFile, [
+            $workerArgs = ($site === 'youtube') ? [(int)$feedKey] : [];
+            $pid = spawnCappedWorker($syncScript, $workerArgs, $logFile, [
                 'cpu_secs' => 900, 'mem_mb' => 800, 'nice' => 10,
             ]);
-            $result['sync_result'] = ['status' => 'started', 'message' => 'Sync running in background', 'log' => $logFile];
+            $result['sync_result'] = ['status' => 'started', 'message' => 'Sync running in background', 'log' => $logFile, 'pid' => $pid];
+            $result['async'] = true;
         } else {
             // Run sync script via CLI, capture JSON output
             $output = [];

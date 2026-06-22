@@ -18,7 +18,14 @@
     window.__siteSearchLoaded = true;
 
     // ── State ───────────────────────────────────────────────────────────
-    var scope = 'site';        // 'site' | 'books' | 'video'  — Site is default
+    // Scope = WHERE results come from (picked via the scope dropdown):
+    //   'everything'  → books + transcripts + chat, fetched in parallel and
+    //                   rendered into independent sections that each appear
+    //                   as soon as that source returns (async, not all-at-once)
+    //   'books'       → /api/search.php only (paginated)
+    //   'transcripts' → /api/search-transcripts.php only (paginated)
+    //   'chat'        → /api/community-search.php only (community topics+replies)
+    var scope = 'everything';
     var currentPage = 1;
     var booksFilters = { series: [], volumes: [] };
     // Match-mode source of truth: kept in a closure variable so callers
@@ -56,6 +63,40 @@
               + '</svg>',
     };
 
+    // Scope-picker icons (one source for the dropdown trigger, the dropdown
+    // options, AND the per-source section headings in "Everything" view).
+    //   everything = globe, books = open book, transcripts = clapperboard,
+    //   chat = two speech bubbles.
+    var SCOPE_ICON_SVG = {
+        everything: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                  +   '<circle cx="12" cy="12" r="9"/>'
+                  +   '<path d="M3 12h18"/><path d="M3.6 8h16.8M3.6 16h16.8"/>'
+                  +   '<ellipse cx="12" cy="12" rx="4" ry="9"/>'
+                  + '</svg>',
+        books:      '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                  +   '<path d="M12 7c-1.6-1.3-3.7-2-6-2-1 0-2 .15-3 .4v12.2c1-.25 2-.4 3-.4 2.3 0 4.4.7 6 2 1.6-1.3 3.7-2 6-2 1 0 2 .15 3 .4V5.4c-1-.25-2-.4-3-.4-2.3 0-4.4.7-6 2z"/>'
+                  +   '<path d="M12 7v12"/>'
+                  + '</svg>',
+        transcripts:'<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                  +   '<path d="M3 9.5h18V19a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/>'
+                  +   '<path d="M3.2 6.1 20 3.8l.5 3.3-16.8 2.3z"/>'
+                  +   '<path d="M7.6 4.6 6.6 9.1M12.6 3.9 11.6 8.4"/>'
+                  +   '<path d="M10 12.8l4 2.1-4 2.1z" fill="currentColor" stroke="none"/>'
+                  + '</svg>',
+        chat:       '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                  +   '<path d="M7.5 13.5H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v.5"/>'
+                  +   '<path d="M21 12.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2v2.6l3.3-2.6H19a2 2 0 0 0 2-2z"/>'
+                  + '</svg>',
+    };
+    var SCOPES = [
+        { key: 'everything',  label: 'Everything'  },
+        { key: 'books',       label: 'Books'       },
+        { key: 'transcripts', label: 'Transcripts' },
+        { key: 'chat',        label: 'Chat'        },
+    ];
+    var SCOPE_BY_KEY = {};
+    SCOPES.forEach(function (s) { SCOPE_BY_KEY[s.key] = s; });
+
     // ── CSS (one-shot inject; lifted verbatim from prototype) ───────────
     function injectStyle() {
         if (document.getElementById('site-search-style')) return;
@@ -77,8 +118,14 @@
             // also re-centers content inside any admin-set min-height.
             // 100vw + 50%-shift breaks out of any host-page body
             // padding (e.g. vlog.html: body{padding:20px}).
+            // z-index: the full-bleed `transform: translateX(-50%)` makes
+            // this band a stacking context. Without an explicit z-index it
+            // stays at the auto level and later-in-DOM page content (e.g. the
+            // homepage carousel) paints OVER the absolutely-positioned scope
+            // and mode dropdown menus, hiding their options. A high z-index
+            // lifts the whole band — and both menus — above page content.
             '.site-search-band { background: var(--search-band-bg, #fdf6df); padding: 6px 0;',
-            '                    width: 100vw; position: relative;',
+            '                    width: 100vw; position: relative; z-index: 1000;',
             '                    left: 50%; transform: translateX(-50%);',
             '                    display: flex; flex-direction: column; justify-content: center; }',
             // Container holds both the bar and the results. Bar is
@@ -96,11 +143,15 @@
             // visible filter strip. row-2 itself never gets [hidden]
             // (only its filter children do), so the :has selector
             // checks for a non-hidden filter inside row-2.
-            '.ss-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 0; }',
+            // The controls row never wraps — the input shrinks to keep the
+            // scope picker, mode picker, and the Search (magnifier) button
+            // all on one line at every width. Only row-two (filter strips)
+            // is allowed to wrap to a second line.
+            '.ss-row { display: flex; gap: 10px; align-items: center; flex-wrap: nowrap; margin-bottom: 0; }',
             '.ss-row:has(+ .ss-row.row-two .ss-scope-filters:not([hidden])) { margin-bottom: 8px; }',
-            '.ss-row.row-two { margin-bottom: 0; }',
+            '.ss-row.row-two { margin-bottom: 0; flex-wrap: wrap; }',
             '.ss-row input[type="text"] {',
-            '  flex: 1; min-width: 200px; padding: 9px 14px; font-size: 1rem;',
+            '  flex: 1 1 0; min-width: 0; padding: 9px 14px; font-size: 1rem;',
             '  border: 2px solid #ccc; border-radius: 6px; outline: none;',
             '  transition: border-color 0.2s; background: #fff; color: #222;',
             '  width: auto; height: auto; margin: 0; box-sizing: border-box;',
@@ -195,17 +246,17 @@
             '  position: relative; display: inline-flex; align-items: stretch;',
             '  font-size: 0.95rem; user-select: none; flex: 0 0 auto;',
             '}',
+            // Trigger mirrors the match-mode picker: icon-only, transparent,
+            // gold (no dark pill, no label, no chevron). The label only
+            // appears inside the open menu.
             '.ss-scope-picker .ss-scope-current {',
-            '  display: inline-flex; align-items: center; gap: 8px;',
-            '  padding: 9px 14px; background: #31345A; color: #fff; border: 0; cursor: pointer;',
-            '  border-radius: 6px; font: inherit; font-weight: 600; line-height: 1; min-width: 116px;',
-            '  transition: background-color 0.15s;',
+            '  display: inline-flex; align-items: center; justify-content: center;',
+            '  padding: 6px 8px; background: transparent; color: var(--search-band-text, #d4a017);',
+            '  border: 0; border-radius: 6px; cursor: pointer; line-height: 1;',
+            '  transition: color 0.15s;',
             '}',
-            '.ss-scope-picker .ss-scope-current:hover { background: #4a4e7a; }',
-            '.ss-scope-picker .ss-scope-current .icon { width: 18px; height: 18px; flex: 0 0 18px; }',
-            '.ss-scope-picker .ss-scope-current .label { flex: 1; text-align: left; }',
-            '.ss-scope-picker .ss-scope-current .chevron { width: 12px; height: 12px; flex: 0 0 12px; opacity: 0.85; transition: transform 0.15s; }',
-            '.ss-scope-picker.open .ss-scope-current .chevron { transform: rotate(180deg); }',
+            '.ss-scope-picker .ss-scope-current:hover { color: #b8870e; }',
+            '.ss-scope-picker .ss-scope-current .icon { width: 22px; height: 22px; flex: 0 0 22px; }',
 
             '.ss-scope-picker .ss-scope-menu {',
             '  position: absolute; top: calc(100% + 4px); left: 0; z-index: 50;',
@@ -220,8 +271,7 @@
             '}',
             '.ss-scope-picker .ss-scope-option:hover { background: #eef2ff; }',
             '.ss-scope-picker .ss-scope-option .icon { width: 18px; height: 18px; flex: 0 0 18px; color: #31345A; }',
-            '.ss-scope-picker .ss-scope-option[aria-selected="true"] { background: #31345A; color: #fff; }',
-            '.ss-scope-picker .ss-scope-option[aria-selected="true"] .icon { color: #fff; }',
+            '.ss-scope-picker .ss-scope-option[aria-selected="true"] { background: #eef2ff; color: #31345A; font-weight: 700; }',
 
             // Filter strip per scope. [hidden] collapses to display:none
             // so it takes ZERO horizontal space. The earlier "animation"
@@ -243,6 +293,7 @@
             '  display: flex; justify-content: space-between; align-items: center;',
             '}',
             '.ss-results-info strong { color: #31345A; }',
+            '.ss-elapsed { color: #999; font-size: 0.85rem; margin-left: 6px; white-space: nowrap; }',
             '.ss-clear { color: #31345A; cursor: pointer; font-size: 0.9rem; text-decoration: underline; white-space: nowrap; }',
 
             // Site-mode section header
@@ -256,6 +307,22 @@
             '.ss-section .heading .count { font-weight: 500; color: #777; font-size: 0.9rem; }',
             '.ss-section .see-all { font-size: 0.85rem; cursor: pointer; color: #2563eb; text-decoration: underline; }',
             '.ss-section .see-all:hover { color: #1d4ed8; }',
+            // Right-hand metadata of a section heading: per-source query time
+            // + the optional "See all" link, kept together on the right.
+            '.ss-section .ss-section-meta { display: inline-flex; align-items: baseline; gap: 12px; white-space: nowrap; }',
+            '.ss-section .ss-section-meta .ss-elapsed { margin-left: 0; }',
+            '.ss-section-body { margin-bottom: 6px; }',
+            // <button> reset so scope-menu options match the div-based styling.
+            '.ss-scope-picker .ss-scope-option { border: 0; background: transparent; font: inherit; width: 100%; text-align: left; }',
+            // Chat (community topic/reply) result cards.
+            '.ss-chat-card { padding: 0; }',
+            '.ss-chat-link { display: block; text-decoration: none; color: inherit; padding: 12px 14px; }',
+            '.ss-chat-link:hover { background: rgba(49,52,90,0.04); }',
+            '.ss-chat-title { font-weight: 600; color: #31345A; font-size: 0.98rem; }',
+            '.ss-chat-tag { font-size: 0.72rem; color: #888; font-weight: 400; }',
+            '.ss-chat-meta { font-size: 0.8rem; color: #888; margin-top: 2px; }',
+            '.ss-chat-snippet { font-size: 0.88rem; color: #555; margin-top: 6px; line-height: 1.5; }',
+            '.ss-chat-snippet mark { background: #fff3b0; color: inherit; padding: 0 1px; border-radius: 2px; }',
 
             // Results area + result-card backgrounds. Both are
             // configurable via Admin → Site → Search; the CSS vars are
@@ -364,11 +431,7 @@
             // means the input contributes nothing to the wrap
             // calculation and grows from there.
             '  .ss-row input[type="text"] { min-width: 0; flex: 1 1 0; padding: 8px 10px; font-size: 0.95rem; }',
-            '  .ss-scope-picker .ss-scope-current {',
-            '    min-width: 0; padding: 8px 10px; gap: 4px;',
-            '  }',
-            '  .ss-scope-picker .ss-scope-current .icon { width: 16px; height: 16px; flex: 0 0 16px; }',
-            '  .ss-scope-picker .ss-scope-current .chevron { width: 10px; height: 10px; flex: 0 0 10px; }',
+            '  .ss-scope-picker .ss-scope-current { padding: 6px 6px; }',
             // Compact the mode dropdown so the input gets more room.
             '  .ss-filter-group select { padding: 6px 8px; font-size: 0.85rem; }',
             // Mobile: search button stays a magnifying glass — no "Go"
@@ -397,6 +460,22 @@
             '<div class="site-search-container">' +
             '  <form id="ss-form">' +
             '    <div class="ss-row">' +
+            // Scope picker (WHERE to search): labelled dropdown on the far
+            // left. Trigger shows the current scope's icon + label; the menu
+            // lists Everything / Books / Transcripts / Chat.
+            '      <div class="ss-scope-picker" id="ss-scope-picker">' +
+            '        <button type="button" class="ss-scope-current" id="ss-scope-current-btn" aria-haspopup="menu" aria-expanded="false" title="Search in: Everything">' +
+            '          <span class="icon" id="ss-scope-current-icon" aria-hidden="true">' + SCOPE_ICON_SVG.everything + '</span>' +
+            '        </button>' +
+            '        <div class="ss-scope-menu" role="menu">' +
+                       SCOPES.map(function (s) {
+                           return '<button type="button" class="ss-scope-option" role="menuitem" data-scope="' + s.key + '" aria-selected="' + (s.key === scope) + '">' +
+                                  SCOPE_ICON_SVG[s.key] +
+                                  '<span class="label">' + s.label + '</span>' +
+                                  '</button>';
+                       }).join('') +
+            '        </div>' +
+            '      </div>' +
             // Hidden select preserves the existing $(ss-mode).value reader
             // path; the visible UI is the dropdown picker on the left.
             '      <select id="ss-mode" style="display:none;">' +
@@ -484,6 +563,14 @@
         return h > 0 ? h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0')
                      : m + ':' + String(s).padStart(2, '0');
     }
+    // Round-trip query time (fetch start → JSON parsed), in seconds. This is
+    // the user-perceived latency, so it also reflects host CPU-steal spikes
+    // that slow the DB even when the query plan is fine.
+    function elapsedHtml(secs) {
+        if (secs == null || !isFinite(secs)) return '';
+        var s = secs < 10 ? secs.toFixed(2) : secs.toFixed(1);
+        return '<span class="ss-elapsed">(' + s + 's)</span>';
+    }
 
     // ── Filter loading ──────────────────────────────────────────────────
     // Per-scope filters were removed when the search bar was simplified
@@ -549,31 +636,162 @@
     }
 
     // ── Search ──────────────────────────────────────────────────────────
-    // Search bar always queries books AND video transcripts in parallel
-    // and renders a mixed view. The scope picker (Site/Books/Video) was
-    // removed; this is now the only mode.
+    // Dispatch on the active scope. "Everything" fans out to all three
+    // sources in parallel and renders each independently as it returns;
+    // the single-source scopes run one paginated query.
     function doSearch(page) {
         currentPage = Math.max(1, page || 1);
         var q = $('ss-input').value.trim();
         if (!q) { $('ss-results').innerHTML = ''; return; }
-        return searchSite(q);
+        if (scope === 'books')       return searchBooks(q);
+        if (scope === 'transcripts') return searchVideo(q);
+        if (scope === 'chat')        return searchChat(q);
+        return searchEverything(q);
     }
-    function searchSite(q) {
+
+    // fetch + parse JSON, timing the round-trip and never rejecting — the
+    // resolved object always carries {data, secs} so each section can show
+    // its own elapsed time even when that one source errored.
+    function fetchTimed(url) {
+        var t0 = (window.performance && performance.now) ? performance.now() : null;
+        var done = function () { return t0 != null ? (performance.now() - t0) / 1000 : null; };
+        return fetch(url)
+            .then(function (r) { return r.json(); })
+            .then(function (data) { return { data: data, secs: done() }; })
+            .catch(function () { return { data: null, secs: done(), error: true }; });
+    }
+
+    // ── Everything: parallel sources, each rendered as it completes ──────
+    function searchEverything(q) {
         var mode = getSearchMode();
         var area = $('ss-results');
-        area.innerHTML = '<div class="ss-loading">Searching the site…</div>';
-        var booksUrl = '/api/search.php?q=' + encodeURIComponent(q)
-                     + '&mode=' + encodeURIComponent(mode)
-                     + '&limit=' + SITE_SECTION_LIMIT;
-        var videoUrl = '/api/search-transcripts.php?q=' + encodeURIComponent(q)
-                     + '&mode=' + encodeURIComponent(mode)
-                     + '&limit=' + SITE_SECTION_LIMIT;
-        return Promise.all([
-            fetch(booksUrl).then(function (r) { return r.json(); }).catch(function () { return null; }),
-            fetch(videoUrl).then(function (r) { return r.json(); }).catch(function () { return null; }),
-        ]).then(function (out) {
-            renderSiteResults(q, mode, out[0], out[1]);
+        function block(key, label) {
+            return '<div class="ss-section-block" id="ssb-' + key + '">' +
+                   '  <div class="ss-section">' +
+                   '    <div class="heading">' + SCOPE_ICON_SVG[key] + '<span>' + label + '</span>' +
+                   '         <span class="count" id="sscount-' + key + '">· searching…</span></div>' +
+                   '    <div class="ss-section-meta"><span class="ss-elapsed" id="sselapsed-' + key + '"></span>' +
+                   '         <a class="see-all" id="ssseeall-' + key + '" style="display:none;"></a></div>' +
+                   '  </div>' +
+                   '  <div class="ss-section-body" id="ssbody-' + key + '"><div class="ss-loading">Searching…</div></div>' +
+                   '</div>';
+        }
+        area.innerHTML =
+            '<div class="ss-results-info"><span>Results for <strong>' + esc(q) + '</strong></span>' +
+            '<a class="ss-clear" id="ss-clear-link">Clear</a></div>' +
+            block('books', 'Books') +
+            block('transcripts', 'Transcripts') +
+            block('chat', 'Chat');
+        wireClearLink();
+
+        var lim = SITE_SECTION_LIMIT;
+        // Kick all three off immediately; each fills its own section on arrival.
+        fetchTimed('/api/search.php?q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(mode) + '&limit=' + lim)
+            .then(function (res) { fillBooksSection(res.data, res.secs); });
+        fetchTimed('/api/search-transcripts.php?q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(mode) + '&limit=' + lim)
+            .then(function (res) { fillVideoSection(q, mode, res.data, res.secs); });
+        fetchTimed('/api/community-search.php?q=' + encodeURIComponent(q))
+            .then(function (res) { fillChatSection(res.data, res.secs); });
+    }
+    function setCount(key, txt)   { var el = $('sscount-' + key);   if (el) el.textContent = txt; }
+    function setElapsed(key, s)   { var el = $('sselapsed-' + key); if (el) el.innerHTML = elapsedHtml(s); }
+    function setBody(key, html)   { var el = $('ssbody-' + key);    if (el) el.innerHTML = html; }
+    function showSeeAll(key, label, seeVal) {
+        var a = $('ssseeall-' + key);
+        if (!a) return;
+        a.textContent = label; a.setAttribute('data-see', seeVal); a.style.display = '';
+    }
+    function nMatches(n) { return '· ' + n + ' match' + (n === 1 ? '' : 'es'); }
+
+    function fillBooksSection(data, secs) {
+        setElapsed('books', secs);
+        if (!data || !data.results || !data.results.length) {
+            setCount('books', '· no matches');
+            setBody('books', '<div class="ss-no-results">No matches in books.</div>');
+            return;
+        }
+        setCount('books', nMatches(data.total));
+        setBody('books', booksResultsHtml(data.results));
+        if (data.total > data.results.length) showSeeAll('books', 'See all in Books →', 'books');
+    }
+    function fillVideoSection(q, mode, data, secs) {
+        setElapsed('transcripts', secs);
+        if (!data || !data.results || !data.results.length) {
+            setCount('transcripts', '· no matches');
+            setBody('transcripts', '<div class="ss-no-results">No matches in transcripts.</div>');
+            return;
+        }
+        setCount('transcripts', nMatches(data.total));
+        setBody('transcripts', videoResultsHtml(q, mode, data.results));
+        if (data.total > data.results.length) showSeeAll('transcripts', 'See all in Transcripts →', 'transcripts');
+    }
+    function fillChatSection(data, secs) {
+        setElapsed('chat', secs);
+        var items = data ? chatItemsFrom(data) : [];
+        if (!items.length) {
+            setCount('chat', '· no matches');
+            setBody('chat', '<div class="ss-no-results">No matches in chat.</div>');
+            return;
+        }
+        setCount('chat', nMatches(items.length));
+        setBody('chat', chatResultsHtml(items));
+        if (items.length > SITE_SECTION_LIMIT) showSeeAll('chat', 'See all in Chat →', 'chat');
+    }
+
+    // ── Chat (community topics + replies) ───────────────────────────────
+    // community-search.php returns {topics:[…], replies:[…]}; flatten into a
+    // single list, tagging each with where the match was found.
+    function chatItemsFrom(data) {
+        var items = [];
+        (data.topics  || []).forEach(function (t) { t.match_type = 'topic'; items.push(t); });
+        (data.replies || []).forEach(function (r) { r.match_type = 'reply'; items.push(r); });
+        return items;
+    }
+    function chatDate(ts) {
+        if (!ts) return '';
+        try {
+            var d = new Date(String(ts).replace(' ', 'T'));
+            if (isNaN(d.getTime())) return '';
+            return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+        } catch (_) { return ''; }
+    }
+    function chatResultsHtml(items) {
+        var html = '';
+        items.slice(0, SITE_SECTION_LIMIT).forEach(function (r) {
+            // Both topic and reply hits open the parent topic thread.
+            var url   = '/chat#topic/' + encodeURIComponent(r.topic_key);
+            var who   = esc(r.user_name_display || 'Anonymous');
+            var when  = chatDate(r.topic_dtime || r.reply_dtime);
+            var tag   = r.match_type === 'reply' ? ' <span class="ss-chat-tag">(in reply)</span>' : '';
+            // r.snippet is server-built ts_headline HTML (<mark>…</mark>),
+            // same trust level as the in-chat search widget.
+            html += '<div class="ss-result-card ss-chat-card">' +
+                    '<a class="ss-chat-link" href="' + esc(url) + '">' +
+                    '  <div class="ss-chat-title">' + esc(r.topic_title || '(untitled)') + tag + '</div>' +
+                    '  <div class="ss-chat-meta">' + who + (when ? ' · ' + esc(when) : '') + '</div>' +
+                    (r.snippet ? '  <div class="ss-chat-snippet">' + r.snippet + '</div>' : '') +
+                    '</a></div>';
         });
+        return html;
+    }
+    function searchChat(q) {
+        var area = $('ss-results');
+        area.innerHTML = '<div class="ss-loading">Searching chat…</div>';
+        return fetchTimed('/api/community-search.php?q=' + encodeURIComponent(q))
+            .then(function (res) { renderChatResults(q, res.data, res.secs); });
+    }
+    function renderChatResults(q, data, secs) {
+        var area = $('ss-results');
+        var items = data ? chatItemsFrom(data) : [];
+        if (!items.length) {
+            area.innerHTML = '<div class="ss-no-results">No matches for <strong>' + esc(q) + '</strong> in chat.</div>';
+            return;
+        }
+        area.innerHTML =
+            '<div class="ss-results-info"><span><strong>' + items.length + '</strong> chat matches for <strong>' + esc(q) + '</strong>' + elapsedHtml(secs) + '</span>' +
+            '<a class="ss-clear" id="ss-clear-link">Clear</a></div>' +
+            chatResultsHtml(items);
+        wireClearLink();
     }
     function searchBooks(q) {
         // Filter selects (series/volume) were removed when the scope
@@ -592,8 +810,10 @@
                 + '&page=' + currentPage;
         var area = $('ss-results');
         area.innerHTML = '<div class="ss-loading">Searching books…</div>';
+        var t0 = (window.performance && performance.now) ? performance.now() : null;
         return fetch(url).then(function (r) { return r.json(); }).then(function (data) {
-            renderBookResults(q, mode, data);
+            var secs = t0 != null ? (performance.now() - t0) / 1000 : null;
+            renderBookResults(q, mode, data, secs);
         }).catch(function () {
             area.innerHTML = '<div class="ss-no-results">Search failed. Please try again.</div>';
         });
@@ -611,8 +831,10 @@
                 + '&page=' + currentPage;
         var area = $('ss-results');
         area.innerHTML = '<div class="ss-loading">Searching transcripts…</div>';
+        var t0 = (window.performance && performance.now) ? performance.now() : null;
         return fetch(url).then(function (r) { return r.json(); }).then(function (data) {
-            renderVideoResults(q, mode, data);
+            var secs = t0 != null ? (performance.now() - t0) / 1000 : null;
+            renderVideoResults(q, mode, data, secs);
         }).catch(function () {
             area.innerHTML = '<div class="ss-no-results">Search failed. Please try again.</div>';
         });
@@ -685,13 +907,13 @@
         });
         return html;
     }
-    function renderBookResults(q, mode, data) {
+    function renderBookResults(q, mode, data, secs) {
         var area = $('ss-results');
         if (!data || !data.results || data.results.length === 0) {
             area.innerHTML = '<div class="ss-no-results">No matches for <strong>' + esc(q) + '</strong> in books.</div>';
             return;
         }
-        var html = '<div class="ss-results-info"><span><strong>' + data.total + '</strong> book matches for <strong>' + esc(q) + '</strong></span>'
+        var html = '<div class="ss-results-info"><span><strong>' + data.total + '</strong> book matches for <strong>' + esc(q) + '</strong>' + elapsedHtml(secs) + '</span>'
                  + '<a class="ss-clear" id="ss-clear-link">Clear</a></div>';
         html += booksResultsHtml(data.results);
         html += renderPagination(data);
@@ -737,13 +959,13 @@
         });
         return html;
     }
-    function renderVideoResults(q, mode, data) {
+    function renderVideoResults(q, mode, data, secs) {
         var area = $('ss-results');
         if (!data || !data.results || data.results.length === 0) {
             area.innerHTML = '<div class="ss-no-results">No matches for <strong>' + esc(q) + '</strong> in video transcripts.</div>';
             return;
         }
-        var html = '<div class="ss-results-info"><span><strong>' + data.total + '</strong> transcript matches for <strong>' + esc(q) + '</strong></span>'
+        var html = '<div class="ss-results-info"><span><strong>' + data.total + '</strong> transcript matches for <strong>' + esc(q) + '</strong>' + elapsedHtml(secs) + '</span>'
                  + '<a class="ss-clear" id="ss-clear-link">Clear</a></div>';
         html += videoResultsHtml(q, mode, data.results);
         html += renderPagination(data);
@@ -751,41 +973,6 @@
         wireClearLink();
     }
 
-    function renderSiteResults(q, mode, books, videos) {
-        var area = $('ss-results');
-        var hasBooks = books && books.results && books.results.length;
-        var hasVideo = videos && videos.results && videos.results.length;
-        if (!hasBooks && !hasVideo) {
-            area.innerHTML = '<div class="ss-no-results">No matches for <strong>' + esc(q) + '</strong>.</div>';
-            return;
-        }
-        var html = '<div class="ss-results-info">'
-                 + '<span><strong>' + (((books && books.total) || 0) + ((videos && videos.total) || 0))
-                 + '</strong> total matches for <strong>' + esc(q) + '</strong></span>'
-                 + '<a class="ss-clear" id="ss-clear-link">Clear</a></div>';
-        if (hasBooks) {
-            html += '<div class="ss-section">'
-                  +   '<div class="heading">'
-                  +     '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5a2 2 0 0 1 2-2h4a3 3 0 0 1 3 3v14a2 2 0 0 0-2-2H3z"/><path d="M21 5a2 2 0 0 0-2-2h-4a3 3 0 0 0-3 3v14a2 2 0 0 1 2-2h7z"/></svg>'
-                  +     'Books <span class="count">· ' + books.total + ' match' + (books.total === 1 ? '' : 'es') + '</span>'
-                  +   '</div>'
-                  +   (books.total > books.results.length ? '<a class="see-all" data-see="books">See all in Books →</a>' : '')
-                  + '</div>';
-            html += booksResultsHtml(books.results);
-        }
-        if (hasVideo) {
-            html += '<div class="ss-section">'
-                  +   '<div class="heading">'
-                  +     '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5v5l5-2.5z" fill="currentColor"/></svg>'
-                  +     'Video <span class="count">· ' + videos.total + ' match' + (videos.total === 1 ? '' : 'es') + '</span>'
-                  +   '</div>'
-                  +   (videos.total > videos.results.length ? '<a class="see-all" data-see="video">See all in Video →</a>' : '')
-                  + '</div>';
-            html += videoResultsHtml(q, mode, videos.results);
-        }
-        area.innerHTML = html;
-        wireClearLink();
-    }
     function renderPagination(data) {
         if (data.pages <= 1) return '';
         var prev = '<button data-go="' + (data.page - 1) + '"' + (data.page <= 1 ? ' disabled' : '') + '>« Previous</button>';
@@ -877,11 +1064,32 @@
                 if ($('ss-input').value.trim()) doSearch(1);
             });
         });
-        // Close picker on outside click.
+        // Scope picker: same interaction as the mode picker — toggle the
+        // menu, pick a source, re-run the active query in that scope.
+        var scopePicker = $('ss-scope-picker');
+        $('ss-scope-current-btn').addEventListener('click', function (e) {
+            e.stopPropagation();
+            var open = !scopePicker.classList.contains('open');
+            scopePicker.classList.toggle('open', open);
+            this.setAttribute('aria-expanded', String(open));
+        });
+        Array.prototype.forEach.call(scopePicker.querySelectorAll('.ss-scope-option'), function (opt) {
+            opt.addEventListener('click', function () {
+                setScope(opt.dataset.scope);
+                scopePicker.classList.remove('open');
+                $('ss-scope-current-btn').setAttribute('aria-expanded', 'false');
+                if ($('ss-input').value.trim()) doSearch(1);
+            });
+        });
+        // Close either picker on outside click.
         document.addEventListener('click', function (e) {
             if (picker.classList.contains('open') && !picker.contains(e.target)) {
                 picker.classList.remove('open');
                 $('ss-mode-current-btn').setAttribute('aria-expanded', 'false');
+            }
+            if (scopePicker.classList.contains('open') && !scopePicker.contains(e.target)) {
+                scopePicker.classList.remove('open');
+                $('ss-scope-current-btn').setAttribute('aria-expanded', 'false');
             }
         });
         // Delegated handler for results-area: pagination buttons,
@@ -914,7 +1122,12 @@
                     return;
                 }
                 currentPage = 1;
-                if (see.dataset.see === 'video') searchVideo(q);
+                // Drill into a single source inline: flip the scope picker to
+                // that source and re-run, so the user gets the full paginated
+                // (or full chat) list with the matching scope shown selected.
+                if (see.dataset.see === 'transcripts') { setScope('transcripts'); searchVideo(q); }
+                else if (see.dataset.see === 'chat')   { setScope('chat');        searchChat(q); }
+                else if (see.dataset.see === 'video')  { setScope('transcripts'); searchVideo(q); }
                 return;
             }
             var hit = e.target.closest && e.target.closest('[data-hit]');
@@ -932,6 +1145,19 @@
         var current = getSearchMode();
         Array.prototype.forEach.call(document.querySelectorAll('#ss-mode-picker .ss-mode-option'), function (opt) {
             opt.classList.toggle('is-active', opt.dataset.mode === current);
+        });
+    }
+    // Set the active scope and reflect it in the trigger (icon + label) and
+    // the menu (aria-selected). Does NOT run a search — callers decide that.
+    function setScope(s) {
+        var meta = SCOPE_BY_KEY[s];
+        if (!meta) return;
+        scope = s;
+        var icon = $('ss-scope-current-icon'), btn = $('ss-scope-current-btn');
+        if (icon) icon.innerHTML = SCOPE_ICON_SVG[s] || '';
+        if (btn)  btn.title = 'Search in: ' + meta.label;
+        Array.prototype.forEach.call(document.querySelectorAll('#ss-scope-picker .ss-scope-option'), function (opt) {
+            opt.setAttribute('aria-selected', String(opt.dataset.scope === s));
         });
     }
 

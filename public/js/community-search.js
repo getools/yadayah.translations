@@ -70,7 +70,27 @@ CommunitySearch.search = function(query) {
         url += '&category=' + encodeURIComponent(Community.currentCategory);
     }
 
+    // Claim the topic-list render slot so a late-arriving loadTopics() fetch
+    // (e.g. the initial page-load list) can't clobber these results.
+    Community._listSeq = (Community._listSeq || 0) + 1;
+    var _seq = Community._listSeq;
+
+    // Show an immediate "Searching…" indicator so the action has visible feedback.
+    var dd0 = document.getElementById('search-results');
+    if (dd0) { dd0.innerHTML = ''; dd0.style.display = 'none'; }
+    if (typeof Community !== 'undefined' && Community.showView) Community.showView('view-topics');
+    var topicEl0 = document.getElementById('topic-list-content');
+    if (topicEl0) {
+        CommunitySearch._injectSpinnerCss();
+        topicEl0.innerHTML = '<div class="search-results-header">'
+            + '<button class="btn btn-sm btn-outline" onclick="CommunitySearch.clear()">&larr; Back to topics</button>'
+            + '<span style="margin-left:12px;font-size:0.9rem;color:#666;">Searching for "<strong>' + Community.esc(query) + '</strong>"&hellip;</span>'
+            + '</div>'
+            + '<div class="search-empty" style="display:flex;align-items:center;justify-content:center;gap:10px;padding:40px 14px;color:#888;"><span class="cs-spinner"></span> Searching&hellip;</div>';
+    }
+
     Community.api(url).then(function(data) {
+        if (_seq !== Community._listSeq) return;  // a newer list/search render superseded us
         // API returns separate topics and replies arrays — merge them
         var results = [];
         (data.topics || []).forEach(function(r) { r.match_type = 'topic'; results.push(r); });
@@ -117,7 +137,23 @@ CommunitySearch.search = function(query) {
         html += '</div>';
 
         topicEl.innerHTML = html;
+    }).catch(function() {
+        if (_seq !== Community._listSeq) return;
+        var topicEl = document.getElementById('topic-list-content');
+        if (!topicEl) return;
+        topicEl.innerHTML = '<div class="search-results-header">'
+            + '<button class="btn btn-sm btn-outline" onclick="CommunitySearch.clear()">&larr; Back to topics</button></div>'
+            + '<div class="search-empty">Search failed. Please try again.</div>';
     });
+};
+
+// ── Inject the search spinner CSS once ──
+CommunitySearch._injectSpinnerCss = function() {
+    if (document.getElementById('cs-spinner-style')) return;
+    var s = document.createElement('style');
+    s.id = 'cs-spinner-style';
+    s.textContent = '.cs-spinner{display:inline-block;width:18px;height:18px;border:2px solid #d4d7e8;border-top-color:#31345A;border-radius:50%;animation:csspin 0.7s linear infinite;vertical-align:middle;}@keyframes csspin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(s);
 };
 
 CommunitySearch.clear = function() {

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1781992815">
+    <meta name="page-version" content="1782136814">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chat — Yada Yah</title>
@@ -517,7 +517,7 @@
         <nav><div class="nav-row"></div><div class="nav-row"></div></nav>
     </div>
 </header>
-<script src="/js/site-nav.js?v=49"></script>
+<script src="/js/site-nav.js?v=53"></script>
 <script>
 // Font size control — persisted to user account (logged in) or localStorage (guest)
 (function() {
@@ -582,13 +582,16 @@
     <!-- Topics View -->
     <div id="view-topics">
         <div id="category-sidebar"></div>
-        <!-- Search Bar -->
+        <!-- Search Bar — commented out 2026-06-21: the site-wide search bar now
+             has a "Chat" scope, making this in-page topic/reply search redundant.
+             To re-enable, uncomment this block (community-search.js still ships).
         <div class="search-bar-wrap">
             <span class="search-icon">&#128269;</span>
             <input type="text" id="community-search" placeholder="Search topics and replies...">
             <button type="button" id="community-search-btn" onclick="CommunitySearch.runFromInput()">Search</button>
             <div id="search-results"></div>
         </div>
+        -->
         <!-- New Topic Button -->
         <div class="new-topic-bar" id="new-topic-bar"></div>
         <!-- Topic List -->
@@ -671,11 +674,11 @@ window.ensureTinyMCE = function(callback) {
 <script src="/js/bg-video.js"></script>
 <script src="/js/community.js?v=38"></script>
 <script src="/js/community-auth.js?v=24"></script>
-<script src="/js/community-topics.js?v=71"></script>
+<script src="/js/community-topics.js?v=72"></script>
 <script src="/js/community-notifications.js?v=25"></script>
 <script src="/js/community-profile.js?v=21"></script>
 <script src="/js/community-dm.js?v=44"></script>
-<script src="/js/community-search.js?v=15"></script>
+<script src="/js/community-search.js?v=16"></script>
 <script src="/js/community-members.js?v=6"></script>
 <script>
 /* ── Show/hide new topic button based on auth ── */

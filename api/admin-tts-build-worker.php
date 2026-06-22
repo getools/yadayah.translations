@@ -38,25 +38,38 @@ $db = getDb();
 // errors / OOM exits trigger the promote.
 $MAX_CONCURRENT_BUILDS = 1;
 register_shutdown_function(function() use (&$db, $MAX_CONCURRENT_BUILDS) {
+    // Serialize promote-next against admin-tts-build.php's dispatch (same lock
+    // key 742002) and count a freshly-claimed pending row (pid set, status not
+    // yet 'running') as occupying a slot — so a worker exit and a concurrent
+    // build POST can't both spawn past the cap.
+    $TTS_BUILD_LOCK = 742002;
     try {
         if (!$db) $db = getDb();
-        $running = (int)$db->query("SELECT COUNT(*) FROM yy_tts_audio WHERE tts_audio_status = 'running'")->fetchColumn();
-        if ($running >= $MAX_CONCURRENT_BUILDS) return;
-        $nextKey = (int)$db->query("
-            SELECT tts_audio_key FROM yy_tts_audio
-             WHERE tts_audio_status = 'pending'
-               AND tts_audio_worker_pid IS NULL
-             ORDER BY tts_audio_dtime ASC
-             LIMIT 1
-        ")->fetchColumn();
-        if (!$nextKey) return;
-        $logFile = sys_get_temp_dir() . '/tts_build_' . $nextKey . '.log';
-        $pid = spawnCappedWorker(__FILE__, [(string)$nextKey], $logFile, [
-            'cpu_secs' => 3600, 'mem_mb' => 1500, 'nice' => 10,
-        ]);
-        if ($pid > 0) {
-            $db->prepare("UPDATE yy_tts_audio SET tts_audio_worker_pid = ? WHERE tts_audio_key = ?")
-               ->execute([$pid, $nextKey]);
+        $db->query('SELECT pg_advisory_lock(' . $TTS_BUILD_LOCK . ')');
+        try {
+            $active = (int)$db->query("SELECT COUNT(*) FROM yy_tts_audio
+                                        WHERE tts_audio_status = 'running'
+                                           OR (tts_audio_status = 'pending' AND tts_audio_worker_pid IS NOT NULL)")
+                              ->fetchColumn();
+            if ($active >= $MAX_CONCURRENT_BUILDS) return;
+            $nextKey = (int)$db->query("
+                SELECT tts_audio_key FROM yy_tts_audio
+                 WHERE tts_audio_status = 'pending'
+                   AND tts_audio_worker_pid IS NULL
+                 ORDER BY tts_audio_dtime ASC
+                 LIMIT 1
+            ")->fetchColumn();
+            if (!$nextKey) return;
+            $logFile = sys_get_temp_dir() . '/tts_build_' . $nextKey . '.log';
+            $pid = spawnCappedWorker(__FILE__, [(string)$nextKey], $logFile, [
+                'cpu_secs' => 3600, 'mem_mb' => 1500, 'nice' => 10,
+            ]);
+            if ($pid > 0) {
+                $db->prepare("UPDATE yy_tts_audio SET tts_audio_worker_pid = ? WHERE tts_audio_key = ?")
+                   ->execute([$pid, $nextKey]);
+            }
+        } finally {
+            $db->query('SELECT pg_advisory_unlock(' . $TTS_BUILD_LOCK . ')');
         }
     } catch (Throwable $e) {
         fwrite(STDERR, "promote-next failed: " . $e->getMessage() . "\n");

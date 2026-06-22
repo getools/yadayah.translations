@@ -52,6 +52,55 @@ $fail = function (string $msg) use ($db, $jobKey, $notify) {
 try {
     if ($userKey) { setCurrentUser($db, $userKey); }
 
+    // ── Consensus mode: majority vote across several baselines, then re-flow
+    //    into editable rows by the supplied caption params (see init endpoint). ──
+    if ($model === 'consensus') {
+        require_once __DIR__ . '/transcript-compare-lib.php';
+        require_once __DIR__ . '/transcript-caption-lib.php';
+        $jp = json_decode((string)($job['job_params'] ?? ''), true) ?: [];
+        $baselines = array_values(array_filter((array)($jp['baselines'] ?? [])));
+        $params    = (array)($jp['params'] ?? []);
+        if (!$baselines) throw new Exception('consensus: no baselines supplied');
+        // Timing spine = best word-level baseline among those checked.
+        $pref = ['gpu-whisperx-word','gpu-whisper-large-v3-word','gpu-whisper-large-v3-turbo-word','gpu-parakeet-tdt-0.6b-v2-word'];
+        $spine = null;
+        foreach ($pref as $c) if (in_array($c, $baselines, true)) { $spine = $c; break; }
+        if (!$spine) foreach ($baselines as $c) if (strpos($c, '-word') !== false) { $spine = $c; break; }
+        if (!$spine) $spine = $baselines[0];
+        $refs = array_values(array_diff($baselines, [$spine]));
+        $cmp = buildComparison($db, $itemKey, $spine, $refs);
+        if (isset($cmp['error'])) throw new Exception('consensus: ' . $cmp['error']);
+        $stream = [];
+        foreach ($cmp['slots'] as $sl) { $w = trim((string)$sl['consensus']); if ($w !== '') $stream[] = ['t' => $sl['t'], 'w' => $w]; }
+        if (!$stream) throw new Exception('consensus: empty word stream');
+        $opts = [
+            'max_chars'   => (int)($params['max_chars'] ?? 42),
+            'max_lines'   => (int)($params['max_lines'] ?? 2),
+            'max_secs'    => (float)($params['max_secs'] ?? 7.0),
+            'min_secs'    => (float)($params['min_secs'] ?? 1.2),
+            'break_punct' => array_key_exists('break_punct', $params) ? (bool)$params['break_punct'] : true,
+            'break_gap'   => (float)($params['break_gap'] ?? 0),
+            'dedup'       => array_key_exists('dedup', $params) ? (bool)$params['dedup'] : true,
+        ];
+        if (!empty($params['use_boundaries'])) {
+            $bset = [];
+            foreach ($baselines as $bcode) {
+                $bs = $db->prepare("SELECT feed_item_transcript_segment::text AS seg FROM yy_feed_item_transcript_auto WHERE feed_item_key = ? AND feed_item_transcript_auto_model = ?");
+                $bs->execute([$itemKey, $bcode]);
+                foreach ($bs->fetchAll(PDO::FETCH_ASSOC) as $br) $bset[] = round(cfIntervalToSecs($br['seg']), 2);
+            }
+            $bset = array_values(array_unique($bset)); sort($bset);
+            $opts['boundary_set'] = $bset;
+        }
+        $cues = cfReflow($stream, $opts);
+        if (!$cues) throw new Exception('consensus: re-flow produced no cues');
+        $crows = [];
+        foreach ($cues as $cue) {
+            $crows[] = ['segment' => cfSecsToInterval((float)$cue['start']),
+                        'text'    => str_replace("\n", ' ', (string)$cue['text'])];
+        }
+        $cleanedRows = applyCorrectionsAcrossRows($db, $crows);
+    } else {
     // Derived hybrid models are assembled fresh from the current source feeds
     // every run, so a stale join can never reach the live transcript.
     if ($model === 'whisper-1-word-join' || $model === 'whisper-1-word-join-seg') {
@@ -80,6 +129,7 @@ try {
     // (multi-word substitutions that straddle row boundaries). Pure-PHP, done
     // before the transaction so the write window stays short.
     $cleanedRows = applyCorrectionsAcrossRows($db, $rows);
+    }
 
     $db->beginTransaction();
     // Bulk-load fast path: suppress the live table's two per-row triggers

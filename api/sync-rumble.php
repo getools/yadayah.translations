@@ -10,6 +10,7 @@
  * Or via API: GET /api/sync-rumble.php?key=yada2026sync
  */
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/feed-helpers.php';
 
 // Auth check for web requests
 if (php_sapi_name() !== 'cli') {
@@ -59,16 +60,9 @@ try {
         throw new Exception('Invalid JSON in cache file');
     }
 
-    // Get vlog page_key for category creation
-    $vlogPageKey = (int)($db->query("SELECT page_key FROM yy_page WHERE page_code = 'vlog' LIMIT 1")->fetchColumn() ?: 1);
-
-    // Cache existing categories by slug
-    $catCache = [];
-    $catStmt = $db->prepare("SELECT category_key, category_slug FROM yy_feed_page_category WHERE page_key = ?");
-    $catStmt->execute([$vlogPageKey]);
-    foreach ($catStmt->fetchAll() as $c) {
-        $catCache[$c['category_slug']] = (int)$c['category_key'];
-    }
+    // Hashtag parse rules (shared engine): seeded vlog/basics defaults + every
+    // active Items section's include-hashtag template.
+    $parseRules = getHashtagParseRules($db);
 
     foreach ($videos as $v) {
         $vidId = $v['video_id'] ?? '';
@@ -82,27 +76,13 @@ try {
         if (!$vidId || !$title || !$vidUrl) continue;
         $totalFound++;
 
-        // Parse #vlog|category|episode from description
-        $categoryKey = null;
-        $episode = null;
+        // Parse hashtag templates (#vlog|[category]|[episode], etc.) from the
+        // title + description. feed_item_episode + category assignments are
+        // applied below via applyParsedItemFields (most-recent-wins). Pass NULL
+        // episode into the upsert so COALESCE preserves the existing value.
         $tags = '';
-        if ($description && preg_match('/#vlog\|([^|]+)\|(\d+)/', $description, $m)) {
-            $catTitle = trim($m[1]);
-            $episode = (int)$m[2];
-            $catSlug = strtolower(preg_replace('/[^a-z0-9]+/i', '-', $catTitle));
-            $catSlug = trim($catSlug, '-');
-
-            if (isset($catCache[$catSlug])) {
-                $categoryKey = $catCache[$catSlug];
-            } else {
-                // Create new category
-                $insCat = $db->prepare("INSERT INTO yy_feed_page_category (page_key, category_title, category_slug) VALUES (?, ?, ?) RETURNING category_key");
-                $insCat->execute([$vlogPageKey, $catTitle, $catSlug]);
-                $categoryKey = (int)$insCat->fetchColumn();
-                $catCache[$catSlug] = $categoryKey;
-                if (php_sapi_name() === 'cli') echo "Created category: {$catTitle} (slug: {$catSlug}, key: {$categoryKey})\n";
-            }
-        }
+        $parse = applyHashtagTemplates($db, $title . "\n" . $description, $parseRules);
+        $episode = null;
 
         // Extract all hashtags from description for feed_item_tags.
         // Joined with bare commas (no space) to match the format produced by
@@ -142,18 +122,14 @@ try {
             else $totalUpdated++;
         }
 
-        // Write Vlog category to yy_feed_item_category (page-scoped to Vlog page).
-        // Replace only Vlog-page rows so other pages' admin assignments are untouched.
-        if ($categoryKey) {
+        // Apply parsed captures (episode/date/title/sort) + category
+        // assignments via the shared engine (most-recent-wins arbitration;
+        // page-scoped category replacement).
+        if ($parse['fields'] || $parse['categories']) {
             $itemKeyStmt = $db->prepare("SELECT feed_item_key FROM yy_feed_item WHERE feed_key = ? AND feed_item_external_id = ?");
             $itemKeyStmt->execute([$feedKey, $vidId]);
             $itemKey = (int)($itemKeyStmt->fetchColumn() ?: 0);
-            if ($itemKey) {
-                $db->prepare("DELETE FROM yy_feed_item_category WHERE feed_item_key = ? AND category_key IN (SELECT category_key FROM yy_feed_page_category WHERE page_key = ?)")
-                   ->execute([$itemKey, $vlogPageKey]);
-                $db->prepare("INSERT INTO yy_feed_item_category (feed_item_key, category_key, feed_item_category_episode) VALUES (?, ?, ?) ON CONFLICT (feed_item_key, category_key) DO UPDATE SET feed_item_category_episode = EXCLUDED.feed_item_category_episode")
-                   ->execute([$itemKey, $categoryKey, $episode ? (string)$episode : null]);
-            }
+            if ($itemKey) applyParsedItemFields($db, $itemKey, $parse);
         }
     }
 } catch (\Exception $e) {

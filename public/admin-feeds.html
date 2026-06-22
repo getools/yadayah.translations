@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782018774">
+    <meta name="page-version" content="1782160731">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
@@ -574,6 +574,18 @@ function populateItemsFeedFilter() {
 // reviewer's resume bookmark (validation_bookmark_seconds) is the most
 // useful thing to surface.
 function transcribeBtnHtml(it) {
+    // Transcription requires a complete MP3 on disk (recorded-to-completion
+    // or uploaded). With no audio file there is nothing to transcribe, so
+    // render a disabled button rather than letting the popover open and
+    // fail / produce a partial transcript. Disabled regardless of whether a
+    // transcript already exists.
+    var hasMp3 = !!(it.feed_item_audio_file && String(it.feed_item_audio_file).trim() !== '');
+    if (!hasMp3) {
+        return '<button disabled '
+            + 'title="No MP3 yet — transcription needs a completed or uploaded audio file" '
+            + 'style="background:#f1f1f1;color:#aaa;border:1px solid #ddd;font-size:0.72rem;padding:4px 10px;border-radius:4px;cursor:not-allowed;font-weight:600;white-space:nowrap;">'
+            + 'No MP3</button>';
+    }
     var hasTranscript = it.has_transcript === true || it.has_transcript === 't';
     var status = it.transcript_validation_status || null;
     var bookmark = it.transcript_bookmark_seconds;
@@ -1565,22 +1577,80 @@ function syncFeed(key) {
         if (feeds[i].feed_key == key) { feedName = feeds[i].feed_name; break; }
     }
     showSyncProgress(feedName);
-    fetch(API + '/admin-feeds.php', {
-        method: 'PUT',
-        credentials: 'include',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({feed_key: key})
-    })
+    // Capture the latest sync key BEFORE kicking off, so polling can tell the
+    // new run apart from any prior one.
+    fetch(API + '/admin-feeds.php?sync_status=1&feed_key=' + key, {credentials: 'include'})
     .then(function(r) { return safeJson(r); })
-    .then(function(data) {
-        hideSyncProgress();
-        alert(formatSyncResult(data));
-        loadFeeds();
+    .catch(function() { return {}; })
+    .then(function(pre) {
+        var baseKey = (pre && pre.sync && pre.sync.feed_sync_key) ? Number(pre.sync.feed_sync_key) : 0;
+        return fetch(API + '/admin-feeds.php', {
+            method: 'PUT',
+            credentials: 'include',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({feed_key: key})
+        })
+        .then(function(r) { return safeJson(r); })
+        .then(function(data) {
+            var sr = data.sync_result || {};
+            if (data.async || sr.status === 'started') {
+                // Background sync — poll yy_feed_sync until it finishes.
+                pollSyncStatus(key, baseKey, feedName);
+            } else {
+                // Synchronous path (e.g. Rumble) — result is already complete.
+                hideSyncProgress();
+                alert(formatSyncResult(data));
+                loadFeeds();
+            }
+        });
     })
     .catch(function(err) {
         hideSyncProgress();
         alert('Sync failed: ' + err.message);
     });
+}
+
+// Poll the async sync log for a feed until a run NEWER than baseKey reaches a
+// terminal state. The full-screen overlay blocks re-clicks while we wait.
+function pollSyncStatus(key, baseKey, feedName) {
+    var attempts = 0;
+    var maxAttempts = 280; // ~14 min at 3s — matches the worker's CPU cap
+    var timer = setInterval(function() {
+        attempts++;
+        if (attempts > maxAttempts) {
+            clearInterval(timer);
+            hideSyncProgress();
+            alert('Sync is taking longer than expected; it will keep running in the background. Reload the page later to see results.');
+            loadFeeds();
+            return;
+        }
+        fetch(API + '/admin-feeds.php?sync_status=1&feed_key=' + key, {credentials: 'include'})
+        .then(function(r) { return safeJson(r); })
+        .then(function(d) {
+            var s = d && d.sync;
+            if (!s) return;
+            var k = Number(s.feed_sync_key);
+            if (k <= baseKey) return; // the new run hasn't registered its row yet
+            if (s.feed_sync_status === 'running') {
+                document.getElementById('sync-sub').textContent =
+                    'Running in background… (' + (s.elapsed_secs || 0) + 's)';
+                return;
+            }
+            // Terminal state reached.
+            clearInterval(timer);
+            hideSyncProgress();
+            if (s.feed_sync_status === 'error') {
+                alert('Sync failed: ' + (s.feed_sync_error || 'unknown error'));
+            } else {
+                alert('Sync complete for ' + (feedName || 'feed') +
+                      '\nFound: ' + (s.feed_sync_items_found || 0) +
+                      '\nInserted: ' + (s.feed_sync_items_inserted || 0) +
+                      '\nUpdated: ' + (s.feed_sync_items_updated || 0));
+            }
+            loadFeeds();
+        })
+        .catch(function() { /* transient network blip — keep polling */ });
+    }, 3000);
 }
 
 // ── Transcribe popover ──
@@ -1693,7 +1763,8 @@ function openTranscript(itemKey) {
             + '<div id="t-table-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
             + '<select id="t-view-select" autocomplete="off" onchange="onTranscriptViewChange(this.value)" title="Switch between the live editable transcript and any per-model Baseline snapshot. Picking a model with no rows offers to generate it." style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;max-width:320px;background:#fff;"><option value="">Current (editable)</option></select>'
             + '<button id="t-rerun-btn" onclick="rerunCurrentView()" title="Re-run the currently selected model. Writes to Baseline only — live transcript is never touched." style="display:none;background:#27ae60;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Re-run</button>'
-            + '<button id="t-init-btn" onclick="openInitializeModal()" title="Pick one of the auto-transcribed model versions, apply the YadaYah correction pass, and copy it into the live transcript for editing" style="background:#31345A;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Initialize Transcript</button>'
+            + '<button id="t-genbaselines-btn" onclick="openGenerateBaselinesPopover()" title="Run the self-hosted STT engines for this item to (re)generate the underlying baselines" style="background:#0b7285;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Generate Baselines</button>'
+            + '<button id="t-init-btn" onclick="openInitializeEditsModal()" title="Build the editable transcript from a consensus of chosen baselines, segmented by tunable rules" style="background:#31345A;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Initialize Edits</button>'
             + '<button onclick="document.getElementById(\'t-upload-input\').click()" title="Upload an MP3 (or M4A/WAV/VTT/SRT) — used as the audio source for transcription instead of downloading from YouTube" style="background:#31345A;color:#fff;border:1px solid #31345A;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">↑ Upload MP3</button>'
             + '<input type="file" id="t-upload-input" accept=".mp3,.m4a,.opus,.wav,.ogg,.aac,.vtt,.srt" style="display:none;" onchange="uploadTranscriptSource(this)">'
             // Push the current transcript out to YouTube as a caption
@@ -2228,6 +2299,19 @@ function recTranscriptCellFmtDate(s) {
          + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
 }
 function recTranscriptCell(it) {
+    // Gate: transcription requires a complete MP3 on disk — one produced by
+    // a finished recording or an explicit upload. Without an audio file
+    // there is nothing to transcribe, so render a disabled cell. This is a
+    // hard gate (applies even if a transcript record somehow exists).
+    var hasMp3 = !!(it.feed_item_audio_file && String(it.feed_item_audio_file).trim() !== '');
+    if (!hasMp3) {
+        return '<button disabled '
+            + 'title="No MP3 yet — transcription needs a completed or uploaded audio file" '
+            + 'style="border:1px solid #ddd;background:#f1f1f1;color:#aaa;'
+            +        'padding:4px 10px;border-radius:4px;cursor:not-allowed;font-family:inherit;'
+            +        'font-size:0.78rem;font-weight:600;width:100%;box-sizing:border-box;text-align:center;line-height:1.2;">'
+            + 'No MP3</button>';
+    }
     // Highest-priority state: an in-flight transcription job. The
     // background poller populates _genTxRunningJobs from
     // /api/admin-transcript-models.php?action=running; when present,
@@ -4524,78 +4608,192 @@ function updateTranscriptRerunBtn() {
     btn.style.display = _transcriptView ? '' : 'none';
 }
 
-// ── Initialize Transcript: promote an auto version into the live editor ──
-// Asks which auto-transcribed model to use as the source, then runs the
-// YadaYah correction pass on it and writes the cleaned rows into the live
-// yy_feed_item_transcript (replacing whatever's there). This is the path
-// that actually populates the editor from a generated _auto version.
-function openInitializeModal() {
+// ── Generate Baselines + consensus Initialize Edits ─────────────────────────
+// Generate Baselines: run the free self-hosted STT engines for this item; the
+// server's single worker drains the job queue FIFO, so checked engines run
+// sequentially. Initialize Edits: build the live editable transcript from a
+// majority-vote consensus of chosen baselines, segmented by tunable rules.
+
+function _ieNum(id, label, val, step) {
+    return '<label style="display:flex;flex-direction:column;gap:2px;">' + esc(label)
+        + '<input type="number" id="' + id + '" value="' + val + '"' + (step ? ' step="' + step + '"' : '')
+        + ' style="padding:4px 6px;border:1px solid #ccc;border-radius:4px;font:inherit;width:100%;"></label>';
+}
+
+function openInitializeEditsModal() {
     if (!_transcriptItemKey) { alert('No transcript loaded.'); return; }
     var ov = document.getElementById('init-overlay');
-    if (!ov) {
-        ov = document.createElement('div');
-        ov.id = 'init-overlay';
-        ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:10002;';
-        ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(560px,95vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.4);">'
-            + '<div style="padding:14px 18px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;">'
-            +   '<h3 style="margin:0;color:#31345A;font-size:1.05rem;">Initialize Transcript</h3>'
-            +   '<button onclick="closeInitializeModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">&times;</button>'
-            + '</div>'
-            + '<div style="padding:14px 18px;font-size:0.82rem;color:#555;border-bottom:1px solid #eee;">'
-            +   'Pick one auto-transcribed version to seed the live editor. The selected model\'s rows will be passed through the correction dictionary (every confirmed Search-&-Replace) and written into the editable transcript. <strong style="color:#a30;">Any existing edits on the current transcript will be overwritten.</strong>'
-            + '</div>'
-            + '<div id="init-list" style="padding:8px 18px;overflow-y:auto;">Loading…</div>'
-            + '<div style="padding:12px 18px;border-top:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;">'
-            +   '<div id="init-status" style="font-size:0.82rem;color:#666;"></div>'
-            +   '<div><button onclick="closeInitializeModal()" style="background:#fff;border:1px solid #ccc;padding:6px 14px;border-radius:4px;cursor:pointer;margin-right:8px;">Cancel</button>'
-            +     '<button id="init-go-btn" onclick="doInitialize()" disabled style="background:#a36100;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;opacity:0.5;">Initialize</button></div>'
-            + '</div>'
-            + '</div>';
-        document.body.appendChild(ov);
-        ov.onclick = function(e){ if (e.target === ov) closeInitializeModal(); };
-    }
-    ov.style.display = 'flex';
-    document.getElementById('init-list').innerHTML = '<div style="padding:30px;text-align:center;color:#999;">Loading…</div>';
-    document.getElementById('init-status').textContent = '';
-    fetch(API + '/admin-transcript-models.php?action=status&item_key=' + encodeURIComponent(_transcriptItemKey),
-        { credentials:'include' })
-        .then(function(r){ return safeJson(r); })
-        .then(function(d) {
-            if (d.error) {
-                document.getElementById('init-list').innerHTML = '<div style="padding:14px;color:#c00;">' + esc(d.error) + '</div>';
-                return;
+    if (ov) ov.remove();
+    ov = document.createElement('div');
+    ov.id = 'init-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:10002;';
+    ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(640px,95vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.4);">'
+        + '<div style="padding:14px 18px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;">'
+        +   '<h3 style="margin:0;color:#31345A;font-size:1.05rem;">Initialize Edits</h3>'
+        +   '<button onclick="closeInitializeModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">&times;</button>'
+        + '</div>'
+        + '<div id="ie-warn" style="display:none;padding:10px 18px;background:#fdecea;color:#7a1c0c;font-size:0.82rem;border-bottom:1px solid #f5c6cb;"></div>'
+        + '<div style="padding:12px 18px;font-size:0.82rem;color:#555;border-bottom:1px solid #eee;">Build the editable transcript from a <strong>consensus</strong> of the checked baselines (majority vote per word; per-word timestamps from the best word-level baseline), segmented by the rules below.</div>'
+        + '<div style="padding:10px 18px;overflow-y:auto;">'
+        +   '<div style="font-weight:600;color:#31345A;font-size:0.85rem;margin-bottom:4px;">Baselines</div>'
+        +   '<div id="ie-baselines" style="margin-bottom:14px;">Loading…</div>'
+        +   '<div style="font-weight:600;color:#31345A;font-size:0.85rem;margin-bottom:6px;">Segmentation</div>'
+        +   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;font-size:0.8rem;color:#444;">'
+        +     _ieNum('ie-max_chars', 'Max chars / line', 42)
+        +     _ieNum('ie-max_lines', 'Max lines', 2)
+        +     _ieNum('ie-max_secs', 'Max seconds/line', 7, '0.1')
+        +     _ieNum('ie-min_secs', 'Min seconds/line', 1.2, '0.1')
+        +     _ieNum('ie-break_gap', 'Break on pause (seconds) (0 = off)', 0, '0.1')
+        +   '</div>'
+        +   '<label style="display:block;margin-top:10px;font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="ie-break_punct" checked> Break on punctuation</label>'
+        +   '<label style="display:block;margin-top:4px;font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="ie-use_boundaries"> Prefer breaks at baseline segment boundaries</label>'
+        +   '<label style="display:block;margin-top:4px;font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="ie-dedup" checked> Collapse rolling-caption duplication</label>'
+        + '</div>'
+        + '<div style="padding:12px 18px;border-top:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;">'
+        +   '<div id="init-status" style="font-size:0.82rem;color:#666;"></div>'
+        +   '<div><button onclick="closeInitializeModal()" style="background:#fff;border:1px solid #ccc;padding:6px 14px;border-radius:4px;cursor:pointer;margin-right:8px;">Cancel</button>'
+        +     '<button id="init-go-btn" onclick="doInitializeEdits()" style="background:#a36100;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;">Initialize</button></div>'
+        + '</div>'
+        + '</div>';
+    document.body.appendChild(ov);
+    ov.onclick = function(e){ if (e.target === ov) closeInitializeModal(); };
+    _ieRestoreParams();
+    // Warn banner if the live transcript already has edited rows.
+    fetch(API + '/admin-transcript-models.php?action=live_count&item_key=' + encodeURIComponent(_transcriptItemKey), { credentials:'include' })
+        .then(function(r){ return safeJson(r); }).then(function(d){
+            if (d && d.live_rows > 0) {
+                var w = document.getElementById('ie-warn');
+                if (w) { w.style.display = 'block'; w.innerHTML = '⚠ This item already has <strong>' + d.live_rows + '</strong> edited transcript rows. Initializing will <strong>reset them</strong> with the new baseline consensus.'; }
             }
-            var anyAvailable = false;
-            var html = '';
-            d.models.forEach(function(m) {
-                // `ready` (when present) governs selectability: a derived hybrid
-                // is ready as soon as its SOURCE feeds exist — Initialize
-                // assembles the join on demand, so it needn't be pre-built.
-                var has = (typeof m.ready !== 'undefined') ? !!m.ready : !!m.last_run;
-                if (has) anyAvailable = true;
-                var lastTxt;
-                if (m.last_run) {
-                    lastTxt = 'Last run: ' + new Date(m.last_run).toLocaleString();
-                } else if (m.derived && has) {
-                    lastTxt = '<span style="color:#27ae60;">ready — assembled from existing feeds on Initialize</span>';
-                } else if (m.derived) {
-                    lastTxt = '<span style="color:#999;">needs its source feeds (word-level Whisper + YouTube' + (m.code === 'whisper-1-word-join-seg' ? ' + segment-level Whisper' : '') + ') first</span>';
+        }).catch(function(){});
+    // Existing baselines for this item, all pre-checked.
+    fetch(API + '/admin-transcript-models.php?action=status&item_key=' + encodeURIComponent(_transcriptItemKey), { credentials:'include' })
+        .then(function(r){ return safeJson(r); }).then(function(d){
+            var host = document.getElementById('ie-baselines'); if (!host) return;
+            if (!d || d.error) { host.innerHTML = '<span style="color:#c00;">' + esc((d && d.error) || 'load failed') + '</span>'; return; }
+            var avail = (d.models || []).filter(function(m){ return !!m.last_run; });
+            if (!avail.length) { host.innerHTML = '<span style="color:#a36100;">No baselines yet — use <strong>Generate Baselines</strong> first.</span>'; return; }
+            host.innerHTML = avail.map(function(m){
+                return '<label style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:0.83rem;cursor:pointer;"><input type="checkbox" class="ie-baseline" value="' + esc(m.code) + '" checked> ' + esc(m.label) + '</label>';
+            }).join('');
+        }).catch(function(){});
+}
+
+// ── Generate Baselines popover ──
+var _gbPollTimer = null;
+var _gbJobs = [];   // [{code, jobKey, state, pct, msg, err}]
+var _gbExisting = {};   // code -> { last_run, rows } for baselines that already exist on this item
+
+function openGenerateBaselinesPopover() {
+    if (!_transcriptItemKey) { alert('No transcript loaded.'); return; }
+    var ov = document.getElementById('genbase-overlay');
+    if (ov) ov.remove();
+    ov = document.createElement('div');
+    ov.id = 'genbase-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:10002;';
+    var gpu = TRANSCRIPT_GEN_MODELS.filter(function(m){ return m.code.indexOf('gpu-') === 0; });
+    var rows = gpu.map(function(m){
+        return '<label style="display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:0.83rem;cursor:pointer;">'
+            + '<input type="checkbox" class="gb-model" value="' + esc(m.code) + '" style="margin-top:3px;">'
+            + '<span><span class="gb-exists" data-code="' + esc(m.code) + '" style="color:#27ae60;font-size:0.72rem;font-weight:600;"></span>' + esc(m.label) + '</span></label>';
+    }).join('');
+    ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(640px,95vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.4);">'
+        + '<div style="padding:14px 18px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;"><h3 style="margin:0;color:#31345A;font-size:1.05rem;">Generate Baselines</h3><button onclick="closeGenerateBaselinesPopover()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">&times;</button></div>'
+        + '<div style="padding:10px 18px;font-size:0.82rem;color:#555;border-bottom:1px solid #eee;">Run the free self-hosted STT engines for this item. Checked engines are queued and run <strong>sequentially</strong> on the GPU box; progress shows below. Engines that already have a baseline are marked <span style="color:#1d6b3a;font-weight:700;">✓ done</span> and are skipped unless you tick “Re-generate”.</div>'
+        + '<div style="padding:10px 18px;overflow-y:auto;">' + rows + '</div>'
+        + '<div id="gb-status" style="display:none;padding:8px 18px;border-top:1px solid #eee;font-size:0.78rem;font-family:monospace;max-height:220px;overflow-y:auto;"></div>'
+        + '<div style="padding:12px 18px;border-top:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;gap:8px;background:#f7f8fc;">'
+        +   '<label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:#555;cursor:pointer;"><input type="checkbox" id="gb-regen" style="margin:0;"> Re-generate engines that already have a baseline</label>'
+        +   '<div style="display:flex;gap:8px;"><button onclick="closeGenerateBaselinesPopover()" style="background:#fff;border:1px solid #ccc;padding:6px 14px;border-radius:4px;cursor:pointer;">Close</button><button id="gb-go-btn" onclick="runGenerateBaselines()" style="background:#0b7285;color:#fff;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font-weight:600;">Generate</button></div>'
+        + '</div>'
+        + '</div>';
+    document.body.appendChild(ov);
+    ov.onclick = function(e){ if (e.target === ov) closeGenerateBaselinesPopover(); };
+    _gbExisting = {};
+    fetch(API + '/admin-transcript-models.php?action=status&item_key=' + encodeURIComponent(_transcriptItemKey), { credentials:'include' })
+        .then(function(r){ return safeJson(r); }).then(function(d){
+            if (!d || !d.models) return;
+            d.models.forEach(function(m){ if (m.last_run) _gbExisting[m.code] = { last_run: m.last_run, rows: m.rows || 0 }; });
+            Array.prototype.slice.call(document.querySelectorAll('#genbase-overlay .gb-exists')).forEach(function(s){
+                var info = _gbExisting[s.getAttribute('data-code')];
+                if (info) {
+                    s.textContent = '✓ done ' + String(info.last_run).substring(0, 10)
+                                  + (info.rows ? ' · ' + info.rows + ' seg' : '') + '  ';
+                    s.style.cssText = 'display:inline-block;color:#1d6b3a;background:#d6f5dd;border:1px solid #a9e6bb;'
+                                    + 'border-radius:4px;padding:0 6px;margin-right:6px;font-size:0.72rem;font-weight:700;';
                 } else {
-                    lastTxt = '<span style="color:#999;">no rows — run this model first via the picker</span>';
+                    s.textContent = '';
                 }
-                html += '<label style="display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid #f0f0f0;cursor:' + (has ? 'pointer' : 'not-allowed') + ';opacity:' + (has ? '1' : '0.55') + ';">'
-                    +   '<input type="radio" name="init-pick" value="' + esc(m.code) + '"' + (has ? '' : ' disabled') + ' onchange="document.getElementById(\'init-go-btn\').disabled=false;document.getElementById(\'init-go-btn\').style.opacity=\'1\';">'
-                    +   '<div style="flex:1;">'
-                    +     '<div style="font-weight:600;color:#31345A;">' + esc(m.label) + '</div>'
-                    +     '<div style="font-size:0.75rem;color:#666;">' + lastTxt + '</div>'
-                    +   '</div>'
-                    + '</label>';
             });
-            if (!anyAvailable) {
-                html = '<div style="padding:24px;color:#a36100;text-align:center;">No auto-transcripts exist for this item yet. Generate at least one model via the view picker first.</div>';
-            }
-            document.getElementById('init-list').innerHTML = html;
-        });
+        }).catch(function(){});
+}
+
+function closeGenerateBaselinesPopover() {
+    if (_gbPollTimer) { clearInterval(_gbPollTimer); _gbPollTimer = null; }
+    var ov = document.getElementById('genbase-overlay'); if (ov) ov.remove();
+}
+
+function _gbFind(code) { for (var i = 0; i < _gbJobs.length; i++) if (_gbJobs[i].code === code) return _gbJobs[i]; return null; }
+function _gbLabel(code) { var m = null; TRANSCRIPT_GEN_MODELS.forEach(function(x){ if (x.code === code) m = x; }); return m ? m.label : code; }
+
+function runGenerateBaselines() {
+    var checked = Array.prototype.slice.call(document.querySelectorAll('#genbase-overlay .gb-model:checked')).map(function(c){ return c.value; });
+    if (!checked.length) { alert('Check at least one engine.'); return; }
+    var regen = !!(document.getElementById('gb-regen') || {}).checked;
+    // Skip engines that already have a baseline unless "Re-generate" is ticked —
+    // avoids needlessly re-transcribing on the GPU. Skipped ones still show in
+    // the progress list so it's clear nothing silently dropped.
+    var toRun = [], skipped = [];
+    checked.forEach(function(c){ if (!regen && _gbExisting[c]) skipped.push(c); else toRun.push(c); });
+    if (!toRun.length) { alert('Every checked engine already has a baseline. Tick “Re-generate engines that already have a baseline” to redo them.'); return; }
+    var btn = document.getElementById('gb-go-btn'); if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+    var statusEl = document.getElementById('gb-status'); if (statusEl) statusEl.style.display = 'block';
+    _gbJobs = skipped.map(function(c){ return { code: c, jobKey: null, state: 'skipped' }; })
+        .concat(toRun.map(function(c){ return { code: c, jobKey: null, state: 'queued' }; }));
+    _gbRender();
+    toRun.forEach(function(code){
+        fetch(API + '/admin-transcript-models.php', { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ action:'run', item_key:_transcriptItemKey, model:code }) })
+            .then(function(r){ return safeJson(r); }).then(function(d){
+                var j = _gbFind(code); if (!j) return;
+                // d.queued===false means the server spawned a worker for THIS job;
+                // otherwise it's waiting behind the single GPU worker.
+                if (d && d.job_key) { j.jobKey = d.job_key; j.state = (d.queued === false) ? 'running' : 'queued'; }
+                else { j.state = 'failed'; j.err = (d && d.error) || 'dispatch failed'; }
+                _gbRender();
+            }).catch(function(){ var j = _gbFind(code); if (j) { j.state = 'failed'; j.err = 'network'; } _gbRender(); });
+    });
+    if (_gbPollTimer) clearInterval(_gbPollTimer);
+    _gbPollTimer = setInterval(_gbPollTick, 2000);
+}
+
+function _gbPollTick() {
+    var done = _gbJobs.every(function(j){ return j.state === 'complete' || j.state === 'failed' || j.state === 'skipped'; });
+    if (done) { clearInterval(_gbPollTimer); _gbPollTimer = null; var b = document.getElementById('gb-go-btn'); if (b) { b.disabled = false; b.style.opacity = '1'; } return; }
+    _gbJobs.filter(function(j){ return j.jobKey && (j.state === 'queued' || j.state === 'running'); }).forEach(function(j){
+        fetch(API + '/admin-transcript-models.php?action=job&job_key=' + j.jobKey, { credentials:'include' })
+            .then(function(r){ return safeJson(r); }).then(function(d){
+                if (!d) return;
+                if (d.job_status === 'complete') { j.state = 'complete'; j.msg = d.job_message; }
+                else if (d.job_status === 'failed') { j.state = 'failed'; j.err = d.job_error || d.job_message; }
+                else if (d.job_status === 'cancelled') { j.state = 'failed'; j.err = 'cancelled'; }
+                else { j.state = 'running'; j.pct = d.job_progress; j.msg = d.job_message; }
+                _gbRender();
+            }).catch(function(){});
+    });
+}
+
+function _gbRender() {
+    var el = document.getElementById('gb-status'); if (!el) return;
+    el.innerHTML = _gbJobs.map(function(j){
+        var ic = j.state === 'complete' ? '✓' : (j.state === 'failed' ? '✗' : (j.state === 'skipped' ? '⏭' : (j.state === 'running' ? '⟳' : '⏳')));
+        var col = j.state === 'complete' ? '#27ae60' : (j.state === 'failed' ? '#c0392b' : (j.state === 'skipped' ? '#a36100' : '#31345A'));
+        var tail = j.state === 'running' ? (' ' + (j.pct != null ? j.pct + '% ' : '') + (j.msg ? esc(j.msg) : ''))
+            : (j.state === 'failed' ? (' ' + esc(j.err || ''))
+            : (j.state === 'skipped' ? ' already has a baseline — skipped (tick Re-generate to redo)'
+            : (j.state === 'complete' ? ' done' : ' queued')));
+        return '<div style="color:' + col + ';padding:1px 0;">' + ic + ' ' + esc(_gbLabel(j.code)) + tail + '</div>';
+    }).join('');
 }
 function closeInitializeModal() {
     if (typeof _initCleanup === 'function') _initCleanup();
@@ -5279,25 +5477,55 @@ function renderBookmarksModalTable() {
 var _initES = null;
 function _initCleanup() { if (_initES) { try { _initES.close(); } catch (e) {} _initES = null; } }
 
-function doInitialize() {
-    var picked = document.querySelector('#init-list input[name="init-pick"]:checked');
-    if (!picked) return;
-    var model = picked.value;
-    var msg = '⚠ This will REPLACE every row of the live transcript with the cleaned-up version of "' + model + '".\n\nProceed?';
-    if (!confirm(msg)) return;
+function doInitializeEdits() {
+    var checked = Array.prototype.slice.call(document.querySelectorAll('#init-overlay .ie-baseline:checked')).map(function(c){ return c.value; });
+    if (!checked.length) { alert('Pick at least one baseline.'); return; }
+    var num = function(id, dflt){ var v = parseFloat(document.getElementById(id).value); return isNaN(v) ? dflt : v; };
+    var params = {
+        max_chars:      Math.max(10, Math.round(num('ie-max_chars', 42))),
+        max_lines:      Math.max(1, Math.round(num('ie-max_lines', 2))),
+        max_secs:       num('ie-max_secs', 7),
+        min_secs:       num('ie-min_secs', 1.2),
+        break_gap:      Math.max(0, num('ie-break_gap', 0)),
+        break_punct:    document.getElementById('ie-break_punct').checked,
+        use_boundaries: document.getElementById('ie-use_boundaries').checked,
+        dedup:          document.getElementById('ie-dedup').checked
+    };
+    _ieSaveParams(params);
+    // Confirm reset only if the live transcript already has rows.
+    fetch(API + '/admin-transcript-models.php?action=live_count&item_key=' + encodeURIComponent(_transcriptItemKey), { credentials:'include' })
+        .then(function(r){ return safeJson(r); }).then(function(d){
+            var liveRows = (d && d.live_rows) || 0;
+            if (liveRows > 0 && !confirm('This will RESET the existing ' + liveRows + ' edited transcript rows with the new baseline consensus.\n\nProceed?')) return;
+            _ieSubmit(checked, params);
+        }).catch(function(){ _ieSubmit(checked, params); });
+}
+
+function _ieSubmit(baselines, params) {
     var statusEl = document.getElementById('init-status');
     var btn = document.getElementById('init-go-btn');
-    btn.disabled = true; btn.style.opacity = '0.5';
-    statusEl.textContent = 'Initializing… (long episodes take a minute — this updates automatically when it finishes)';
-    _initCleanup();
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+    if (statusEl) statusEl.textContent = 'Building consensus… (long episodes take a minute — updates automatically when done)';
+    if (typeof _initCleanup === 'function') _initCleanup();
     fetch(API + '/admin-transcript-init.php', {
         method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ item_key: _transcriptItemKey, model: model })
-    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        body: JSON.stringify({ item_key:_transcriptItemKey, mode:'consensus', baselines:baselines, params:params })
+    }).then(function(r){ return safeJson(r); }).then(function(d){
         if (!d || d.error) { _initFail((d && d.error) || 'request failed'); return; }
-        if (d.async && d.job_key) { _initWatch(d.job_key, model); return; }
-        _initSucceed(model, d.rows_written, d.message);   // backward-compat: sync response
+        if (d.async && d.job_key) { _initWatch(d.job_key, 'consensus'); return; }
+        _initSucceed('consensus', d.rows_written, d.message);
     }).catch(function(){ _initFail('network error'); });
+}
+
+function _ieSaveParams(p) { try { localStorage.setItem('ie_params', JSON.stringify(p)); } catch (e) {} }
+function _ieRestoreParams() {
+    var p = null; try { p = JSON.parse(localStorage.getItem('ie_params') || 'null'); } catch (e) {}
+    if (!p) return;
+    var set = function(id, v){ var el = document.getElementById(id); if (el != null && v != null) el.value = v; };
+    var chk = function(id, v){ var el = document.getElementById(id); if (el != null && typeof v === 'boolean') el.checked = v; };
+    set('ie-max_chars', p.max_chars); set('ie-max_lines', p.max_lines); set('ie-max_secs', p.max_secs);
+    set('ie-min_secs', p.min_secs); set('ie-break_gap', p.break_gap);
+    chk('ie-break_punct', p.break_punct); chk('ie-use_boundaries', p.use_boundaries); chk('ie-dedup', p.dedup);
 }
 
 // Watch a queued Initialize job over SSE; the server pushes 'done'/'failed'.

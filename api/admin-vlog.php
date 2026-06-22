@@ -176,14 +176,17 @@ if ($type === 'video' && $method === 'PUT') {
     if (isset($data['title'])) {
         $fields[] = 'feed_item_title_override = ?';
         $params[] = trim($data['title']);
+        stampManualField($db, $key, 'title');       // most-recent-wins vs hashtag
     }
     if (isset($data['episode'])) {
         $fields[] = 'feed_item_episode = ?';
         $params[] = (int)$data['episode'];
+        stampManualField($db, $key, 'episode');
     }
     if (isset($data['sort'])) {
         $fields[] = 'feed_item_sort = ?';
         $params[] = (int)$data['sort'];
+        stampManualField($db, $key, 'sort');
     }
     if (isset($data['active_flag'])) {
         $fields[] = 'feed_item_active_flag = ?';
@@ -199,6 +202,7 @@ if ($type === 'video' && $method === 'PUT') {
             $db->prepare("INSERT INTO yy_feed_item_category (feed_item_key, category_key) VALUES (?, ?) ON CONFLICT (feed_item_key, category_key) DO NOTHING")
                ->execute([$key, $catKey]);
         }
+        stampManualField($db, $key, 'category:' . $PAGE_KEY);
     }
 
     if ($fields) {
