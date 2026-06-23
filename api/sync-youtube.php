@@ -12,11 +12,10 @@ if (session_status() === PHP_SESSION_NONE) session_start();
 
 $db = getDb();
 $isCli = php_sapi_name() === 'cli';
-// CLI sync processes thousands of items and legitimately takes longer than the
-// 120s web-request safety net set in config.php. Override to 10 minutes here.
-if ($isCli) {
-    $db->exec("SET statement_timeout = '600s'");
-}
+// Sync legitimately takes longer than the 120s web-request safety net in
+// config.php (playlist rebuilds, privacy sweeps). Override to 10 minutes for
+// both CLI and web-triggered runs.
+$db->exec("SET statement_timeout = '600s'");
 
 // Hashtag parse rules (shared engine): seeded vlog/basics defaults + every
 // active Items section's include-hashtag template. Cached per request.
