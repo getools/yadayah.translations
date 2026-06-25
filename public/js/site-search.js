@@ -1097,7 +1097,16 @@
         // results-area HTML can be rebuilt freely without re-attaching.
         $('ss-results').addEventListener('click', function (e) {
             var go = e.target.closest && e.target.closest('[data-go]');
-            if (go) { e.preventDefault(); doSearch(parseInt(go.dataset.go, 10)); return; }
+            if (go) {
+                e.preventDefault();
+                doSearch(parseInt(go.dataset.go, 10));
+                // Jump back to the top of the results section so the user
+                // starts reading the new page from its first hit rather than
+                // wherever the prior page's pagination row happened to sit.
+                var band = $('site-search-band');
+                if (band && band.scrollIntoView) band.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                return;
+            }
             // "See all in Books / Video" links switch the scope picker to
             // the matching scope and re-run the search at page 1, so the
             // user gets the full paginated list (Site mode caps each

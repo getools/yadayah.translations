@@ -47,10 +47,10 @@ function handleGet(PDO $db): void {
         $chapterKey = isset($_GET['filter_chapter']) && ctype_digit($_GET['filter_chapter']) ? (int)$_GET['filter_chapter'] : null;
         $verseKey = isset($_GET['filter_verse']) && ctype_digit($_GET['filter_verse']) ? (int)$_GET['filter_verse'] : null;
 
-        $sql = "SELECT translation_copy FROM yy_translation WHERE yah_scroll_key = ?";
+        $sql = "SELECT translation_copy FROM yy_translation WHERE cite_book_key = ?";
         $params = [$scrollKey];
-        if ($chapterKey) { $sql .= " AND yah_chapter_key = ?"; $params[] = $chapterKey; }
-        if ($verseKey) { $sql .= " AND yah_verse_key = ?"; $params[] = $verseKey; }
+        if ($chapterKey) { $sql .= " AND cite_chapter_key = ?"; $params[] = $chapterKey; }
+        if ($verseKey) { $sql .= " AND cite_verse_key = ?"; $params[] = $verseKey; }
 
         $stmt = $db->prepare($sql);
         $stmt->execute($params);

@@ -552,6 +552,14 @@ Community.categoryBadge = function(slug) {
     return '';
 };
 
+// ── Posting privilege ──
+// A banned user stays fully logged in and tracked, but cannot create or edit
+// any messages (topics, replies, DMs). All compose/edit UI and actions gate on
+// this. Banning is silent — no UI tells the user they are banned.
+Community.canPost = function() {
+    return !!(Community.currentUser && !Community.currentUser.banned);
+};
+
 // ── Init ──
 Community.init = function() {
     // Load session

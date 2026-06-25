@@ -79,15 +79,22 @@ while IFS='|' read -r jkey pid; do
     # legitimately long-running transcription (a >2h wall-clock job whose
     # worker is alive but mostly blocked waiting on the GPU engine; the 40-min
     # worker cap is CPU time, not wall time, so long episodes can exceed 2h).
-    if [ -n "$pid" ] && [ "$pid" -gt 0 ] && docker exec yada-www-web-1 test -d "/proc/$pid" 2>/dev/null; then
-        continue  # worker still alive in the container — leave it
+    # grep -ql "transcript-worker" guards against PID reuse by an unrelated
+    # process that happened to be assigned the same PID after the worker exited.
+    if [ -n "$pid" ] && [ "$pid" -gt 0 ]; then
+        if docker exec yada-www-web-1 grep -ql "transcript-worker" /proc/$pid/cmdline </dev/null 2>/dev/null; then
+            continue  # worker still alive in the container — leave it
+        fi
     fi
+    # </dev/null prevents docker exec -i (via $PSQL) from consuming the process
+    # substitution's stdin, which would drain remaining SELECT rows and limit
+    # this loop to cancelling only one job per run.
     $PSQL -c "UPDATE yy_feed_item_transcript_job
               SET job_status='cancelled',
                   job_message=COALESCE(job_message,'') || ' [auto-cancelled by lock-cleanup: stale]',
                   job_completed_dtime=NOW()
               WHERE feed_item_transcript_job_key=$jkey
-                AND job_status IN ('pending','running')" >/dev/null 2>&1
+                AND job_status IN ('pending','running')" </dev/null >/dev/null 2>&1
     cancelled=$((cancelled + 1))
 done < <($PSQL -c "
     SELECT feed_item_transcript_job_key, COALESCE(job_worker_pid, 0)

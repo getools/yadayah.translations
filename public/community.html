@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782136814">
+    <meta name="page-version" content="1782367203">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Community</title>
@@ -444,7 +444,7 @@
         <nav><div class="nav-row"></div><div class="nav-row"></div></nav>
     </div>
 </header>
-<script src="/js/site-nav.js?v=53"></script>
+<script src="/js/site-nav.js?v=54"></script>
 
 <div class="community-wrap">
     <div class="community-header">
@@ -535,12 +535,12 @@
 
 <script src="/js/tinymce/tinymce.min.js"></script>
 <script src="/js/bg-video.js"></script>
-<script src="/js/community.js?v=30"></script>
+<script src="/js/community.js?v=31"></script>
 <script src="/js/community-auth.js?v=15"></script>
-<script src="/js/community-topics.js?v=66"></script>
+<script src="/js/community-topics.js?v=67"></script>
 <script src="/js/community-notifications.js?v=23"></script>
 <script src="/js/community-profile.js?v=20"></script>
-<script src="/js/community-dm.js?v=44"></script>
+<script src="/js/community-dm.js?v=45"></script>
 <script src="/js/community-search.js?v=11"></script>
 <script src="/js/community-members.js?v=6"></script>
 <script>
@@ -551,7 +551,7 @@
         origRenderAuth();
         var bar = document.getElementById('new-topic-bar');
         if (bar) {
-            bar.innerHTML = Community.currentUser
+            bar.innerHTML = Community.canPost()
                 ? '<button class="btn btn-primary" onclick="window.location.hash=\'#new-topic\'">New Topic</button>'
                 : '';
         }
@@ -577,6 +577,6 @@
 });})();
 </script>
 <script src="/js/site-footer.js?v=128"></script>
-<script src="/js/video-comments.js?v=13"></script>
+<script src="/js/video-comments.js?v=14"></script>
 </body>
 </html>

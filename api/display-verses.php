@@ -11,9 +11,9 @@ if ($chapterKey === null) {
 }
 
 $pdo = getDb();
-// Filter is "has at least one translation" (not yah_verse_count > 0).
-// 724 translations live in verses where yah_verse_count = 0 — the count
+// Filter is "has at least one translation" (not cite_verse_count > 0).
+// 724 translations live in verses where cite_verse_count = 0 — the count
 // filter alone would hide them.
-$stmt = $pdo->prepare('SELECT yah_verse_key, yah_chapter_key, yah_verse_number FROM yah_verse WHERE yah_chapter_key = ? AND EXISTS (SELECT 1 FROM yy_translation t WHERE t.yah_verse_key = yah_verse.yah_verse_key) ORDER BY yah_verse_sort, yah_verse_number');
+$stmt = $pdo->prepare('SELECT cite_verse_key, cite_chapter_key, cite_verse_number FROM yy_cite_verse WHERE cite_chapter_key = ? AND EXISTS (SELECT 1 FROM yy_translation t WHERE t.cite_verse_key = yy_cite_verse.cite_verse_key) ORDER BY cite_verse_sort, cite_verse_number');
 $stmt->execute([$chapterKey]);
 jsonResponse($stmt->fetchAll());

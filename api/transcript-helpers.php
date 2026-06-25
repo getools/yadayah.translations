@@ -7,6 +7,43 @@
  */
 
 /**
+ * Single-worker queue dispatcher for editable (consensus) transcript builds
+ * (yy_feed_item_transcript_init_job). If no init worker is currently running,
+ * spawn one on the OLDEST pending job — job_key ASC = creation order, which the
+ * client creates in page order, so the editable transcripts build strictly
+ * item-by-item, one at a time, and the queue survives the operator closing the
+ * popover. Idempotent: safe to call from every enqueue point and from the
+ * worker on exit. A double-spawn is harmless — the worker claims its row
+ * atomically (pending→running) and a loser exits. Best-effort throughout.
+ *
+ * Also reaps a wedged job: a worker killed (OOM/SIGKILL) mid-run leaves its row
+ * 'running' forever, which would stall the single-worker gate. Any 'running'
+ * row whose job_started is older than 2h (well past the 1h wait_for deadline +
+ * build time) is failed so the queue can advance.
+ */
+function spawnNextInitWorker(PDO $db): void {
+    try {
+        $db->exec("UPDATE yy_feed_item_transcript_init_job
+                      SET job_status='error', job_error='reaped — worker died (running > 2h)', job_completed=now()
+                    WHERE job_status='running'
+                      AND COALESCE(job_started, job_created) < now() - interval '2 hours'");
+        // Count only THIS-model running workers (job_started is set on claim).
+        // Pre-migration / old-model jobs left 'running' with a NULL job_started
+        // are NOT counted, so they can't wedge the gate — their own detached
+        // workers (if any) finish independently; the 2h reaper clears the rest.
+        $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_init_job WHERE job_status='running' AND job_started IS NOT NULL")->fetchColumn();
+        if ($running > 0) return;   // one at a time
+        $next = (int)$db->query("SELECT job_key FROM yy_feed_item_transcript_init_job WHERE job_status='pending' ORDER BY job_key LIMIT 1")->fetchColumn();
+        if (!$next) return;
+        // Use the same reliable detach the STT queue uses (nohup + </dev/null);
+        // a bare `setsid … &` child does NOT survive when the spawning process
+        // is itself a short-lived CLI worker, so the chain would stop after one.
+        require_once __DIR__ . '/spawn-helpers.php';
+        spawnCappedWorker(__DIR__ . '/admin-transcript-init-worker.php', [$next], '/tmp/transcript-init-' . $next . '.log');
+    } catch (\Throwable $e) { /* best-effort dispatch */ }
+}
+
+/**
  * Return all feed_item_keys linked to $itemKey via yy_feed_item_link, EXCLUDING
  * $itemKey itself. By default includes pending links (confirmed_flag IS NULL)
  * AND confirmed links; explicitly-denied links (FALSE) are always excluded.

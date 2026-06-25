@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782136813">
+    <meta name="page-version" content="1782393500">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -181,7 +181,7 @@
 <div id="app" class="container">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=15"></script>
+<script src="/js/admin-nav.js?v=17"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -243,18 +243,20 @@
         <div class="tts-section">
             <h3>Providers</h3>
             <p class="desc">Per-engine settings for the TTS providers below.
-                <strong>Pronunciation</strong>: pick which side of the per-word
-                lexicon this provider's voices consume — <em>Phonetic</em>
-                (respelling like <code>to-MAH-to</code>) or <em>IPA</em>
-                (<code>təˈmɑːtoʊ</code>). Engines that don't accept the
-                non-chosen format will fall back automatically.</p>
+                <strong>Pronunciation</strong>: which lexicon formats this
+                engine can actually consume at synth time — <em>Phonetic</em>
+                (respelling like <code>to-MAH-to</code>, every engine) and/or
+                <em>IPA</em> (<code>təˈmɑːtoʊ</code>; Azure / ElevenLabs /
+                Inworld today — local GPU engines flatten IPA to the
+                respelling). The Pronunciations tab disables its IPA column
+                toggle for any voice whose provider can't process IPA.</p>
             <table class="tts-table" id="providers-table" style="width:100%;font-size:0.85rem;">
                 <thead>
                     <tr>
                         <th style="text-align:left;">Provider</th>
                         <th style="width:120px;text-align:center;" title="Number of voices this provider contributes to the catalog below">Voices</th>
                         <th style="width:110px;text-align:center;" title="Whether custom voices can be trained / cloned for this provider (drives the Add Custom Voice flow)">Custom</th>
-                        <th style="width:220px;text-align:center;">Pronunciation</th>
+                        <th style="width:220px;text-align:center;" title="Which pronunciation formats this engine can consume at synth time. Drives the Pronunciations tab IPA↔Phonetic toggle.">Pronunciation</th>
                     </tr>
                 </thead>
                 <tbody id="providers-tbody">
@@ -450,6 +452,12 @@
                     <li><strong>×</strong> — delete the row.</li>
                 </ul>
                 <p class="desc" style="margin-top:6px;">Tunes apply <em>before</em> pause rules during synthesis, so the matched text consumes its half-ring / apostrophe characters before the pause filter ever sees them.</p>
+                <p class="desc" style="margin-top:8px;padding:8px 10px;background:#f4f6ff;border-left:3px solid #31345A;border-radius:3px;">
+                    <strong>Phonetic respelling convention</strong> — for self-hosted voices (Chatterbox, CosyVoice, etc.) that read the <strong>Phonetic</strong> spelling rather than IPA:
+                    a <strong>CAPITAL</strong> letter marks a smooth, stressed syllable (<code>MickRay</code> → “MICK-ray”);
+                    a <strong>space</strong> is an intentional pause / separate unit (<code>yoad hey wah hey</code> → four distinct spoken letters);
+                    a <strong>hyphen</strong> is decoration only — it is stripped at synth and has <em>no effect on sound</em> (<code>Mik-ray</code> and <code>Mikray</code> sound identical, so lean on capitals and clear letters, not hyphens).
+                </p>
             </div>
             <!-- Row 1: Provider + Voice + Add. Voice selected here drives
                  the ▶ audition button on every row. Voice list is
@@ -506,8 +514,8 @@
                         <th style="width:32px;text-align:center;" title="Active — uncheck to disable this rule"></th>
                         <th onclick="sortTunesBy('print')"      style="width:18%;cursor:pointer;" title="Click to sort by Text">Text<span class="sort-arrow" data-col="print"></span></th>
                         <th onclick="sortTunesBy('book_count')" style="width:50px;text-align:right;cursor:pointer;" title="Number of occurrences in the books — click to sort">#<span class="sort-arrow" data-col="book_count"></span></th>
-                        <th class="col-sub"  style="width:36%;text-align:left;padding-left:25px;" title="Phonetic re-spelling (the SUB field). Local engines use this; Azure can use it too when no IPA is set.">Phonetic <button type="button" class="prons-mode-btn" onclick="setPronsMode('ipa')" title="Switch to IPA view (show IPA + SAPI columns)">IPA ▸</button></th>
-                        <th class="col-ipa"  style="width:18%;text-align:left;padding-left:25px;" title="IPA pronunciation. Azure uses this via <phoneme alphabet='ipa'> SSML.">IPA <button type="button" class="prons-mode-btn" onclick="setPronsMode('phonetic')" title="Switch to Phonetic view (show only the re-spelling)">Phonetic ▸</button></th>
+                        <th class="col-sub"  style="width:36%;text-align:left;padding-left:25px;" title="Phonetic re-spelling (the SUB field). Local engines use this; Azure can use it too when no IPA is set.">Phonetic <button type="button" class="prons-mode-btn" data-target-mode="ipa" onclick="setPronsMode('ipa')" title="Switch to IPA view (show IPA + SAPI columns)">IPA ▸</button></th>
+                        <th class="col-ipa"  style="width:18%;text-align:left;padding-left:25px;" title="IPA pronunciation. Azure uses this via <phoneme alphabet='ipa'> SSML.">IPA <button type="button" class="prons-mode-btn" data-target-mode="phonetic" onclick="setPronsMode('phonetic')" title="Switch to Phonetic view (show only the re-spelling)">Phonetic ▸</button></th>
                         <th class="col-sapi" style="width:18%" title="Reference SAPI phoneme codes. Azure neural voices don't accept SAPI; kept for cross-checking with older tools.">SAPI <span style="color:#999;font-weight:400;">(ref)</span></th>
                         <th style="width:36px"></th>
                         <th onclick="sortTunesBy('provider')" style="width:110px;cursor:pointer;" title="Per-tune provider scope. When set, this tune only fires when synthesizing through that engine. Use it for engine-specific respellings (e.g. a Chatterbox-only phonetic). Leave blank to apply to all engines.">Provider<span class="sort-arrow" data-col="provider"></span></th>
@@ -519,11 +527,23 @@
                 </thead>
                 <tbody id="tunes-tbody"></tbody>
             </table>
-            <!-- Dedicated player for per-row ▶ clicks on this tab so the
-                 progress bar stays in the same context as the buttons that
-                 trigger it (rather than playing through the Voices tab's
-                 #preview-audio element which the user can't see). -->
-            <audio id="tunes-audio" controls preload="none" style="width:100%;margin-top:8px;display:none;"></audio>
+            <!-- Dedicated audition player for per-row ▶ clicks on this tab.
+                 Pinned to the bottom of the page so it stays reachable while the
+                 operator scrolls the long phrase list clicking ▶: it reveals
+                 when a render starts, mirrors synth progress in its own status
+                 span, then keeps the rendered clip loaded so the SAME audio can
+                 be replayed via the native controls without re-synthesizing.
+                 Uses the Provider/Voice already selected in the toolbar above.
+                 Lives inside #pane-pronunciations, so the pane's display:none on
+                 other tabs hides this fixed bar automatically. -->
+            <div id="tunes-player-bar" style="display:none;position:fixed;left:0;right:0;bottom:0;z-index:120;background:#fff;border-top:1px solid #d4d7e8;box-shadow:0 -2px 8px rgba(0,0,0,0.10);padding:8px 16px;">
+                <div style="display:flex;align-items:center;gap:12px;max-width:1100px;margin:0 auto;">
+                    <span style="font-size:0.8rem;font-weight:600;color:#31345A;white-space:nowrap;">Pronunciation preview</span>
+                    <span id="tunes-bar-status" class="status-msg" style="margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px;"></span>
+                    <audio id="tunes-audio" controls preload="none" style="flex:1 1 auto;min-width:160px;"></audio>
+                    <button type="button" onclick="hideTunesPlayerBar()" title="Hide the preview player" style="background:none;border:none;color:#888;cursor:pointer;font-size:1.2rem;line-height:1;padding:2px 6px;">×</button>
+                </div>
+            </div>
             <!-- Bottom pager — mirrors the top pager for long lists -->
             <div id="tunes-toolbar-bot" style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:0.85rem;flex-wrap:wrap;justify-content:flex-end;">
                 <button class="tunes-prev" onclick="goTunesPage(-1)" style="background:#fff;border:1px solid #ccc;padding:4px 10px;border-radius:4px;cursor:pointer;">←</button>
@@ -742,7 +762,7 @@ function activateTtsTab(tabName) {
     if (tabName === 'pronunciations') loadTunes();
     if (tabName === 'pauses') loadPauses();
     if (tabName === 'fonts')  loadFonts();
-    if (tabName === 'books') loadVolumes();
+    if (tabName === 'books') { loadVolumes(); populateBooksProfileSelect(); }
     return true;
 }
 
@@ -754,11 +774,29 @@ function activateTtsTab(tabName) {
 // shows a short reason. Updated as engines land on the box.
 var CUSTOMIZE_PROVIDERS = {
     chatterbox: {
-        label: 'Chatterbox',
+        label: 'Chatterbox Original',
         codePrefix: 'cb-',
         instructions: {
             data:     'One clean 5–15 s clip, single speaker, no music/noise, 16–24 kHz mono WAV.',
             workflow: 'Zero-shot — the clip registers as a voice on submit.',
+            time:     'Instant.',
+        },
+    },
+    'chatterbox-mtl': {
+        label: 'Chatterbox Multilingual',
+        codePrefix: 'cbm-',
+        instructions: {
+            data:     'One clean 7–15 s clip, single speaker, no music/noise, 16–24 kHz mono WAV.',
+            workflow: 'Zero-shot clone supporting 23 languages (English, Hebrew, Spanish, French, German, Arabic, Chinese, and more). The clip registers as a voice on submit; voices currently default to English.',
+            time:     'Instant.',
+        },
+    },
+    'chatterbox-turbo': {
+        label: 'Chatterbox Turbo',
+        codePrefix: 'cbt-',
+        instructions: {
+            data:     'One clean clip OVER 5 s (English only), single speaker, no music/noise, 16–24 kHz mono WAV.',
+            workflow: 'Zero-shot clone with faster decoding — the clip registers as a voice on submit.',
             time:     'Instant.',
         },
     },
@@ -1220,13 +1258,66 @@ window.addEventListener('load', function() {
 
 // ── Pronunciations table mode toggle (IPA ↔ Phonetic) ───────────────────
 // Controls visibility only — all three values (sub, ipa, sapi) stay stored.
+// PRONS_CAP mirrors the currently-selected audition provider's pronunciation
+// CAPABILITY flags (provider_phonetic_capable / provider_ipa_capable). The
+// column toggle is gated on these: a provider that can't consume IPA forces
+// the Phonetic-only view and disables the IPA switch, and vice-versa.
+var PRONS_CAP = { phonetic: true, ipa: true };
 function setPronsMode(mode) {
     if (mode !== 'ipa' && mode !== 'phonetic') mode = 'ipa';
+    // Never land on a mode the selected provider can't synthesize.
+    if (mode === 'ipa'      && PRONS_CAP.ipa      === false) mode = 'phonetic';
+    if (mode === 'phonetic' && PRONS_CAP.phonetic === false) mode = 'ipa';
     var pane = document.getElementById('pane-pronunciations');
     if (!pane) return;
     pane.classList.toggle('mode-phonetic', mode === 'phonetic');
     pane.classList.toggle('mode-ipa',       mode === 'ipa');
     if (window.sessionState) sessionState.save('pronsMode', mode);
+}
+
+// Coerce a Postgres/JSON boolean-ish value to a JS bool (true unless an
+// explicit false/'f'/0). Capability flags default permissive when unknown.
+function pronsBool(v, dflt) {
+    if (v === undefined || v === null) return dflt;
+    return !(v === false || v === 'f' || v === 0 || v === '0' || v === 'false');
+}
+// Look up the provider object behind the Pronunciations ▶ audition selector.
+function pronsCurrentTestProvider() {
+    var provSel = document.getElementById('tunes-test-provider');
+    if (!provSel || !PRONS_VOICES_CACHE || !PRONS_VOICES_CACHE.providers) return null;
+    var pk = parseInt(provSel.value, 10);
+    return PRONS_VOICES_CACHE.providers.filter(function (p) { return p.provider_key === pk; })[0] || null;
+}
+// Re-gate the IPA↔Phonetic column toggle to the selected provider's caps.
+function pronsApplyProviderCapability() {
+    var p = pronsCurrentTestProvider();
+    var ipaOk = p ? pronsBool(p.provider_ipa_capable, false) : true;
+    var subOk = p ? pronsBool(p.provider_phonetic_capable, true) : true;
+    // Never present a dead UI — if a provider somehow has neither capability,
+    // fall back to allowing phonetic.
+    if (!ipaOk && !subOk) subOk = true;
+    PRONS_CAP = { phonetic: subOk, ipa: ipaOk };
+    var pane = document.getElementById('pane-pronunciations');
+    if (!pane) return;
+    var ipaBtn = pane.querySelector('.prons-mode-btn[data-target-mode="ipa"]');
+    var subBtn = pane.querySelector('.prons-mode-btn[data-target-mode="phonetic"]');
+    if (ipaBtn) {
+        ipaBtn.disabled = !ipaOk;
+        ipaBtn.style.opacity = ipaOk ? '' : '0.4';
+        ipaBtn.style.cursor  = ipaOk ? '' : 'not-allowed';
+        ipaBtn.title = ipaOk ? 'Switch to IPA view (show IPA + SAPI columns)'
+                             : 'This provider can’t process IPA — phonetic only';
+    }
+    if (subBtn) {
+        subBtn.disabled = !subOk;
+        subBtn.style.opacity = subOk ? '' : '0.4';
+        subBtn.style.cursor  = subOk ? '' : 'not-allowed';
+        subBtn.title = subOk ? 'Switch to Phonetic view (show only the re-spelling)'
+                             : 'This provider can’t process phonetic respelling — IPA only';
+    }
+    // Force the live view into a capable mode (setPronsMode self-corrects).
+    var cur = pane.classList.contains('mode-phonetic') ? 'phonetic' : 'ipa';
+    setPronsMode(cur);
 }
 
 function api(path, opts) {
@@ -1488,6 +1579,21 @@ async function renderCategoryRows() {
             ? voiceByCode[savedVoiceCode].provider_key
             : (providers[0] ? providers[0].provider_key : 0);
         provSel.value = String(savedProviderKey);
+        // Flag a STALE assignment: if this category's saved voice points at a
+        // provider that's no longer selectable (e.g. it was deactivated), the
+        // select would otherwise render blank. Insert a red flagged option so the
+        // orphaned assignment is VISIBLE — it stays editable (pick "-default-" to
+        // clear it, or another provider to reassign).
+        if (savedVoiceCode && provSel.selectedIndex < 0) {
+            var _sv = voiceByCode[savedVoiceCode] || {};
+            var _pn = _sv.provider_main || _sv.provider_label || ('provider #' + savedProviderKey);
+            var _stale = document.createElement('option');
+            _stale.value = String(savedProviderKey);
+            _stale.textContent = '⚠ ' + _pn + ' — inactive';
+            _stale.style.color = '#c0392b';
+            provSel.appendChild(_stale);
+            provSel.value = String(savedProviderKey);
+        }
 
         // Voice dropdown — filtered to active voices of the currently-selected
         // provider, sorted alphabetically. Called once at render time and again
@@ -1533,6 +1639,12 @@ async function renderCategoryRows() {
         provSel.addEventListener('change', function () {
             rebuildVoiceSelect();
             populateStyleOptions(voiceSel, styleSel, '');
+            // Picking "-default-" (provider_key 0) means "no engine, no voice"
+            // for this category — clear its override entirely so it falls back to
+            // inherit/default. save_category_voice with a blank voice_code DELETEs
+            // the row. (Real providers just refilter the voice list and wait for a
+            // voice pick before saving — see the comment above.)
+            if (provSel.value === '0') clearCategoryOverride(cat.code, row);
         });
         voiceSel.addEventListener('change', function () {
             populateStyleOptions(voiceSel, styleSel, '');
@@ -1634,6 +1746,25 @@ async function saveCategoryOnly(catCode, rowEl) {
         tts_voice_rate_pct: c.rate, tts_voice_pitch_st: c.pitch, tts_voice_volume: c.volume,
         tts_category_voice_read_flag: c.read,
     };
+}
+
+// Clear a category's per-profile override entirely (provider + voice → none),
+// so it inherits from its parent / the default. Triggered when the operator
+// picks "-default-" as the provider. A blank voice_code makes
+// save_category_voice DELETE the (tts_key, profile, category) row.
+async function clearCategoryOverride(catCode, rowEl) {
+    await api('/admin-tts-config.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            action: 'save_category_voice',
+            tts_key: TTS_KEY,
+            profile_key: ACTIVE_PROFILE_KEY,
+            tts_category: catCode,
+            voice_code: '',
+        }),
+    });
+    delete STATE.categories[catCode];
 }
 
 async function saveAndListenCategory(catCode, rowEl) {
@@ -2444,8 +2575,11 @@ async function loadProviders() {
         }
         tbody.innerHTML = providers.filter(function (p) { return String(p.provider_key) !== '0'; }).map(function (p) {
             var pk = p.provider_key;
-            var phon = (p.provider_phonetic_type || 'sub') === 'ipa' ? 'ipa' : 'sub';
-            var grp  = 'prov-phon-' + pk;
+            // Pronunciation CAPABILITY (not preference): which formats this
+            // engine can actually consume at synth time. Drives the
+            // Pronunciations tab's IPA↔Phonetic toggle gating.
+            var subCap = pronsBool(p.provider_phonetic_capable, true);
+            var ipaCap = pronsBool(p.provider_ipa_capable, false);
             var active = (p.provider_active_flag !== false && p.provider_active_flag !== 'f' && p.provider_active_flag !== 0);
             var custom = (p.provider_custom_voice_flag === true || p.provider_custom_voice_flag === 't' || p.provider_custom_voice_flag === 1);
             return '<tr data-provider-key="' + pk + '"' + (active ? '' : ' style="opacity:0.5;"') + '>' +
@@ -2464,12 +2598,12 @@ async function loadProviders() {
                         ' title="Custom voices can be trained / cloned for this provider"' +
                         ' style="vertical-align:middle;cursor:pointer;">' +
                 '</td>' +
-                '<td style="text-align:center;">' +
-                    '<label style="margin-right:14px;cursor:pointer;">' +
-                        '<input type="radio" name="' + grp + '" value="sub"' + (phon === 'sub' ? ' checked' : '') + ' onchange="saveProviderPhoneticType(' + pk + ', \'sub\', this)" style="vertical-align:middle;"> Phonetic' +
+                '<td style="text-align:center;white-space:nowrap;">' +
+                    '<label style="margin-right:14px;cursor:pointer;" title="This engine can consume the SUB phonetic respelling (to-MAH-to). Every TTS engine can.">' +
+                        '<input type="checkbox"' + (subCap ? ' checked' : '') + ' onchange="saveProviderCapability(' + pk + ', \'provider_phonetic_capable\', this.checked, this)" style="vertical-align:middle;"> Phonetic' +
                     '</label>' +
-                    '<label style="cursor:pointer;">' +
-                        '<input type="radio" name="' + grp + '" value="ipa"' + (phon === 'ipa' ? ' checked' : '') + ' onchange="saveProviderPhoneticType(' + pk + ', \'ipa\', this)" style="vertical-align:middle;"> IPA' +
+                    '<label style="cursor:pointer;" title="This engine can consume IPA at synth time (Azure SSML / ElevenLabs / Inworld). Local GPU engines flatten IPA to the respelling, so leave unchecked.">' +
+                        '<input type="checkbox"' + (ipaCap ? ' checked' : '') + ' onchange="saveProviderCapability(' + pk + ', \'provider_ipa_capable\', this.checked, this)" style="vertical-align:middle;"> IPA' +
                     '</label>' +
                 '</td>' +
             '</tr>';
@@ -2479,23 +2613,32 @@ async function loadProviders() {
     }
 }
 
-async function saveProviderPhoneticType(providerKey, value, radioEl) {
+// Save one pronunciation CAPABILITY flag (provider_phonetic_capable /
+// provider_ipa_capable). Optimistically updates PRONS_VOICES_CACHE so the
+// Pronunciations tab's toggle gating reflects the change without a reload.
+async function saveProviderCapability(providerKey, field, checked, cbEl) {
     var s = document.getElementById('providers-status');
     if (s) { s.textContent = 'Saving…'; s.className = 'status-msg'; }
+    var body = { action: 'save_provider', provider_key: providerKey };
+    body[field] = checked ? 1 : 0;
     try {
         await api('/admin-tts-config.php', {
             method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({
-                action: 'save_provider',
-                provider_key: providerKey,
-                provider_phonetic_type: value,
-            }),
+            body: JSON.stringify(body),
         });
-        if (s) { s.textContent = 'Saved — pronunciation set to ' + (value === 'ipa' ? 'IPA' : 'Phonetic'); s.className = 'status-msg success'; }
+        // Keep the in-memory provider caches in sync so the Pronunciations
+        // toggle re-gates correctly without a full reload.
+        [VC_STATE.providers, (PRONS_VOICES_CACHE && PRONS_VOICES_CACHE.providers)].forEach(function (list) {
+            if (!list) return;
+            list.forEach(function (p) { if (p.provider_key === providerKey) p[field] = checked; });
+        });
+        if (typeof pronsApplyProviderCapability === 'function') pronsApplyProviderCapability();
+        var label = field === 'provider_ipa_capable' ? 'IPA' : 'Phonetic';
+        if (s) { s.textContent = 'Saved — ' + label + ' ' + (checked ? 'enabled' : 'disabled'); s.className = 'status-msg success'; }
     } catch (e) {
         if (s) { s.textContent = 'Failed to save: ' + (e && e.message || e); s.className = 'status-msg error'; }
-        // Roll the radio back on failure so the UI matches server state.
-        if (radioEl) radioEl.checked = false;
+        // Roll the checkbox back on failure so the UI matches server state.
+        if (cbEl) cbEl.checked = !checked;
     }
 }
 
@@ -2677,14 +2820,14 @@ function openXttsAddVoice(opts) {
         '<div style="display:flex;gap:16px;flex-wrap:wrap;">' +
           '<div style="flex:1 1 340px;min-width:300px;font-size:0.86rem;">' +
             field('Voice code <span style="color:#888;font-weight:normal;">(slug)</span>',
-                  '<input id="xv-code" type="text" value="' + escapeHtml(prefix) + '" placeholder="e.g. ' + escapeHtml(prefix) + 'craig" style="' + INP + '">') +
-            field('Display name', '<input id="xv-name" type="text" placeholder=\'e.g. "Craig — calm narrator"\' style="' + INP + '">') +
+                  '<input id="xv-code" type="text" autocomplete="off" readonly value="' + escapeHtml(prefix) + '" placeholder="e.g. ' + escapeHtml(prefix) + 'craig" style="' + INP + '">') +
+            field('Display name', '<input id="xv-name" type="text" autocomplete="off" readonly placeholder=\'e.g. "Craig — calm narrator"\' style="' + INP + '">') +
             '<div style="display:flex;gap:10px;">' +
-              '<div style="flex:1;">' + field('Gender', '<select id="xv-gender" style="' + INP + 'background:#fff;">' + genderOpts + '</select>') + '</div>' +
-              '<div style="flex:1;">' + field('Language', '<input id="xv-lang" type="text" value="en" maxlength="5" style="' + INP + '">') + '</div>' +
+              '<div style="flex:1;">' + field('Gender', '<select id="xv-gender" autocomplete="off" style="' + INP + 'background:#fff;">' + genderOpts + '</select>') + '</div>' +
+              '<div style="flex:1;">' + field('Language', '<input id="xv-lang" type="text" autocomplete="off" readonly value="en" maxlength="5" style="' + INP + '">') + '</div>' +
             '</div>' +
             field('Description <span style="color:#888;font-weight:normal;">(optional)</span>',
-                  '<textarea id="xv-desc" rows="2" placeholder="When to pick this voice over others" style="' + INP + 'font-family:inherit;resize:vertical;"></textarea>') +
+                  '<textarea id="xv-desc" autocomplete="off" readonly rows="2" placeholder="When to pick this voice over others" style="' + INP + 'font-family:inherit;resize:vertical;"></textarea>') +
             '<div style="margin:12px 0 4px;font-weight:700;font-size:0.82rem;">Method</div>' +
             '<label style="display:block;margin:2px 0;font-size:0.85rem;cursor:pointer;"><input type="radio" name="xv-method" value="clone" checked> <strong>Zero-shot clone</strong> — instant, no training</label>' +
             '<label style="display:block;margin:2px 0;font-size:0.85rem;cursor:pointer;"><input type="radio" name="xv-method" value="fast"> <strong>Fine-tune · Fast</strong> — ~10–15 min</label>' +
@@ -2719,6 +2862,35 @@ function openXttsAddVoice(opts) {
         + '</div>' + body;
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
+
+    // Defeat browser / password-manager autofill — this is always a fresh "new
+    // voice" form, so keep re-asserting the defaults on a short timer while each
+    // field is still untouched, so last-used values can't be filled back in.
+    // (Same approach as openCustomVoicePopover — see the note there.)
+    var xvIntended = [
+        ['#xv-code',   prefix],
+        ['#xv-name',   ''],
+        ['#xv-gender', ''],
+        ['#xv-lang',   'en'],
+        ['#xv-desc',   ''],
+    ];
+    function xvApplyIntended() {
+        xvIntended.forEach(function (pair) {
+            var el = panel.querySelector(pair[0]);
+            if (!el) return;
+            if (el === document.activeElement) return;
+            if (el.tagName !== 'SELECT' && !el.hasAttribute('readonly')) return;
+            if (el.value !== String(pair[1])) el.value = pair[1];
+        });
+    }
+    xvApplyIntended();
+    [40, 120, 300, 600, 1000].forEach(function (t) { setTimeout(xvApplyIntended, t); });
+    panel.addEventListener('focusin', function (e) {
+        var t = e.target;
+        if (t && /^(INPUT|TEXTAREA)$/.test(t.tagName) && t.hasAttribute('readonly')) {
+            t.removeAttribute('readonly');
+        }
+    });
 
     var statusEl = panel.querySelector('#xv-status');
     var goBtn    = panel.querySelector('#xv-go');
@@ -3105,7 +3277,7 @@ function openCustomVoicePopover(opts) {
                 return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>';
             }).join('');
             return '<label style="' + LBL + '">' + escapeHtml(f.label) + '</label>'
-                 + '<select id="' + f.id + '" style="' + INP + 'background:#fff;">' + optsH + '</select>';
+                 + '<select id="' + f.id + '" autocomplete="off" style="' + INP + 'background:#fff;">' + optsH + '</select>';
         }
         if (f.type === 'number') {
             var attrs = '';
@@ -3116,16 +3288,16 @@ function openCustomVoicePopover(opts) {
             var range = (f.min !== undefined && f.max !== undefined)
                 ? ' <span style="color:#888;font-weight:normal;font-size:0.74rem;">(' + f.min + '–' + f.max + ', default ' + val + ')</span>' : '';
             return '<label style="' + LBL + '">' + escapeHtml(f.label) + range + '</label>'
-                 + '<input type="number" id="' + f.id + '" value="' + val + '"' + attrs
+                 + '<input type="number" id="' + f.id + '" autocomplete="off" readonly value="' + val + '"' + attrs
                  + ' data-min="' + (f.min !== undefined ? f.min : '') + '" data-max="' + (f.max !== undefined ? f.max : '') + '"'
                  + ' style="width:130px;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">';
         }
         if (f.type === 'textarea') {
             return '<label style="' + LBL + '">' + escapeHtml(f.label) + '</label>'
-                 + '<textarea id="' + f.id + '" rows="' + (f.rows || 2) + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="' + INP + 'font-family:inherit;resize:vertical;"></textarea>';
+                 + '<textarea id="' + f.id + '" autocomplete="off" readonly rows="' + (f.rows || 2) + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="' + INP + 'font-family:inherit;resize:vertical;"></textarea>';
         }
         return '<label style="' + LBL + '">' + escapeHtml(f.label) + '</label>'
-             + '<input type="' + (f.type || 'text') + '" id="' + f.id + '" placeholder="' + escapeHtml(f.placeholder || '') + '" style="' + INP + '">';
+             + '<input type="' + (f.type || 'text') + '" id="' + f.id + '" autocomplete="off" readonly placeholder="' + escapeHtml(f.placeholder || '') + '" style="' + INP + '">';
     }
     // Collect every field's `help` copy (recursing into fieldsets) into a block
     // for the right-hand guidance panel, keeping the form column uncluttered.
@@ -3181,18 +3353,18 @@ function openCustomVoicePopover(opts) {
         '<div style="display:flex;gap:16px;flex-wrap:wrap;">' +
             '<div style="flex:1 1 320px;min-width:280px;font-size:0.86rem;">' +
                 '<label style="font-weight:600;display:block;margin:0 0 3px;font-size:0.82rem;">Voice code <span style="color:#888;font-weight:normal;">(slug' + (mode === 'edit' ? '; changing it renames the voice + its clip on the box' : '') + ')</span></label>' +
-                '<input id="cvp-code" type="text" value="' + escapeHtml(codeInitial) + '"' +
+                '<input id="cvp-code" type="text" autocomplete="off" readonly value="' + escapeHtml(codeInitial) + '"' +
                     ' placeholder="e.g. ' + escapeHtml(prefix) + 'craig" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">' +
                 '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Display name</label>' +
-                '<input id="cvp-name" type="text" value="' + escapeHtml((v && v.tts_voice_label) || '') + '" placeholder=\'e.g. "Craig — calm narrator"\' style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">' +
+                '<input id="cvp-name" type="text" autocomplete="off" readonly value="' + escapeHtml((v && v.tts_voice_label) || '') + '" placeholder=\'e.g. "Craig — calm narrator"\' style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">' +
                 '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Gender</label>' +
-                '<select id="cvp-gender" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">' + genderOpts + '</select>' +
+                '<select id="cvp-gender" autocomplete="off" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;background:#fff;">' + genderOpts + '</select>' +
                 '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Description <span style="color:#888;font-weight:normal;">(optional)</span></label>' +
-                '<textarea id="cvp-desc" rows="2" placeholder="When to pick this voice over others" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;font-family:inherit;resize:vertical;">' + escapeHtml((v && v.tts_voice_description) || '') + '</textarea>' +
+                '<textarea id="cvp-desc" autocomplete="off" readonly rows="2" placeholder="When to pick this voice over others" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;font-family:inherit;resize:vertical;">' + escapeHtml((v && v.tts_voice_description) || '') + '</textarea>' +
                 extraHtml +
                 (noAudio ? '' :
                     '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Style <span style="color:#888;font-weight:normal;">(' + styleHint + ')</span></label>' +
-                    '<input id="cvp-style" type="text" value="' + escapeHtml(styleInitial) + '" placeholder="default" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">' +
+                    '<input id="cvp-style" type="text" autocomplete="off" readonly value="' + escapeHtml(styleInitial) + '" placeholder="default" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85rem;">' +
                     '<label style="font-weight:600;display:block;margin:8px 0 3px;font-size:0.82rem;">Reference audio' + audioReqNote + '</label>' +
                     '<input id="cvp-audio" type="file" accept="audio/wav,audio/mp3,audio/x-wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg" style="font-size:0.82rem;width:100%;">' +
                     '<audio id="cvp-preview" controls style="display:none;width:100%;margin-top:6px;"></audio>'
@@ -3221,6 +3393,62 @@ function openCustomVoicePopover(opts) {
         + '</div>' + body;
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
+
+    // ── Defeat browser / password-manager autofill ─────────────────────────
+    // The markup is rebuilt every open with the right values baked in, but
+    // autofill (Chrome's own, and extensions like 1Password/LastPass/Bitwarden)
+    // overwrites the same-id fields with the last values used — so Add opened
+    // pre-filled and Edit showed the previously-edited voice. autocomplete="off"
+    // is ignored by Chrome, and some password managers even fill read-only
+    // fields, so neither alone is enough. The reliable defense: keep re-asserting
+    // each field's intended value on a short timer AFTER open — but only while
+    // the field is still untouched (read-only + not focused), so we never fight
+    // the user once they start editing. Add ⇒ blank/prefix defaults, Edit ⇒ the
+    // selected voice's own metadata.
+    var cvpIntended = [
+        ['#cvp-code',   codeInitial],
+        ['#cvp-name',   (v && v.tts_voice_label) || ''],
+        ['#cvp-gender', gender],
+        ['#cvp-desc',   (v && v.tts_voice_description) || ''],
+        ['#cvp-style',  styleInitial],
+    ];
+    (function walk(fields) {
+        (fields || []).forEach(function (f) {
+            if (f.type === 'fieldset') { walk(f.fields); return; }
+            var el = panel.querySelector('#' + f.id);
+            if (!el) return;
+            // Provider extra fields are training params (not stored per voice) —
+            // keep them at their configured default so prior input can't bleed in.
+            if (f.type === 'checkbox') { el.checked = !!f.checked; return; }
+            if (f.type === 'select')   { return; } // options may load async; leave default
+            cvpIntended.push(['#' + f.id, (f.type === 'number' && f.value !== undefined) ? f.value : '']);
+        });
+    })(meta && meta.extraFields);
+
+    function cvpApplyIntended() {
+        cvpIntended.forEach(function (pair) {
+            var el = panel.querySelector(pair[0]);
+            if (!el) return;
+            // Once the user is editing a field, leave it alone: a focused field,
+            // or a text field whose read-only guard has been lifted by focus.
+            if (el === document.activeElement) return;
+            if (el.tagName !== 'SELECT' && !el.hasAttribute('readonly')) return;
+            if (el.value !== String(pair[1])) el.value = pair[1];
+        });
+    }
+    cvpApplyIntended();
+    // Cover autofill that fires on a later tick / after the field is painted.
+    [40, 120, 300, 600, 1000].forEach(function (t) { setTimeout(cvpApplyIntended, t); });
+
+    // Text/number/textarea fields render read-only so most autofill skips them;
+    // lift it the instant the user focuses a field to edit it (which also tells
+    // cvpApplyIntended to stop touching that field).
+    panel.addEventListener('focusin', function (e) {
+        var t = e.target;
+        if (t && /^(INPUT|TEXTAREA)$/.test(t.tagName) && t.hasAttribute('readonly')) {
+            t.removeAttribute('readonly');
+        }
+    });
 
     var statusEl = panel.querySelector('.cvp-status');
     var close = function () { if (overlay.parentNode) document.body.removeChild(overlay); };
@@ -3413,6 +3641,15 @@ async function loadVoiceCatalog() {
         var r = await api(url);
         VC_STATE.voices = r.voices || [];
         populateVoiceFilterOptions();
+        // The Provider dropdown above (vc-refresh-provider) already scopes the
+        // loaded voices to one provider. The in-table Provider filter is then
+        // redundant — and because its options are built from EVERY provider
+        // (not just the loaded ones), a stale value left from a prior
+        // "All providers" view (e.g. "Inworld") would survive and wrongly hide
+        // the scoped voices, leaving the list empty/wrong on tab open. Clear it
+        // whenever a specific provider is scoped so the list always reflects the
+        // selected provider.
+        if (scopeKey) { var _fp = $('vc-f-provider'); if (_fp) _fp.value = ''; }
         if (s) {
             var summary = r.summary || {};
             // Format the timestamp the same way as the cells (yyyyMMdd HH:mm).
@@ -4217,6 +4454,7 @@ async function loadPronsTestSelects() {
         provSel.selectedIndex = 0;
     }
     populateTunesTestVoiceSelect();
+    pronsApplyProviderCapability();
 }
 
 function populateTunesTestVoiceSelect() {
@@ -4280,6 +4518,8 @@ function onTunesTestProviderChange() {
     populateTunesTestVoiceSelect();
     // Save the freshly-defaulted voice (now from the new provider's list).
     if (window.sessionState && sessionState.save) sessionState.save('pronsVoice', $('tunes-test-voice').value);
+    // Re-gate the IPA↔Phonetic toggle to the newly-selected provider's caps.
+    pronsApplyProviderCapability();
 }
 
 function onTunesTestVoiceChange() {
@@ -4859,8 +5099,8 @@ function buildTuneRow(t) {
     provSelEl.value = savedProviderKey;
     // Populate the per-tune voice dropdown — filtered to the selected
     // provider so changing Provider above swaps the voice list to that
-    // engine's voices. Provider=0 ("apply to all engines") shows the
-    // full voice catalog.
+    // engine's voices. With NO provider selected (Provider=0) the voice
+    // list stays empty — you pick a provider first, then its voices appear.
     var voiceSelEl = tr.querySelector('.f-voice');
     function rebuildTuneVoiceOptions(preserveCode) {
         var voices = (CATALOG && CATALOG.voices) ? CATALOG.voices : [];
@@ -4868,7 +5108,7 @@ function buildTuneRow(t) {
         var prev = preserveCode !== undefined ? preserveCode : voiceSelEl.value;
         voiceSelEl.innerHTML = '<option value=""></option>';
         voices
-            .filter(function (v) { return pk === 0 || v.provider_key === pk; })
+            .filter(function (v) { return pk !== 0 && v.provider_key === pk; })  // no provider → no voices; else only that provider's voices
             .forEach(function (v) {
                 var o = document.createElement('option');
                 o.value = v.code;
@@ -5159,13 +5399,19 @@ async function handleTuneAction(tr, act) {
             // operator can only see the phonetic respelling is the bug.
             var pronsPane = document.getElementById('pane-pronunciations');
             var globalPhonetic = !!(pronsPane && pronsPane.classList.contains('mode-phonetic'));
-            var rowIsSub = tr.classList.contains('tune-mode-sub');
-            var selType = (globalPhonetic || rowIsSub) ? 'sub' : 'ipa';
+            // Audition whichever column the toggle currently SHOWS, not the
+            // row's saved Type. In IPA view every row displays (and lets you
+            // edit) its IPA field, so ▶ must play IPA — otherwise editing IPA
+            // on a sub-typed row silently auditioned the phonetic respelling
+            // and the typed IPA appeared to do nothing. Phonetic view → sub.
+            var selType = globalPhonetic ? 'sub' : 'ipa';
             var subVal  = tr.querySelector('.f-sub').value;
             var ipaVal  = tr.querySelector('.f-ipa').value;
             // Use the Pronunciations tab's own audio player so the
             // progress bar appears in the same context as this button.
             var tunesAudio = $('tunes-audio');
+            // Reveal the pinned player and show the rendering state up front.
+            showTunesPlayerBar('Rendering…');
             // Validation warning for the currently-selected variant.
             var msg = (selType === 'ipa') ? validateIpa(ipaVal) : null;
             var s2 = $('tunes-status');
@@ -5215,9 +5461,13 @@ async function handleTuneAction(tr, act) {
             // either way; statusCb drives the Tunes status line's chunk progress.
             var url = await previewSynth(body, function (m) {
                 if (s2) { s2.textContent = m; s2.className = 'status-msg'; }
+                setTunesBarStatus(m, false);
             });
             var a = tunesAudio || $('preview-audio');
             a.src = url; a.style.display='block'; a.play();
+            // Rendered — clear the "Rendering…" note; the loaded clip now
+            // replays from the native controls without another synth.
+            setTunesBarStatus('', false);
             } finally {
                 // Restore the ▶ button regardless of success or error
                 // (saveTuneRow throw, API error, browser autoplay block,
@@ -5231,7 +5481,36 @@ async function handleTuneAction(tr, act) {
         }
     } catch (e) {
         $('tunes-status').textContent = 'Error: ' + e.message; $('tunes-status').className='status-msg error';
+        setTunesBarStatus('Error: ' + e.message, true);
     }
+}
+
+// ── Pinned audition player (Pronunciations tab) ─────────────────────
+// Reveal/hide the bottom-pinned audio bar and drive its own status span.
+// Kept separate from the inline #tunes-status (which the save/edit flow
+// uses) so audition progress shows in the player's own context.
+function showTunesPlayerBar(msg) {
+    var bar = $('tunes-player-bar');
+    if (!bar) return;
+    bar.style.display = 'block';
+    setTunesBarStatus(msg, false);
+    // Keep the bottom pager / last rows clear of the fixed bar.
+    var pane = $('pane-pronunciations');
+    if (pane) pane.style.paddingBottom = '84px';
+}
+function setTunesBarStatus(msg, isError) {
+    var bs = $('tunes-bar-status');
+    if (!bs) return;
+    bs.textContent = msg || '';
+    bs.className = 'status-msg' + (isError ? ' error' : '');
+}
+function hideTunesPlayerBar() {
+    var bar = $('tunes-player-bar');
+    if (bar) bar.style.display = 'none';
+    var a = $('tunes-audio');
+    if (a) { try { a.pause(); } catch (e) {} }
+    var pane = $('pane-pronunciations');
+    if (pane) pane.style.paddingBottom = '';
 }
 
 // ── Pauses tab ──────────────────────────────────────────────────────
@@ -5413,9 +5692,19 @@ async function loadVolumes() {
     populateBooksProfileSelect();
 }
 
-function populateBooksProfileSelect() {
+async function populateBooksProfileSelect() {
     var sel = $('books-profile-select');
     if (!sel) return;
+    // Self-heal: the Books tab can be restored on page load (saved active tab)
+    // BEFORE bootstrap()'s fetches have populated the global PROFILES list. If
+    // it's still empty, fetch the profile list directly so the dropdown never
+    // renders empty — and never gets stuck that way behind the VOLUMES cache.
+    if (!PROFILES.length) {
+        try {
+            var pr = await api('/admin-tts-config.php?action=list_profiles&tts_key=' + TTS_KEY);
+            if (pr && pr.profiles && pr.profiles.length) PROFILES = pr.profiles;
+        } catch (e) { /* nothing else to do; render whatever we have */ }
+    }
     sel.innerHTML = '';
     PROFILES.forEach(function (p) {
         var o = document.createElement('option');
@@ -6465,6 +6754,18 @@ async function renderBuildCategoryRows(root) {
             ? voiceByCode[savedVoiceCode].provider_key
             : (providers[0] ? providers[0].provider_key : 0);
         provSel.value = String(savedProviderKey);
+        // Flag a stale assignment (voice on a deactivated provider) instead of
+        // rendering blank — same as the Defaults/Profiles rows.
+        if (savedVoiceCode && provSel.selectedIndex < 0) {
+            var _sv = voiceByCode[savedVoiceCode] || {};
+            var _pn = _sv.provider_main || _sv.provider_label || ('provider #' + savedProviderKey);
+            var _stale = document.createElement('option');
+            _stale.value = String(savedProviderKey);
+            _stale.textContent = '⚠ ' + _pn + ' — inactive';
+            _stale.style.color = '#c0392b';
+            provSel.appendChild(_stale);
+            provSel.value = String(savedProviderKey);
+        }
 
         function rebuildVoiceSelect(preserveValue) {
             var pk = parseInt(provSel.value, 10) || 0;
@@ -6717,6 +7018,23 @@ async function startBuild() {
             ch.tts_audio_started_dtime   = null;
             if (typeof renderChapters === 'function') renderChapters();
         }
+        // The rebuild wiped the server-side parts cache, so the open per-paragraph
+        // panel for this chapter is still showing stale audio links and a
+        // "complete" count. The progress poll only updates from chapter-level data
+        // (it never re-fetches per-paragraph has_part), so re-fetch this chapter's
+        // paragraph rows ONCE here — the surgical update then flips every row to
+        // "— not yet synthesised —" and the header to "0 of N". This is a deliberate
+        // user action, not the poll path, so calling loadParagraphRows is correct.
+        try {
+            var freshAk = res.tts_audio_key || (ch && ch.tts_audio_key) || 0;
+            var tb = document.getElementById('chapters-tbody');
+            var dRow = tb && tb.querySelector('tr[data-ck="' + chapterKey + '"]:not(.paragraph-expand-row)');
+            var xRow = dRow && dRow.nextElementSibling && dRow.nextElementSibling.classList.contains('paragraph-expand-row') ? dRow.nextElementSibling : null;
+            if (freshAk && xRow && xRow.style.display !== 'none') {
+                var pgrid = xRow.querySelector('.paragraph-grid');
+                if (pgrid) { xRow.dataset.ak = String(freshAk); loadParagraphRows(freshAk, pgrid); }
+            }
+        } catch (e) { /* non-fatal panel refresh */ }
         setTimeout(closeBuildModal, 600);
         loadChapters(ACTIVE_VOLUME);
     } catch (e) {

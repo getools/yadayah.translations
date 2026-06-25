@@ -142,6 +142,8 @@ if (!empty($captionStatuses)) {
     //   pending  — has transcript records, no Approved review, no
     //              upload date yet.
     //   missing  — no transcript records at all.
+    //   editable — has a live editable transcript (superset of captions/
+    //              reviewed/pending; OR-combined with the others).
     $hasTx        = "EXISTS(SELECT 1 FROM yy_feed_item_transcript t WHERE t.feed_item_key = fi.feed_item_key)";
     $latestStatus = "(SELECT v.validation_status FROM yy_feed_item_transcript_validation v
                        WHERE v.feed_item_key = fi.feed_item_key
@@ -161,6 +163,9 @@ if (!empty($captionStatuses)) {
         } elseif ($cs === 'pending') {
             $capOrs[] = "($hasTx AND ($latestStatus IS DISTINCT FROM 'Approved')
                           AND fi.feed_item_yt_caption_uploaded_dtime IS NULL)";
+        } elseif ($cs === 'editable') {
+            // Has an editable (live) transcript, regardless of review/upload state.
+            $capOrs[] = $hasTx;
         } elseif ($cs === 'missing') {
             $capOrs[] = "NOT $hasTx";
         }

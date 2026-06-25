@@ -63,9 +63,9 @@ $stmt = $pdo->prepare("
     FROM yy_translation t
     JOIN yy_volume vol ON vol.volume_key = t.volume_key AND vol.volume_active_flag = TRUE
     JOIN yy_series ser ON ser.series_key = vol.series_key
-    JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
-    JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
-    JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
+    JOIN yy_cite_book cb ON cb.cite_book_key = t.cite_book_key
+    JOIN yy_cite_chapter c ON c.cite_chapter_key = t.cite_chapter_key
+    JOIN yy_cite_verse v ON v.cite_verse_key = t.cite_verse_key
     WHERE t.translation_copy ~* ?
     ORDER BY ser.series_sort ASC, vol.volume_sort ASC, t.translation_page ASC
 ");

@@ -17,7 +17,7 @@ $method = $_SERVER['REQUEST_METHOD'];
 $key = (int)($_GET['key'] ?? 0);
 
 if ($method === 'GET' && isset($_GET['scrolls'])) {
-    $stmt = $db->query("SELECT yah_scroll_key, yah_scroll_label_yy FROM yah_scroll ORDER BY yah_scroll_label_yy");
+    $stmt = $db->query("SELECT cite_book_key, cite_book_hebrew FROM yy_cite_book ORDER BY cite_book_sort");
     jsonResponse(['scrolls' => $stmt->fetchAll()]);
 }
 

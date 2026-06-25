@@ -162,6 +162,7 @@ if ($method === 'GET') {
 }
 
 if ($method === 'POST') {
+    denyIfBanned('Chat'); // banned users may read existing DMs but can't send/create
     $data = json_decode(file_get_contents('php://input'), true) ?: [];
     $action = $data['action'] ?? '';
 

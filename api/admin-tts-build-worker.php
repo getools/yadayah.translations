@@ -37,7 +37,7 @@ $db = getDb();
 // the next pending row. Registered as a shutdown hook so even fatal
 // errors / OOM exits trigger the promote.
 $MAX_CONCURRENT_BUILDS = 1;
-register_shutdown_function(function() use (&$db, $MAX_CONCURRENT_BUILDS) {
+register_shutdown_function(function() use (&$db, $MAX_CONCURRENT_BUILDS, $audioKey) {
     // Serialize promote-next against admin-tts-build.php's dispatch (same lock
     // key 742002) and count a freshly-claimed pending row (pid set, status not
     // yet 'running') as occupying a slot — so a worker exit and a concurrent
@@ -45,6 +45,19 @@ register_shutdown_function(function() use (&$db, $MAX_CONCURRENT_BUILDS) {
     $TTS_BUILD_LOCK = 742002;
     try {
         if (!$db) $db = getDb();
+        // If THIS worker exited because the operator PAUSED the chapter, do
+        // NOT promote the next queued chapter. Pause means "stop here" — a
+        // subsequent Resume must re-spawn THIS chapter and continue from its
+        // next uncached paragraph. Advancing the queue on pause was claiming
+        // the single build slot, so the Resume sat behind the auto-started
+        // next chapter and the operator saw that next chapter render instead
+        // of their paused one continuing mid-chapter. Cancel (failed/gone) and
+        // normal completion still promote — only an explicit pause halts here.
+        try {
+            $myStatusStmt = $db->prepare("SELECT tts_audio_status FROM yy_tts_audio WHERE tts_audio_key = ?");
+            $myStatusStmt->execute([$audioKey]);
+            if (($myStatusStmt->fetchColumn() ?: '') === 'paused') return;
+        } catch (Throwable $e) { /* probe failed — fall through to normal promote */ }
         $db->query('SELECT pg_advisory_lock(' . $TTS_BUILD_LOCK . ')');
         try {
             $active = (int)$db->query("SELECT COUNT(*) FROM yy_tts_audio
@@ -52,11 +65,29 @@ register_shutdown_function(function() use (&$db, $MAX_CONCURRENT_BUILDS) {
                                            OR (tts_audio_status = 'pending' AND tts_audio_worker_pid IS NOT NULL)")
                               ->fetchColumn();
             if ($active >= $MAX_CONCURRENT_BUILDS) return;
+            // Promote by the row's LOCATION, not by when it was queued:
+            // group by book (tts_sort), then by volume → chapter position
+            // within that book. Paragraph order is handled inside the chapter
+            // build itself (the worker iterates paragraph_number and gap-fills),
+            // so book → chapter here completes book → chapter → paragraph.
+            // A 'Redo' re-queues an already-built chapter; ordering by location
+            // means it re-renders in reading order — typically jumping to the
+            // front of the pending queue, ahead of later chapters still waiting
+            // — rather than landing at the back behind everything queued before
+            // it. tts_audio_dtime stays as the final tiebreaker. Whole-book rows
+            // (chapter_key IS NULL) sort first within their volume.
             $nextKey = (int)$db->query("
-                SELECT tts_audio_key FROM yy_tts_audio
-                 WHERE tts_audio_status = 'pending'
-                   AND tts_audio_worker_pid IS NULL
-                 ORDER BY tts_audio_dtime ASC
+                SELECT a.tts_audio_key
+                  FROM yy_tts_audio a
+                  JOIN yy_tts     t ON t.tts_key     = a.tts_key
+                  JOIN yy_volume  v ON v.volume_key  = a.volume_key
+             LEFT JOIN yy_chapter c ON c.chapter_key = a.chapter_key
+                 WHERE a.tts_audio_status = 'pending'
+                   AND a.tts_audio_worker_pid IS NULL
+                 ORDER BY t.tts_sort, t.tts_name,
+                          v.volume_sort, v.volume_number,
+                          c.chapter_sort NULLS FIRST, c.chapter_number NULLS FIRST,
+                          a.tts_audio_dtime ASC
                  LIMIT 1
             ")->fetchColumn();
             if (!$nextKey) return;
@@ -869,7 +900,8 @@ foreach ($paragraphs as $idx => $p) {
         // server is online. Naive byte-concat mirrors the Azure >9500 split;
         // cross-format / sample-rate normalization is a TODO before first real
         // local use.
-        foreach ($segs as $seg) {
+        $nSeg = count($segs);
+        foreach ($segs as $segI => $seg) {
             $pk = ttsResolveProviderKey($cfg, $seg['category']);
             $err = '';
             $transport = ttsProviderTransport($cfg, $pk);
@@ -897,9 +929,14 @@ foreach ($paragraphs as $idx => $p) {
             } elseif ($transport === 'azure-ssml') {
                 $b = azureTtsSynthesizeRetry(wrapSsml(buildVoiceBlock($seg['text'], $cfg, $seg['category'])), $cfg, $err);
             } else {
-                // Sentence-chunk to keep each model.generate() call below the
-                // quadratic-attention cliff. See localTtsSynthesizeChunked.
-                $b = localTtsSynthesizeChunked($cfg, buildLocalSegment($seg['text'], $cfg, $seg['category']), $cfg['system']['tts_output_format'], $err);
+                // Chunk to keep each model.generate() call below the quadratic-
+                // attention cliff, and assemble with a leading-only trim + clean
+                // ffmpeg concat (see localTtsSynthesizeChunked). The trailing pad
+                // protects the byte-concat joins downstream: a small breath mid-
+                // paragraph at a voice switch, a longer one at the paragraph end
+                // (where the part is byte-concatenated to the next paragraph).
+                $isLastSeg = ($segI === $nSeg - 1);
+                $b = localTtsSynthesizeChunked($cfg, buildLocalSegment($seg['text'], $cfg, $seg['category']), $cfg['system']['tts_output_format'], $err, $isLastSeg ? 240 : 90);
             }
             if ($b === '') {
                 $failures[] = "para {$p['paragraph_number']} seg: $err";

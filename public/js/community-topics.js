@@ -400,9 +400,9 @@ CommunityTopics.loadTopic = function(key) {
             }
             html += '<div class="topic-body" id="topic-body-content">' + bodyContent + '</div>';
         }
-        // Edit button for topic author
+        // Edit button for topic author (banned users can't edit)
         var isAuthor = user && user.user_key === t.user_key;
-        if (isAuthor && !topicIsRemoved) {
+        if (isAuthor && !topicIsRemoved && Community.canPost()) {
             html += '<div style="margin-top:6px;"><button class="btn btn-sm btn-outline" style="font-size:0.75rem;" onclick="CommunityTopics.editTopic(' + key + ')">Edit</button>';
             if (t.topic_edit_dtime) html += ' <span style="font-size:0.72rem;color:#999;">(edited ' + Community.timeAgo(t.topic_edit_dtime) + ')</span>';
             html += '</div>';
@@ -478,7 +478,7 @@ CommunityTopics.loadTopic = function(key) {
                     var replyIsAuthor = user && user.user_key === r.user_key;
                     if (replyIsAuthor || canRemove) {
                         html += '<div class="reply-actions" style="display:flex;gap:8px;justify-content:flex-end;align-items:center;">';
-                        if (replyIsAuthor) {
+                        if (replyIsAuthor && Community.canPost()) {
                             html += '<button class="btn btn-sm btn-outline" style="font-size:0.75rem;" onclick="CommunityTopics.editReply(' + r.reply_key + ',' + key + ')">Edit</button>';
                         }
                         if (r.reply_edit_dtime) {
@@ -499,16 +499,17 @@ CommunityTopics.loadTopic = function(key) {
 
         // Reply form
         var locked = t.topic_locked === true || t.topic_locked === 't';
-        if (user && !locked) {
+        if (locked) {
+            html += '<div class="empty-state" style="padding:20px;">This topic is locked.</div>';
+        } else if (user && Community.canPost()) {
             html += '<div class="compose-form">'
                 + '<div id="reply-editor"></div>'
                 + '<button class="btn btn-primary" onclick="CommunityTopics.submitReply(' + key + ')">Reply</button>'
                 + '</div>';
-        } else if (locked) {
-            html += '<div class="empty-state" style="padding:20px;">This topic is locked.</div>';
-        } else {
+        } else if (!user) {
             html += '<div class="empty-state" style="padding:20px;"><a href="#" onclick="CommunityAuth.openLoginModal(\'login\');return false;">Sign in</a> to reply.</div>';
         }
+        // Banned (logged in, !canPost): no compose, no notice — silent.
 
         // Clean up any existing TinyMCE instances before replacing HTML
         if (typeof tinymce !== 'undefined') {
@@ -519,7 +520,7 @@ CommunityTopics.loadTopic = function(key) {
         el.innerHTML = html;
 
         // Init reply editor
-        if (user && !locked) {
+        if (user && !locked && Community.canPost()) {
             CommunityTopics.createEditor('reply-editor', 'reply-body');
         }
 
@@ -668,6 +669,7 @@ CommunityTopics.loadBookmarks = function() {
 // ── New topic form ──
 CommunityTopics.showNewTopic = function() {
     if (!Community.currentUser) { CommunityAuth.openLoginModal('login'); return; }
+    if (!Community.canPost()) { window.location.hash = '#topics'; return; } // banned: silent
     // If categories haven't arrived yet (community-categories.php currently
     // ~2s on prod, so an early click lands here with an empty cache), show a
     // loading state and fetch on demand instead of rendering an empty
@@ -738,6 +740,7 @@ CommunityTopics.addPollOption = function() {
 };
 
 CommunityTopics.submitTopic = function() {
+    if (!Community.canPost()) return; // banned: silent
     var title = document.getElementById('new-title').value.trim();
     var bodyHtml = CommunityTopics.getEditorHtml('new-body');
     var body = CommunityTopics.getEditorText('new-body');
@@ -788,6 +791,7 @@ CommunityTopics.submitTopic = function() {
 
 // ── Submit reply ──
 CommunityTopics.submitReply = function(topicKey) {
+    if (!Community.canPost()) return; // banned: silent
     var bodyHtml = CommunityTopics.getEditorHtml('reply-body');
     var body = CommunityTopics.getEditorText('reply-body');
 
@@ -831,6 +835,7 @@ CommunityTopics.toggleShowRemoved = function(checked, topicKey) {
 
 // ── Edit topic ──
 CommunityTopics.editTopic = function(topicKey) {
+    if (!Community.canPost()) return; // banned: silent
     // Fetch current topic data
     Community.api('/api/community-topics.php?topic=' + topicKey).then(function(data) {
         var t = data.topic;
@@ -856,6 +861,7 @@ CommunityTopics.editTopic = function(topicKey) {
 };
 
 CommunityTopics.saveEditTopic = function(topicKey) {
+    if (!Community.canPost()) return; // banned: silent
     var title = document.getElementById('edit-title').value.trim();
     var bodyHtml = CommunityTopics.getEditorHtml('edit-body');
     var body = CommunityTopics.getEditorText('edit-body');
@@ -871,6 +877,7 @@ CommunityTopics.saveEditTopic = function(topicKey) {
 
 // ── Edit reply ──
 CommunityTopics.editReply = function(replyKey, topicKey) {
+    if (!Community.canPost()) return; // banned: silent
     Community.api('/api/community-topics.php?topic=' + topicKey).then(function(data) {
         var replies = data.replies || [];
         var r = null;
@@ -899,6 +906,7 @@ CommunityTopics.editReply = function(replyKey, topicKey) {
 };
 
 CommunityTopics.saveEditReply = function(replyKey, topicKey) {
+    if (!Community.canPost()) return; // banned: silent
     var bodyHtml = CommunityTopics.getEditorHtml('edit-reply-' + replyKey);
     var body = CommunityTopics.getEditorText('edit-reply-' + replyKey);
     if (!body.trim() && (!bodyHtml || bodyHtml.replace(/<[^>]*>/g, '').trim() === '')) { alert('Reply cannot be empty'); return; }

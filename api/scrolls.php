@@ -7,5 +7,5 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 }
 
 $db = getDb();
-$stmt = $db->query('SELECT yah_scroll_key, yah_scroll_label_common, yah_scroll_label_yy, yah_scroll_sort FROM yah_scroll ORDER BY yah_scroll_sort');
+$stmt = $db->query('SELECT cite_book_key, cite_book_common, cite_book_hebrew, cite_book_sort FROM yy_cite_book ORDER BY cite_book_sort');
 jsonResponse($stmt->fetchAll());

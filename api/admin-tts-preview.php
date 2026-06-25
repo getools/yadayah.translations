@@ -144,6 +144,21 @@ if (mb_strlen($text) > $previewCharMax) {
 // exactly as with any other voice; it just renders via polling.
 const PREVIEW_SYNC_CHAR_MAX = 1100;
 $forceAsync = ($transport === 'gpu-tailnet') && ttsProviderAlwaysAsync($cfg, $providerKey);
+// When a book / chapter build is currently occupying the box, a synchronous
+// GPU preview would queue behind the build's in-flight paragraph on the engine
+// and risk blowing past Cloudflare's ~100 s proxy window (→ 524), so the
+// audition would fail mid-render. Route GPU previews through the detached async
+// worker in that case — it's immune to the CDN clock and interleaves with the
+// running build, so an audition can run "in parallel" with a render instead of
+// failing. (Cloud providers don't touch the GPU, so this only applies to
+// gpu-tailnet.) Any running OR pending build counts: they all share the box.
+if (!$forceAsync && $transport === 'gpu-tailnet') {
+    try {
+        if ($db->query("SELECT 1 FROM yy_tts_audio WHERE tts_audio_status IN ('running','pending') LIMIT 1")->fetchColumn()) {
+            $forceAsync = true;
+        }
+    } catch (\Throwable $e) { /* probe failed — keep sync default */ }
+}
 if ($transport === 'gpu-tailnet' && ($forceAsync || mb_strlen($text) > PREVIEW_SYNC_CHAR_MAX)) {
     $jobKey = ttsEnqueuePreviewJob($db, [
         'tts_key'    => $ttsKey,
@@ -158,6 +173,10 @@ if ($transport === 'gpu-tailnet' && ($forceAsync || mb_strlen($text) > PREVIEW_S
         'min_chars'    => $chunkMin,
         'target_chars' => $chunkTarget,
         'max_chars'    => $chunkMax,
+        // Carry the per-row ▶ override (typed SUB/IPA + type + seed) so the
+        // detached worker auditions exactly what's on screen instead of
+        // re-deriving the tunes from the DB. Null when this isn't a tune ▶.
+        'tune_override' => (!empty($data['tune_override']) && is_array($data['tune_override'])) ? $data['tune_override'] : null,
     ]);
     if ($jobKey) {
         // Spawn the detached worker inside this container; it survives the

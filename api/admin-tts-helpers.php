@@ -92,16 +92,21 @@ function loadTtsConfig(PDO $db, int $ttsKey, ?int $profileKey = null): array {
     //      key tiebreaker the older row wins on physical order and Chatterbox
     //      reads "yihsr Ahehl". Newest-wins matches user expectation when
     //      they refine a respelling.
+    // Pronunciation lexicon is SHARED across all engines (2026-06-25): a tune's
+    // scope is its provider_key (0 = global) + tts_tune_voice_code, NOT the
+    // legacy tts_key it was created under. Load the whole active table; the
+    // per-segment resolver (ttsTunesForProvider) picks the most specific row for
+    // the segment's (provider, voice): voice > provider > global.
     $tuneStmt = $db->prepare("
         SELECT *
           FROM yy_tts_tune
-         WHERE tts_key = ? AND tts_tune_active_flag = TRUE
+         WHERE tts_tune_active_flag = TRUE
          ORDER BY COALESCE(tts_tune_sort, 0) DESC,
                   (tts_tune_voice_code IS NOT NULL) DESC,
                   length(tts_tune_print) DESC,
                   tts_tune_key DESC
     ");
-    $tuneStmt->execute([$ttsKey]);
+    $tuneStmt->execute();
     $tunes = $tuneStmt->fetchAll();
 
     $pauseStmt = $db->prepare("SELECT * FROM yy_tts_pause WHERE tts_key = ? AND tts_pause_active_flag = TRUE ORDER BY length(tts_pause_search) DESC, tts_pause_sort");
@@ -777,7 +782,8 @@ function buildVoiceBlock(string $text, array $cfg, string $category, ?string $ov
     // default rows present this is exactly $cfg['tunes'], so Azure output is
     // unchanged.
     $segProviderKey = ttsResolveProviderKey($cfg, $category);
-    $text = applyTunes($text, ttsTunesForProvider($cfg, $segProviderKey), $tokenMap);
+    $segVoiceCode   = ttsResolveVoiceCode($cfg, $category) ?? '';
+    $text = applyTunes($text, ttsTunesForProvider($cfg, $segProviderKey, $segVoiceCode), $tokenMap);
     // Inline pause markers (e.g. "[500]" / "[1s]") get converted to the same
     // placeholder format as global yy_tts_pause rules so placeholdersToBreaks
     // turns both into <break time="..."/> SSML tags.
@@ -1620,34 +1626,53 @@ function ttsProviderAlwaysAsync(array $cfg, int $providerKey): bool {
 }
 
 /**
- * Active tune list resolved for one provider. Each Print may have a default
- * row (provider_key=0) and an optional provider-specific override; the override
- * wins. Application order from loadTtsConfig is preserved. With only default
- * rows present this returns exactly $cfg['tunes'].
+ * Active tune list resolved for one segment's (provider, voice). The
+ * Pronunciations table is a SHARED lexicon (loadTtsConfig loads the whole
+ * active table, not just one engine's). Each Print may have rows at three
+ * specificity tiers; the most specific applicable row wins:
+ *   3  provider_key = this provider AND tts_tune_voice_code = this voice
+ *   2  provider_key = this provider AND no voice
+ *   1  provider_key = 0 (global), no voice
+ * Tiers are decided PER rule identity (Print + bold/italic/case flags), so a
+ * voice/provider override only suppresses the SAME rule — never a different
+ * rule that merely shares a Print. Application order from loadTtsConfig is
+ * preserved. Called with no $voiceCode this collapses to global→provider; and
+ * for a provider with no overrides it returns exactly the global rows — so the
+ * Azure path stays byte-identical.
  */
-function ttsTunesForProvider(array $cfg, int $providerKey): array {
+function ttsTunesForProvider(array $cfg, int $providerKey, ?string $voiceCode = null): array {
     $tunes = $cfg['tunes'] ?? [];
-    // A provider override only suppresses the default row for the SAME rule
-    // identity (Print + bold/italic/case flags) — never a different rule that
-    // merely shares a Print. First pass: which rule identities have an override
-    // for THIS provider.
-    $overridden = [];
-    foreach ($tunes as $t) {
-        if ($providerKey !== 0 && (int)($t['provider_key'] ?? 0) === $providerKey) {
-            $overridden[ttsTuneRuleId($t)] = true;
+    $voiceCode = ($voiceCode === '') ? null : $voiceCode;
+
+    // Specificity tier of one row for THIS (provider, voice); 0 = not applicable.
+    $tierOf = function (array $t) use ($providerKey, $voiceCode): int {
+        $pk = (int)($t['provider_key'] ?? 0);
+        $vc = $t['tts_tune_voice_code'] ?? '';
+        if ($vc === '') $vc = null;
+        if ($pk === 0) {
+            return ($vc === null) ? 1 : 0;                 // global (a global+voice row is malformed → skip)
         }
+        if ($pk !== $providerKey) return 0;                // another provider
+        if ($vc === null) return 2;                        // provider-level
+        if ($voiceCode !== null && $vc === $voiceCode) return 3;  // voice-exact
+        return 0;                                          // a different voice under this provider
+    };
+
+    // First pass: best available tier per rule identity.
+    $best = [];
+    foreach ($tunes as $t) {
+        $tier = $tierOf($t);
+        if ($tier === 0) continue;
+        $rid = ttsTuneRuleId($t);
+        if (!isset($best[$rid]) || $tier > $best[$rid]) $best[$rid] = $tier;
     }
-    // Second pass, preserving order: keep this provider's own rows; keep default
-    // (0) rows unless an override exists for their rule identity; drop rows that
-    // belong to a different engine. With no overrides present this returns the
-    // full default list unchanged (so the Azure path is byte-identical).
+    // Second pass, preserving order: keep only rows at the winning tier for
+    // their rule identity (newest-wins within a tier comes from the load ORDER BY).
     $out = [];
     foreach ($tunes as $t) {
-        $pk = (int)($t['provider_key'] ?? 0);
-        if ($pk === $providerKey && $providerKey !== 0) { $out[] = $t; continue; }
-        if ($pk !== 0) continue;                                   // another engine's override
-        if (isset($overridden[ttsTuneRuleId($t)])) continue;       // default suppressed by an override
-        $out[] = $t;
+        $tier = $tierOf($t);
+        if ($tier === 0) continue;
+        if (($best[ttsTuneRuleId($t)] ?? 0) === $tier) $out[] = $t;
     }
     return $out;
 }
@@ -1666,7 +1691,7 @@ function ttsTuneRuleId(array $t): string {
  * [slow] / {fast} markers. IPA/SAPI rows fall back to their sub spelling.
  * (True IPA passthrough for phoneme engines like Kokoro is a future refinement.)
  */
-function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null): string {
+function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null, ?callable $flattenAlias = null): string {
     $count = 0;
     $matchedSeed = null;   // first matched tune's seed wins (FIFO across the prioritised list)
     // Token round-trip prevents tune-N cascading onto tune-M's substitution.
@@ -1706,16 +1731,13 @@ function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matc
         $core = preg_replace($APOS_RE_FAST, '', $print);
         if ($core === '' || mb_stripos($textLowerCore, $core, 0, 'UTF-8') === false) continue;
         $alias = str_replace(['[', ']', '{', '}'], '', $alias);
-        // Hyphens in a SUB are syllable separators for human readability
-        // ("yah-Hoe-wah"). Local engines like Chatterbox would treat a
-        // whitespace token boundary as a word break with a small audible
-        // pause between syllables — a 3-syllable respelling renders as
-        // three mini-pauses, which sounds wrong. Strip the hyphen entirely
-        // so the syllables fuse into a single token ("yahHoewah") that
-        // the engine pronounces continuously. Case preservation gives the
-        // engine a soft hint that "Hoe" is the stressed syllable, which
-        // Chatterbox's text-token model picks up on.
-        $alias = str_replace('-', '', $alias);
+        // Phonetic flattening (syllable-hyphen fusion) is engine-specific and
+        // is applied here ONLY when the caller supplies a flattener, which
+        // buildLocalSegment does exclusively for the Chatterbox family (see
+        // chatterboxFlattenPhonetic). Every other local engine receives the
+        // canonical hyphenated respelling untouched, so its syllable/stress
+        // structure survives. The DB value is never mutated.
+        if ($flattenAlias !== null) $alias = $flattenAlias($alias);
         $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
         $hits = 0;
         $text = preg_replace_callback($regex, function ($m) use ($alias, &$tokenMap, &$tokenIdx) {
@@ -1830,6 +1852,107 @@ function applyTunesInworld(string $text, array $tunes, ?int &$count = null, &$ma
 }
 
 /**
+ * Tune-substitution for Kokoro (gpu-tailnet). Kokoro phonemises text with
+ * misaki g2p, which honours an inline override syntax: [grapheme](/IPA/).
+ * The slashed IPA -- including the primary-stress mark -- is used verbatim,
+ * so Kokoro is the one local engine that can place stress precisely
+ * (Chatterbox-style respellings phonemise to garbage in misaki). Per tune:
+ *   - phonetic_type='ipa' AND phonetic_ipa non-empty -> "[print](/IPA/)"
+ *   - else if phonetic_sub non-empty                 -> raw sub respelling
+ *       (hyphens KEPT; only the [slow]/{fast} markers stripped -- NOT flattened)
+ *   - else                                           -> skip (misaki g2p handles it)
+ * Same fast pre-filter + token round-trip as applyTunesPlain.
+ */
+function applyTunesKokoro(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null): string {
+    $count = 0;
+    $matchedSeed = null;
+    $tokenMap = [];
+    $tokenIdx = 0;
+    $textLower = mb_strtolower($text, 'UTF-8');
+    static $APOS_RE_FAST = '/[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]/u';
+    $textLowerCore = preg_replace($APOS_RE_FAST, '', $textLower);
+    foreach ($tunes as $t) {
+        $print = (string)($t['tts_tune_print'] ?? '');
+        if ($print === '') continue;
+        $type = (string)($t['tts_tune_phonetic_type'] ?? 'sub');
+        $ipa  = trim((string)($t['tts_tune_phonetic_ipa'] ?? ''));
+        $sub  = trim((string)($t['tts_tune_phonetic_sub'] ?? ''));
+        $isIpa = ($type === 'ipa' && $ipa !== '');
+        if ($isIpa) {
+            // misaki inline override; the bracket text is just the alignment
+            // grapheme -- misaki uses the slashed IPA for the audio. Strip any
+            // stray brackets from the print so the construct stays well-formed.
+            $repl = '[' . str_replace(['[', ']'], '', $print) . '](/' . $ipa . '/)';
+        } elseif ($sub !== '') {
+            // Raw sub: strip only the SSML-ish [slow]/{fast} markers. Hyphens
+            // are kept (canonical form) -- Kokoro is never flattened.
+            $repl = str_replace(['[', ']', '{', '}'], '', $sub);
+        } else {
+            continue;
+        }
+        $core = preg_replace($APOS_RE_FAST, '', $print);
+        if ($core === '' || mb_stripos($textLowerCore, $core, 0, 'UTF-8') === false) continue;
+        $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
+        $hits = 0;
+        $text = preg_replace_callback($regex, function ($m) use ($repl, $isIpa, &$tokenMap, &$tokenIdx) {
+            $tok = "\x02PT" . ($tokenIdx++) . "\x02";
+            // Possessive: for an IPA override append "'s" OUTSIDE the construct
+            // so misaki phonemises it in context; for a sub respelling append 's'.
+            if (!empty($m[2])) {
+                $tokenMap[$tok] = $isIpa ? $repl . "'s" : $repl . 's';
+            } else {
+                $tokenMap[$tok] = $repl;
+            }
+            return $tok;
+        }, $text, -1, $hits);
+        if ($hits > 0) {
+            $count += $hits;
+            if ($matchedSeed === null) {
+                $sMin = isset($t['tts_tune_seed_min']) ? (int)$t['tts_tune_seed_min'] : 0;
+                $sMax = isset($t['tts_tune_seed_max']) ? (int)$t['tts_tune_seed_max'] : $sMin;
+                if ($sMax < $sMin) $sMax = $sMin;
+                $matchedSeed = ($sMin === $sMax) ? $sMin : random_int($sMin, $sMax);
+            }
+        }
+    }
+    if (!empty($tokenMap)) $text = strtr($text, $tokenMap);
+    return $text;
+}
+
+/**
+ * Chatterbox-specific flattening of a phonetic respelling. Chatterbox (and
+ * its -mtl / -turbo siblings) is a text-token engine: a hyphen in a SUB
+ * ("yah-Hoe-wah") makes it insert a small audible pause at each syllable
+ * boundary, so a 3-syllable respelling renders as three mini-pauses. Fuse
+ * the syllables into one continuous token ("yahHoewah"). Case is preserved
+ * so the capitalised syllable ("Hoe") still gives the model a soft stress
+ * hint.
+ *
+ * Deliberately NOT applied in applyTunesPlain for every local engine: the
+ * canonical hyphenated form is kept in the database and passed through
+ * intact to non-Chatterbox engines (Kokoro/CosyVoice/Qwen3/XTTS/Coqui/MOSS),
+ * which can use the syllable structure. Only the Chatterbox family flattens,
+ * and only here. See buildLocalSegment.
+ */
+function chatterboxFlattenPhonetic(string $alias): string {
+    return str_replace('-', '', $alias);
+}
+
+/**
+ * Resolve the GPU-engine name for a provider key (e.g. 'chatterbox',
+ * 'chatterbox-turbo', 'kokoro'). Mirrors localTtsSynthesize's resolution
+ * (provider_settings.engine, falling back to provider_model_id) so the
+ * text-shaping in buildLocalSegment and the dispatch in localTtsSynthesize
+ * agree on which engine a segment targets.
+ */
+function ttsProviderEngineName(array $cfg, int $providerKey): string {
+    $p = $cfg['providers'][$providerKey] ?? null;
+    if (!$p) return '';
+    $settings = json_decode((string)($p['provider_settings'] ?? '{}'), true) ?: [];
+    return (string)($settings['engine'] ?? ($p['provider_model_id'] ?? ''));
+}
+
+/**
  * Build a provider-neutral plain-text request for a local-engine segment.
  * Mirrors buildVoiceBlock's citation-rewrite + tune steps but emits plain text
  * (no SSML) plus the category's prosody numbers.
@@ -1842,7 +1965,22 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     }
     $tuneHits = 0;
     $matchedTuneSeed = null;
-    $text = applyTunesPlain($text, ttsTunesForProvider($cfg, $providerKey), $tuneHits, $matchedTuneSeed);
+    // Phonetic flattening is Chatterbox-specific: pass the flattener only when
+    // this segment targets the Chatterbox family, so non-Chatterbox engines get
+    // the canonical (hyphenated) DB respelling. See chatterboxFlattenPhonetic.
+    $engineName = strtolower(ttsProviderEngineName($cfg, $providerKey));
+    $tunes      = ttsTunesForProvider($cfg, $providerKey, $voiceCode);
+    if ($engineName === 'kokoro') {
+        // Kokoro is IPA-native (misaki g2p): ipa-typed tunes are emitted as
+        // inline [word](/IPA/) so explicit stress marks survive. Sub-typed
+        // tunes pass through raw (hyphens kept). See applyTunesKokoro.
+        $text = applyTunesKokoro($text, $tunes, $tuneHits, $matchedTuneSeed);
+    } else {
+        // Phonetic flattening is Chatterbox-specific (see chatterboxFlattenPhonetic);
+        // every other local engine gets the canonical hyphenated DB respelling.
+        $flattenAlias = (strncmp($engineName, 'chatterbox', 10) === 0) ? 'chatterboxFlattenPhonetic' : null;
+        $text = applyTunesPlain($text, $tunes, $tuneHits, $matchedTuneSeed, $flattenAlias);
+    }
     // Apply yy_tts_pause-defined pauses (e.g. " | " → 300ms, " / " → 150ms,
     // "—" → 225ms). Without this the configured pauses are silently lost
     // on the local-engine path — Azure's buildVoiceBlock calls applyPauses
@@ -1887,6 +2025,15 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     // path is covered (preview + build worker).
     $text = preg_replace('/<\/?(?:b|i|em|strong)\b[^>]*>/i', '', $text);
     $text = trim((string)preg_replace('/\s+/u', ' ', $text));
+    // ⚠ A LEADING or TRAILING run of pause-periods — the pause→period conversion
+    // above renders chapter/font pauses as ". . . ." — makes the autoregressive
+    // local engines HALLUCINATE garbage syllables at that boundary (a heading
+    // ". . . . Chapter 1. . ." came out "Verge S. Chapter 1, IFV." / "UTL. Chapter
+    // 1. UTL."). A pause at the very start/end is meaningless to *speak* anyway —
+    // boundary silence is handled by the assembly's leading-trim + trailing-pad and
+    // the inter-paragraph gap — so strip it. INTERIOR pause-periods (between
+    // sentences) are untouched; those render fine.
+    $text = trim((string)preg_replace('/^[\s.,]+|[\s.,]+$/u', '', $text));
     // Category prosody (parent-walked like buildVoiceBlock).
     $cat = $cfg['categories'][$category] ?? null;
     $cur = $category;
@@ -1931,7 +2078,7 @@ function buildInworldSegment(string $text, array $cfg, string $category): array 
     }
     $tuneHits = 0;
     $matchedTuneSeed = null;
-    $text = applyTunesInworld($text, ttsTunesForProvider($cfg, $providerKey), $tuneHits, $matchedTuneSeed);
+    $text = applyTunesInworld($text, ttsTunesForProvider($cfg, $providerKey, $voiceCode), $tuneHits, $matchedTuneSeed);
     if (!empty($cfg['pauses'])) {
         $localPlaceholder = '';
         $text = applyPauses($text, $cfg['pauses'], $localPlaceholder);
@@ -2004,7 +2151,7 @@ function buildElevenLabsSegment(string $text, array $cfg, string $category): arr
     // SUB columns produce <sub alias="..."> tags. Both render correctly on
     // ElevenLabs v3 / flash_v2 / turbo_v2.
     $tokenMap = [];
-    $text = applyTunes($text, ttsTunesForProvider($cfg, $providerKey), $tokenMap);
+    $text = applyTunes($text, ttsTunesForProvider($cfg, $providerKey, $voiceCode), $tokenMap);
     // Inline [500] / [1s] markers + yy_tts_pause-defined pauses both become
     // placeholder tokens that placeholdersToBreaks() resolves to <break>.
     $text = applyInlinePauses($text);
@@ -2166,7 +2313,8 @@ function elevenlabsTtsSynthesizeRetry(array $cfg, array $seg, string $outputForm
     while ($attempt < $maxAttempts) {
         $bytes = elevenlabsTtsSynthesize($cfg, $seg, $outputFormat, $err);
         if ($bytes !== '') return $bytes;
-        $retry = ($err === null || $err === '' || preg_match('/HTTP (0|429|5\d\d)\b/', (string)$err));
+        $retry = ($err === null || $err === '' || preg_match('/HTTP (0|429|5\d\d)\b/', (string)$err)
+                  || strpos((string)$err, 'connection failed') !== false);
         if (!$retry) return '';
         $attempt++;
         if ($attempt >= $maxAttempts) break;
@@ -2191,6 +2339,8 @@ function azureTtsSynthesizeRetry(string $ssml, array $cfg, ?string &$err = null,
             $shouldRetry = true;
         } else if (preg_match('/HTTP 0\b/', $err)) {
             $shouldRetry = true;
+        } else if (strpos($err, 'connection failed') !== false) {
+            $shouldRetry = true;
         }
         if (!$shouldRetry) return '';
         $attempt++;
@@ -2210,7 +2360,8 @@ function localTtsSynthesizeRetry(array $cfg, array $seg, string $outputFormat, ?
     while ($attempt < $maxAttempts) {
         $bytes = localTtsSynthesize($cfg, $seg, $outputFormat, $err);
         if ($bytes !== '') return $bytes;
-        $retry = ($err === null || $err === '' || preg_match('/HTTP (0|429|5\d\d)\b/', (string)$err));
+        $retry = ($err === null || $err === '' || preg_match('/HTTP (0|429|5\d\d)\b/', (string)$err)
+                  || strpos((string)$err, 'connection failed') !== false);
         if (!$retry) return '';
         $attempt++;
         if ($attempt >= $maxAttempts) break;
@@ -2238,58 +2389,145 @@ function localTtsSynthesizeRetry(array $cfg, array $seg, string $outputFormat, ?
  * concat is lossless. Opus the same. WAV would corrupt (per-file RIFF
  * headers) — we fall back to single-call for wav/pcm.
  */
-function localTtsSynthesizeChunked(array $cfg, array $seg, string $outputFormat, ?string &$err = null): string {
-    $isMp3OrOpus = (strpos($outputFormat, 'mp3')  !== false)
-                || (strpos($outputFormat, 'opus') !== false);
-    if (!$isMp3OrOpus) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
+// Give the ENGINE TEXT a clean terminal period when a chunk ends mid-clause on a
+// bare word — the autoregressive engines (Chatterbox/XTTS/...) trail off, clip,
+// or hallucinate past an unterminated final word. The stored text is unchanged;
+// chunks already ending on terminal punctuation are left exactly as-is.
+function ttsChunkEngineText(string $chunk): string {
+    $endProbe = preg_replace('/[\s)"\x{201D}\x{2019}\x{0027}]+$/u', '', $chunk);
+    return ($endProbe !== '' && !preg_match('/[.!?,;:\x{2014}\x{2013}]$/u', $endProbe))
+        ? rtrim($chunk) . '.' : $chunk;
+}
 
-    // Chatterbox produces ~200 ms of startup garbage at the front of
-    // EVERY synth call. Splitting the input into sentence chunks meant
-    // each chunk had its OWN startup garbage — the warmup phrase only
-    // protected itself, not the next chunk. Fix: for short text that
-    // would otherwise be ONE chunk, prepend the warmup INLINE so it
-    // and the target word travel as a single Chatterbox call. The
-    // call's startup garbage eats the warmup; the target word comes
-    // through clean. We drop the now-shared chunk's leading "uh. "
-    // audio implicitly because the engine spends its first 200 ms on
-    // garbage that's audibly nothing (cb's "Tallee W" / hum noise).
-    // No warmup in the book-build synth path. The user clearly does NOT
-    // want "uh." or "Seed N." audible in audiobook content, and the
-    // startup-clipping of short paragraphs is a price they'd rather pay
-    // than spoken-out warmup nonsense. Preview-time warmup lives in
-    // admin-tts-preview.php so it doesn't bleed into chapter builds.
-    // Chunk by the voice's PROVIDER chunk sizes (single source of truth:
-    // yy_provider.provider_settings->chunk via ttsProviderChunkSizes). This is
-    // the SAME splitter the preview path uses, so a book build and its preview
-    // chunk identically. No hardcoded sizes here.
+// Decide whether a freshly-synthesised SHORT build chunk is a usable take, using
+// DETERMINISTIC audio signals rather than STT. We learned the hard way that STT is
+// too unreliable here — it reads good audio as silence and mis-hears this book's
+// Hebrew names ("Yahowah"→"Yawa"/"Yahweh") differently each call, so any transcript
+// gate either misses garbage or false-fails on names. The engine's stochastic
+// failures on short text are obvious by SHAPE instead:
+//   • a dead roll → ~silence
+//   • a hallucination/repeat ("1" → "Chapter 1. Chapter 1.", or a heading spoken
+//     THREE times) → far more SPEECH than the words warrant.
+// Two subtleties this handles:
+//   1. SPOKEN length, not raw length. The worker renders chapter-heading pauses as
+//      periods, so the chunk arrives as ". . . . Chapter 1. . ." — judged on the
+//      letters/digits only ("Chapter 1"), so the gate + bound use the real words.
+//   2. SPEECH duration, not total. We strip leading + ALL internal/trailing silence
+//      (incl. those heading pauses) before measuring, so a "Chapter 1 … Chapter 1 …
+//      Chapter 1" repeat can't hide behind the pauses. Clean "Chapter 1" ≈1.1 s of
+//      speech; a triple is ≈3.3 s.
+// Returns TRUE (accept) on any tooling/parse failure so it never blocks a build.
+function ttsBuildChunkOk(string $audioBytes, string $chunkText): bool {
+    if ($audioBytes === '') return false;
+    $spoken = trim((string)preg_replace('/\s+/u', ' ', preg_replace('/[^\p{L}\p{N}]+/u', ' ', $chunkText)));
+    $len = mb_strlen($spoken);
+    if ($len === 0 || $len > 24) return true;            // only police short spoken content
+    static $ff = null, $fp = null;
+    if ($ff === null) { $ff = trim((string)shell_exec('which ffmpeg 2>/dev/null'));  if ($ff === '') $ff = false; }
+    if ($fp === null) { $fp = trim((string)shell_exec('which ffprobe 2>/dev/null')); if ($fp === '') $fp = false; }
+    if ($ff === false || $fp === false) return true;
+    $f = tempnam(sys_get_temp_dir(), 'bchk') . '.wav';
+    @file_put_contents($f, $audioBytes);
+    $probe = function ($file) use ($fp) {
+        return (float)trim((string)shell_exec(escapeshellarg($fp)
+            . ' -v error -show_entries format=duration -of csv=p=0 ' . escapeshellarg($file) . ' 2>/dev/null'));
+    };
+    $total = $probe($f);
+    // Strip leading + ALL internal/trailing silence → what's left is pure speech.
+    $sf = $f . '.sp.wav';
+    @shell_exec(escapeshellarg($ff) . ' -loglevel error -y -i ' . escapeshellarg($f)
+        . ' -af ' . escapeshellarg('silenceremove=start_periods=1:start_duration=0:start_threshold=-40dB:stop_periods=-1:stop_duration=0.12:stop_threshold=-40dB')
+        . ' ' . escapeshellarg($sf) . ' 2>&1');
+    $speech = is_file($sf) ? $probe($sf) : 0.0;
+    @unlink($f); @unlink($sf);
+    if ($total <= 0) return true;                        // couldn't probe → accept
+    if ($speech <= 0) $speech = $total;                  // silence-strip failed → fall back
+    if ($speech < 0.12) return false;                    // dead / silent roll
+    // Too much SPEECH for this little text ⇒ repetition / hallucination. Generous
+    // (~0.16 s/char + 1.0 s) so normal slow delivery never trips it; a 2-3× repeat does.
+    if ($speech > 1.0 + $len * 0.16) return false;
+    return true;
+}
+
+function localTtsSynthesizeChunked(array $cfg, array $seg, string $outputFormat, ?string &$err = null, int $trailingPadMs = 0): string {
+    $isMp3  = (strpos($outputFormat, 'mp3')  !== false);
+    $isOpus = (strpos($outputFormat, 'opus') !== false);
+    // wav/pcm output: single call (per-file RIFF headers can't be concatenated).
+    if (!$isMp3 && !$isOpus) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
+
+    // No spoken warmup in the book-build path — the user does NOT want "uh." /
+    // "Seed N." audible in chapter audio. Chunk by the voice's PROVIDER chunk
+    // sizes (single source of truth: yy_provider.provider_settings->chunk via
+    // ttsProviderChunkSizes) — the SAME splitter the preview path uses, so a book
+    // build and its preview chunk identically. No hardcoded sizes here.
     $cs = ttsProviderChunkSizes($cfg, (int)($seg['provider_key'] ?? 0));
     $chunks = chunkTextForPreview((string)($seg['text'] ?? ''), $cs['min'], $cs['target'], $cs['max']);
-    if (count($chunks) <= 1) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
+    if (!$chunks) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
 
-    $bytes = '';
+    // Opus can't go through pvConcatMp3sWithPauses (mp3/wav only) — keep the
+    // legacy per-chunk byte-concat for the rare opus-output build config.
+    if ($isOpus) {
+        $bytes = '';
+        $nc = count($chunks);
+        foreach ($chunks as $i => $chunk) {
+            $chunkSeg = $seg;
+            $chunkSeg['text'] = ttsChunkEngineText($chunk);
+            if (isset($seg['seed']) && $seg['seed'] !== null) $chunkSeg['seed'] = ((int)$seg['seed'] + $i) % 1000;
+            $cErr = '';
+            $b = localTtsSynthesizeRetry($cfg, $chunkSeg, $outputFormat, $cErr);
+            if ($b === '') { $err = 'chunk ' . ($i + 1) . ' of ' . $nc . ": $cErr"; return ''; }
+            $bytes .= $b;
+        }
+        return $bytes;
+    }
+
+    // MP3 path — mirror the PREVIEW assembly EXACTLY so chapter audio sounds like
+    // its preview. Two bugs this fixes vs the old byte-concat path:
+    //   (1) Every paragraph clipped at the END — localTtsSynthesize() runs an
+    //       mp3-only LEADING+TRAILING silence trim (-30 dB); the trailing trim ate
+    //       each chunk's final-word release, and byte-concatenating separate mp3
+    //       encodes then dropped more audio at every frame boundary. Fix: synth
+    //       each chunk LOSSLESS (wav) so that trim never runs, then assemble with
+    //       pvConcatMp3sWithPauses — LEADING-only trim (never trailing), natural
+    //       inter-chunk pauses, and ONE clean 128k encode (seekable, gapless).
+    //   (2) $trailingPadMs appends a short silence to the assembled segment so the
+    //       worker's downstream byte-concat of paragraph parts can't clip the last
+    //       word either (and it doubles as a natural inter-paragraph breath).
+    $items = [];
+    $n = count($chunks);
+    $hasBaseSeed = (isset($seg['seed']) && $seg['seed'] !== null);
     foreach ($chunks as $i => $chunk) {
         $chunkSeg = $seg;
-        // A chunk ending mid-clause on a bare word makes engines trail off /
-        // clip / hallucinate — give the ENGINE TEXT a clean terminal period
-        // (the stored text is unchanged). Chunks already ending on terminal
-        // punctuation are left exactly as-is.
-        $endProbe = preg_replace('/[\s)"\x{201D}\x{2019}\x{0027}]+$/u', '', $chunk);
-        $chunkSeg['text'] = ($endProbe !== '' && !preg_match('/[.!?,;:\x{2014}\x{2013}]$/u', $endProbe))
-            ? rtrim($chunk) . '.' : $chunk;
-        // Vary the seed per chunk so adjacent chunks don't sound mechanically
-        // identical, while staying reproducible from a caller-supplied base seed.
-        if (isset($seg['seed']) && $seg['seed'] !== null) {
-            $chunkSeg['seed'] = ((int)$seg['seed'] + $i) % 1000;
+        $chunkSeg['text'] = ttsChunkEngineText($chunk);
+        // Chatterbox (and the other autoregressive engines) roll a BAD sample
+        // stochastically — even on trivial input "1" we measured ~1 in 5 synths
+        // coming out as silence or a hallucinated "Chapter 1. Chapter 1.". A
+        // single synth per chunk therefore bakes garbage into ~20% of short
+        // chunks. So STT-verify each chunk and RE-RENDER with a different seed
+        // until the audio faithfully matches the text (bounded tries). The first
+        // try keeps the natural/base seed (preserves voice variety); retries
+        // force distinct deterministic seeds so the re-roll actually differs.
+        // STT failures never block — ttsBuildChunkOk() trusts the audio then.
+        $cErr = ''; $b = '';
+        $maxTries = 4;
+        for ($try = 0; $try < $maxTries; $try++) {
+            $attempt = $chunkSeg;
+            if ($hasBaseSeed)      $attempt['seed'] = ((int)$seg['seed'] + $i + $try * 101) % 1000;
+            elseif ($try > 0)      $attempt['seed'] = ($i + $try * 101) % 1000;   // force a fresh sample
+            // Request 'wav' → localTtsSynthesize() skips its mp3 trailing-trim, so
+            // the final word's release survives to the leading-only assembly trim.
+            $cand = localTtsSynthesizeRetry($cfg, $attempt, 'wav', $cErr);
+            if ($cand === '') continue;          // transient synth error — try again
+            $b = $cand;                          // keep the latest as fallback
+            if (ttsBuildChunkOk($cand, $chunk)) break;   // faithful render — done
         }
-        $cErr = '';
-        $b = localTtsSynthesizeRetry($cfg, $chunkSeg, $outputFormat, $cErr);
-        if ($b === '') {
-            $err = "chunk " . ($i + 1) . " of " . count($chunks) . ": $cErr";
-            return '';
-        }
-        $bytes .= $b;
+        if ($b === '') { $err = 'chunk ' . ($i + 1) . ' of ' . $n . ": $cErr"; return ''; }
+        $items[] = ['mp3' => $b, 'pause' => ($i < $n - 1) ? pvChunkPauseMs($chunk) : 0];
     }
-    return $bytes;
+    $cErr = '';
+    $out = pvConcatMp3sWithPauses($items, $cErr, 'mp3', $trailingPadMs);
+    if ($out === '') { $err = $cErr ?: 'mp3 assembly failed'; return ''; }
+    return $out;
 }
 
 // (splitSentencesForLocalTts removed 2026-06-20 — the build path now chunks via
@@ -2314,8 +2552,8 @@ function ttsEnqueuePreviewJob(\PDO $db, array $j): int {
     } catch (\Throwable $e) {}
     try {
         $stmt = $db->prepare("INSERT INTO yy_tts_preview_job
-            (job_status, job_tts_key, job_user_key, job_text, job_category, job_voice_code, job_style, job_rate_pct, job_pitch_st, job_volume, job_min_chars, job_target_chars, job_max_chars)
-            VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING job_key");
+            (job_status, job_tts_key, job_user_key, job_text, job_category, job_voice_code, job_style, job_rate_pct, job_pitch_st, job_volume, job_min_chars, job_target_chars, job_max_chars, job_tune_override)
+            VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING job_key");
         $stmt->execute([
             (int)$j['tts_key'],
             (int)($j['user_key'] ?? 0),
@@ -2329,6 +2567,7 @@ function ttsEnqueuePreviewJob(\PDO $db, array $j): int {
             (int)($j['min_chars'] ?? 0),     // 0 = resolve from provider downstream
             (int)($j['target_chars'] ?? 0),
             (int)($j['max_chars'] ?? 0),
+            (!empty($j['tune_override']) && is_array($j['tune_override'])) ? json_encode($j['tune_override']) : null,
         ]);
         return (int)$stmt->fetchColumn();
     } catch (\Throwable $e) {
@@ -2399,6 +2638,14 @@ function ttsCleanPreviewText(string $text): string {
     $text = preg_replace('/<\s*em\b[^>]*>/i',      '<i>',  $text);
     $text = preg_replace('/<\s*\/\s*em\s*>/i',     '</i>', $text);
     $text = preg_replace('/<(?!\/?(?:b|i)\b)[^>]*>/i', ' ', $text);    // drop tags except b/i
+    // Remove b/i tags that fall INSIDE a word — flanked by letters or
+    // apostrophe-class chars on both sides (e.g. a paste that italicised only
+    // the half-ring in "Miqra<i>ʿ</i>ey"). Left intact these fragment the word
+    // so pronunciation tunes can't match it (the word is split across runs).
+    // Tags that wrap a whole word/phrase (flanked by spaces/punctuation) are
+    // NOT touched, so bold/italic voice routing still works.
+    $wc = "[\\pL\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]";
+    $text = preg_replace('/(?<=' . $wc . ')<\/?[bi]\b[^>]*>(?=' . $wc . ')/u', '', $text);
     $text = preg_replace('/&nbsp;/', ' ', $text);
     $text = preg_replace('/\s+/u', ' ', $text);
     $text = trim($text);
@@ -2592,7 +2839,11 @@ function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat,
                 $r = gpuSynthesize($payload, null, 120);
                 if (!empty($r['ok'])) { $b = (string)($r['body'] ?? ''); break; }
                 $perr = $r['error'] ?? ('HTTP ' . ($r['status'] ?? 0));
-                if (!preg_match('/HTTP (0|429|5\d\d)\b/', (string)$perr)) break;
+                // Retry on HTTP transient errors AND on transport-level failures
+                // (connect timeout, refused) — those return ['error'=>'connection
+                // failed: …'] without an HTTP status, so the HTTP regex alone misses them.
+                if (!preg_match('/HTTP (0|429|5\d\d)\b/', (string)$perr)
+                    && strpos((string)$perr, 'connection failed') === false) break;
                 sleep(1);
             }
             if ($b === '') break;
@@ -2664,7 +2915,7 @@ function pvVerifyChunk(string $mp3, array $contentWords, string $endWord = ''): 
 // $outFmt='wav' keeps the result LOSSLESS (for intermediate stages); 'mp3'
 // makes the final 128k file. Keeping intermediates as WAV means the audio is
 // MP3-encoded exactly ONCE (at the very end) — no compounding compression warble.
-function pvConcatMp3sWithPauses(array $items, ?string &$err = null, string $outFmt = 'mp3'): string {
+function pvConcatMp3sWithPauses(array $items, ?string &$err = null, string $outFmt = 'mp3', int $trailingPadMs = 0): string {
     $items = array_values(array_filter($items, function ($it) { return ($it['mp3'] ?? '') !== ''; }));
     if (!$items) { $err = $err ?: 'no audio to assemble'; return ''; }
     static $ff = null;
@@ -2683,7 +2934,10 @@ function pvConcatMp3sWithPauses(array $items, ?string &$err = null, string $outF
         $inputs .= ' -i ' . escapeshellarg($f);
         $filter .= '[' . $i . ':a]aresample=24000,aformat=sample_fmts=fltp:channel_layouts=mono'
                  . ',silenceremove=start_periods=1:start_silence=0.05:start_threshold=-40dB';
-        $pad = ($i < $n - 1) ? (int)($items[$i]['pause'] ?? 0) : 0;
+        // Inter-item pause for every item but the last; the last item gets the
+        // caller's trailing pad (default 0 = preview behaviour, used by the book
+        // build so a paragraph's part can't be clipped by the downstream concat).
+        $pad = ($i < $n - 1) ? (int)($items[$i]['pause'] ?? 0) : max(0, $trailingPadMs);
         if ($pad > 0) $filter .= ',apad=pad_dur=' . sprintf('%.3f', $pad / 1000.0);
         $filter .= '[a' . $i . '];';
     }

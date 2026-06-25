@@ -250,7 +250,7 @@ $(function () {
             $sel.empty().append('<option value="">-- Select --</option>');
             $sel.append('<option value="all">All</option>');
             $.each(data, function (_, s) {
-                $sel.append($('<option>').val(s.yah_scroll_key).text(s.yah_scroll_label_yy + ' / ' + s.yah_scroll_label_common));
+                $sel.append($('<option>').val(s.cite_book_key).text(s.cite_book_hebrew + ' / ' + s.cite_book_common));
             });
             $sel.prop('disabled', false);
         });
@@ -269,9 +269,9 @@ $(function () {
     // SCRIPTURE CASCADE: Scroll → Chapter → Verse
     // ════════════════════════════════════════════
     function loadChaptersForScroll(scrollKey, cb) {
-        apiCall('chapters.php?scroll_key=' + scrollKey).done(function (data) {
-            populateSelect($('#chapter'), data, 'yah_chapter_key', function (c) {
-                return c.yah_chapter_number;
+        apiCall('chapters.php?cite_book_key=' + scrollKey).done(function (data) {
+            populateSelect($('#chapter'), data, 'cite_chapter_key', function (c) {
+                return c.cite_chapter_number;
             }, 'All');
             if (cb) cb();
         });
@@ -279,8 +279,8 @@ $(function () {
 
     function loadVersesForChapter(chapterKey, cb) {
         apiCall('verses.php?chapter_key=' + chapterKey).done(function (data) {
-            populateSelect($('#verse'), data, 'yah_verse_key', function (v) {
-                return v.yah_verse_number;
+            populateSelect($('#verse'), data, 'cite_verse_key', function (v) {
+                return v.cite_verse_number;
             }, 'All');
             if (cb) cb();
         });
@@ -775,9 +775,9 @@ $(function () {
         if (errors.length > 0) { showErrors(errors); return; }
 
         var data = {
-            yah_scroll_key: parseInt(currentScrollKey),
-            yah_chapter_key: parseInt(currentChapterKey),
-            yah_verse_key: parseInt(currentVerseKey),
+            cite_book_key: parseInt(currentScrollKey),
+            cite_chapter_key: parseInt(currentChapterKey),
+            cite_verse_key: parseInt(currentVerseKey),
             series_key: parseInt($('#series').val()),
             volume_key: parseInt($('#volume').val()),
             chapter_key: parseInt($('#yy-chapter').val()),
@@ -880,10 +880,10 @@ $(function () {
         $('#list-empty').hide();
         $.each(sorted, function (_, t) {
             var row = '<tr data-key="' + t.translation_key + '">' +
-                '<td>' + escHtml(t.yah_scroll_label_yy) + '</td>' +
-                '<td>' + escHtml(t.yah_scroll_label_common) + '</td>' +
-                '<td>' + escHtml(t.yah_chapter_number) + '</td>' +
-                '<td>' + escHtml(t.yah_verse_number) + '</td>' +
+                '<td>' + escHtml(t.cite_book_hebrew) + '</td>' +
+                '<td>' + escHtml(t.cite_book_common) + '</td>' +
+                '<td>' + escHtml(t.cite_chapter_number) + '</td>' +
+                '<td>' + escHtml(t.cite_verse_number) + '</td>' +
                 '<td>' + escHtml(t.series_display) + '</td>' +
                 '<td>' + escHtml(t.volume_display) + '</td>' +
                 '<td>' + escHtml(t.translation_page || '') + '</td>' +
@@ -1023,16 +1023,16 @@ $(function () {
             // Switch to entry tab
             switchTab('entry');
             // Set scripture cascade manually
-            currentScrollKey = t.yah_scroll_key;
-            currentChapterKey = t.yah_chapter_key;
-            currentVerseKey = t.yah_verse_key;
+            currentScrollKey = t.cite_book_key;
+            currentChapterKey = t.cite_chapter_key;
+            currentVerseKey = t.cite_verse_key;
             pendingEdit = t.translation_key;
 
-            $('#scroll').val(t.yah_scroll_key);
-            loadChaptersForScroll(t.yah_scroll_key, function () {
-                $('#chapter').val(t.yah_chapter_key);
-                loadVersesForChapter(t.yah_chapter_key, function () {
-                    $('#verse').val(t.yah_verse_key);
+            $('#scroll').val(t.cite_book_key);
+            loadChaptersForScroll(t.cite_book_key, function () {
+                $('#chapter').val(t.cite_chapter_key);
+                loadVersesForChapter(t.cite_chapter_key, function () {
+                    $('#verse').val(t.cite_verse_key);
                     loadTranslations();
                 });
             });

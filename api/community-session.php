@@ -29,6 +29,7 @@ if (!empty($_SESSION['user_key'])) {
     $stmt = $db->prepare("
         SELECT u.user_key, u.user_name_display, u.user_handle, u.user_avatar, u.user_email,
                u.user_oauth_provider, u.user_verified, u.user_reputation, u.user_email_notifications,
+               u.user_banned_flag, u.user_banned_until, u.user_ban_reason,
                array_agg(r.role_code) as roles
         FROM yy_user u
         LEFT JOIN yy_user_role ur ON u.user_key = ur.user_key
@@ -42,6 +43,14 @@ if (!empty($_SESSION['user_key'])) {
         // Parse PostgreSQL array
         $roles = trim($user['roles'], '{}');
         $user['roles'] = $roles ? explode(',', $roles) : [];
+
+        // Ban status: the user stays logged in and tracked, but the UI uses
+        // this to disable the restricted features (Ask Yada, Chat). Timed bans
+        // (user_banned_until) auto-expire.
+        $banned = ($user['user_banned_flag'] === true || $user['user_banned_flag'] === 't')
+            && (empty($user['user_banned_until']) || strtotime($user['user_banned_until']) > time());
+        $user['banned'] = $banned;
+        $user['ban_reason'] = $banned ? ($user['user_ban_reason'] ?: null) : null;
 
         // Unread notification count
         $nStmt = $db->prepare("SELECT COUNT(*) FROM yy_community_notification WHERE user_key = ? AND read_flag = FALSE");

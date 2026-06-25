@@ -127,7 +127,10 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
             'is_skipped'       => isset($skipSet[(int)$r['paragraph_number']]),
             'preview'          => $preview,
             'has_part'         => $hasPart,
-            'part_url'         => $hasPart ? ('/u/tts-parts/' . $audioKey . '/' . $partName) : null,
+            // ?v=<mtime> cache-buster: a Rebuild/Redo overwrites the part at the
+            // SAME path, so without this the browser replays the stale cached
+            // bytes and the audio "doesn't change". mtime bumps on every re-synth.
+            'part_url'         => $hasPart ? ('/u/tts-parts/' . $audioKey . '/' . $partName . '?v=' . (int)@filemtime($partFile)) : null,
             'part_bytes'       => $hasPart ? (int)filesize($partFile) : 0,
         ];
         $idx++;

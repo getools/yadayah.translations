@@ -193,7 +193,8 @@ if ($method === 'GET' && $action === 'live_count') {
     $itemKey = (int)($_GET['item_key'] ?? 0);
     if (!$itemKey) errorResponse('item_key required');
     $cnt = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript WHERE feed_item_key = " . $itemKey)->fetchColumn();
-    jsonResponse(['live_rows' => $cnt]);
+    $status = $db->query("SELECT edit_status FROM yy_feed_item_transcript_status WHERE feed_item_key = " . $itemKey)->fetchColumn();
+    jsonResponse(['live_rows' => $cnt, 'edit_status' => $status ?: null]);
 }
 
 if ($method === 'GET' && $action === 'status') {
@@ -308,6 +309,34 @@ if ($method === 'GET' && $action === 'running') {
     // All in-flight transcription jobs across every item — used by the
     // Generate-Transcripts popover so closing + re-opening it shows the
     // current state of every job (not just ones dispatched this session).
+    //
+    // With ?include_recent=1 the result ALSO includes jobs that finished
+    // (complete/failed/cancelled) within the last hour. The batch popover
+    // uses this when it rebuilds its tracking list on (re)open so a job that
+    // completed while the popover was closed still shows as ✓ Complete and is
+    // counted — without it, the in-flight-only snapshot drops finished jobs
+    // and the "Complete:" tally under-counts. The default (no param) is
+    // unchanged so the 30s background badge poller keeps counting in-flight
+    // jobs only.
+    $includeRecent = !empty($_GET['include_recent']);
+    // Optional: the item keys the operator just selected to Generate. The
+    // unified view ALWAYS shows these (even ones whose baselines already all
+    // exist, so they have no jobs) plus everything else in the queue — so the
+    // initiate view and the come-back-later monitor are byte-for-byte the same.
+    $selItems = array_values(array_filter(array_map('intval', explode(',', (string)($_GET['items'] ?? ''))), function ($k) { return $k > 0; }));
+    $where = $includeRecent
+        ? "j.job_status IN ('pending', 'running')
+             OR j.job_completed_dtime > NOW() - INTERVAL '60 minutes'"
+        : "j.job_status IN ('pending', 'running')";
+    // True active total (uncapped) so the badge / monitor header report the
+    // real queue depth instead of the LIMIT. Without this the badge read "400"
+    // when ~940 were actually queued.
+    $activeCount = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status IN ('pending', 'running')")->fetchColumn();
+    // ⚠ ORDER active (pending/running) FIRST, then by job_key (= worker run
+    // order). With include_recent the recently-cancelled/completed rows would
+    // otherwise sort ahead (job_dtime DESC) and consume the whole LIMIT,
+    // hiding the still-pending queue — which left the monitor blank while 939
+    // jobs waited. Recent-finished rows now only fill leftover slots.
     $stmt = $db->query("
         SELECT j.feed_item_transcript_job_key AS job_key,
                j.feed_item_key,
@@ -315,14 +344,152 @@ if ($method === 'GET' && $action === 'running') {
                j.job_status,
                j.job_progress,
                j.job_message,
+               j.job_error,
                j.job_dtime,
+               j.job_completed_dtime,
                COALESCE(fi.feed_item_title_override, fi.feed_item_title_import) AS item_title
           FROM yy_feed_item_transcript_job j
           LEFT JOIN yy_feed_item fi USING (feed_item_key)
-         WHERE j.job_status IN ('pending', 'running')
-         ORDER BY j.job_dtime DESC
-         LIMIT 200
+         WHERE $where
+         ORDER BY (j.job_status IN ('pending', 'running')) DESC,
+                  j.feed_item_transcript_job_key ASC
+         LIMIT 400
     ");
+    $jobsArr = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    // Guarantee the SELECTED items are fully represented even if >400 jobs are
+    // active (the global LIMIT could otherwise push a freshly-dispatched item's
+    // high-keyed jobs past the cap). Pull their active+recent jobs directly and
+    // merge, de-duplicating by job_key.
+    if ($selItems) {
+        $siPh = implode(',', array_fill(0, count($selItems), '?'));
+        $selStmt = $db->prepare("
+            SELECT j.feed_item_transcript_job_key AS job_key, j.feed_item_key, j.job_model,
+                   j.job_status, j.job_progress, j.job_message, j.job_error,
+                   j.job_dtime, j.job_completed_dtime,
+                   COALESCE(fi.feed_item_title_override, fi.feed_item_title_import) AS item_title
+              FROM yy_feed_item_transcript_job j
+              LEFT JOIN yy_feed_item fi USING (feed_item_key)
+             WHERE j.feed_item_key IN ($siPh)
+               AND ( j.job_status IN ('pending','running')
+                     OR j.job_completed_dtime > NOW() - INTERVAL '60 minutes' )
+             ORDER BY j.feed_item_transcript_job_key ASC");
+        $selStmt->execute($selItems);
+        $haveKeys = [];
+        foreach ($jobsArr as $jr) { $haveKeys[$jr['job_key']] = true; }
+        foreach ($selStmt->fetchAll(PDO::FETCH_ASSOC) as $jr) {
+            if (empty($haveKeys[$jr['job_key']])) { $jobsArr[] = $jr; $haveKeys[$jr['job_key']] = true; }
+        }
+    }
+    // Already-generated baselines (model + row count + generated date) for every
+    // item now on screen = selected items ∪ items that have a job. Lets the view
+    // render "⏭ generated <date>" rows for engines that were skipped because
+    // they already exist — the same in both the initiate and monitor flows.
+    // Only computed for the monitor/unified view (include_recent or items); the
+    // lightweight 30s badge poll (neither) skips this extra GROUP BY.
+    $existing = [];
+    $existItems = ($includeRecent || $selItems) ? $selItems : [];
+    if ($includeRecent || $selItems) {
+        foreach ($jobsArr as $jr) { $existItems[] = (int)$jr['feed_item_key']; }
+        $existItems = array_values(array_unique(array_filter($existItems)));
+    }
+    if ($existItems) {
+        $ePh = implode(',', array_fill(0, count($existItems), '?'));
+        $exStmt = $db->prepare("
+            SELECT feed_item_key                          AS item_key,
+                   feed_item_transcript_auto_model        AS model,
+                   COUNT(*)                               AS row_count,
+                   MAX(feed_item_transcript_revision_dtime) AS last_dtime
+              FROM yy_feed_item_transcript_auto
+             WHERE feed_item_key IN ($ePh)
+             GROUP BY feed_item_key, feed_item_transcript_auto_model
+            HAVING COUNT(*) > 0");
+        $exStmt->execute($existItems);
+        $existing = $exStmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    // Editable-transcript (consensus) builds — the SEPARATE init queue, so the
+    // monitor can show an "Editable" line per item with its live row count.
+    $ewhere = $includeRecent
+        ? "job_status IN ('pending', 'running') OR job_completed > NOW() - INTERVAL '60 minutes'"
+        : "job_status IN ('pending', 'running')";
+    $eStmt = $db->query("
+        SELECT j.job_key,
+               j.job_item_key AS feed_item_key,
+               j.job_status,
+               j.job_rows_written,
+               j.job_error,
+               j.job_completed,
+               COALESCE(fi.feed_item_title_override, fi.feed_item_title_import) AS item_title
+          FROM yy_feed_item_transcript_init_job j
+          LEFT JOIN yy_feed_item fi ON fi.feed_item_key = j.job_item_key
+         WHERE $ewhere
+         ORDER BY (job_status IN ('pending', 'running')) DESC, j.job_key ASC
+         LIMIT 400
+    ");
+    // Items opted in to auto-build the editable transcript (for the checkbox).
+    $optin = $db->query("SELECT feed_item_key FROM yy_feed_item_editable_optin WHERE optin = TRUE")->fetchAll(PDO::FETCH_COLUMN);
+    // Editable-transcript edit status per item (Pending overwritable / Editing protected).
+    $tstatus = $db->query("SELECT feed_item_key, edit_status FROM yy_feed_item_transcript_status")->fetchAll(PDO::FETCH_KEY_PAIR);
+    // Running totals for the queue header: baselines done (complete) vs queued
+    // (active = $activeCount); feed-items done (have an editable transcript) vs
+    // queued (distinct items with a baseline still pending/running). All cheap.
+    $baselinesDone = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status='complete'")->fetchColumn();
+    $itemsQueued   = (int)$db->query("SELECT COUNT(DISTINCT feed_item_key) FROM yy_feed_item_transcript_job WHERE job_status IN ('pending','running')")->fetchColumn();
+    $itemsDone     = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_status")->fetchColumn();
+    $editJobs = $eStmt->fetchAll(PDO::FETCH_ASSOC);
+    // Same guarantee for the selected items' editable (consensus) build rows.
+    if ($selItems) {
+        $haveE = [];
+        foreach ($editJobs as $er) { $haveE[$er['job_key']] = true; }
+        $selE = $db->prepare("
+            SELECT j.job_key, j.job_item_key AS feed_item_key, j.job_status,
+                   j.job_rows_written, j.job_error, j.job_completed,
+                   COALESCE(fi.feed_item_title_override, fi.feed_item_title_import) AS item_title
+              FROM yy_feed_item_transcript_init_job j
+              LEFT JOIN yy_feed_item fi ON fi.feed_item_key = j.job_item_key
+             WHERE j.job_item_key IN ($siPh)
+               AND ( j.job_status IN ('pending','running')
+                     OR j.job_completed > NOW() - INTERVAL '60 minutes' )
+             ORDER BY j.job_key ASC");
+        $selE->execute($selItems);
+        foreach ($selE->fetchAll(PDO::FETCH_ASSOC) as $er) {
+            if (empty($haveE[$er['job_key']])) { $editJobs[] = $er; $haveE[$er['job_key']] = true; }
+        }
+    }
+    jsonResponse([
+        'jobs'           => $jobsArr,
+        'existing'       => $existing,
+        'selected'       => $selItems,
+        'active_count'   => $activeCount,
+        'edit_jobs'      => $editJobs,
+        'optin'          => array_map('intval', $optin),
+        'tstatus'        => $tstatus,
+        'baselines_done' => $baselinesDone,
+        'items_done'     => $itemsDone,
+        'items_queued'   => $itemsQueued,
+    ]);
+}
+
+if ($method === 'GET' && $action === 'item_jobs') {
+    // Latest job per engine for ONE item — lets the Generate-Baselines popover
+    // reconnect to in-flight + recently-finished jobs after it's been closed
+    // and reopened (the session-local _gbJobs state is gone by then). Returns
+    // the most recent job per job_model that is either still active OR finished
+    // within the last hour, so reopening mid-run shows running/queued engines
+    // and reopening just after shows the success/error of each. Reopening much
+    // later returns nothing here (the ✓-done baseline badges cover that case).
+    $itemKey = (int)($_GET['item_key'] ?? 0);
+    if (!$itemKey) errorResponse('item_key required');
+    $stmt = $db->prepare("
+        SELECT DISTINCT ON (job_model)
+               feed_item_transcript_job_key AS job_key, job_model, job_status,
+               job_progress, job_message, job_error, job_dtime, job_completed_dtime
+          FROM yy_feed_item_transcript_job
+         WHERE feed_item_key = ?
+           AND ( job_status IN ('pending', 'running')
+                 OR job_completed_dtime > NOW() - INTERVAL '60 minutes' )
+         ORDER BY job_model, job_dtime DESC
+    ");
+    $stmt->execute([$itemKey]);
     jsonResponse(['jobs' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
 }
 
@@ -416,7 +583,7 @@ if ($method === 'POST' && $action === 'retry') {
     $stmt = $db->prepare("
         UPDATE yy_feed_item_transcript_job
            SET job_status = 'pending', job_progress = 0,
-               job_error = NULL, job_completed_dtime = NULL,
+               job_error = NULL, job_started_dtime = NULL, job_completed_dtime = NULL,
                job_worker_pid = NULL,
                job_message = 'Re-queued by retry'
          WHERE feed_item_transcript_job_key IN ($placeholders)
@@ -430,6 +597,34 @@ if ($method === 'POST' && $action === 'cancel') {
     // Worker checks job_status each chunk and bails on 'cancelled'.
     $jobKey  = (int)($data['job_key']  ?? 0);
     $itemKey = (int)($data['item_key'] ?? 0);
+    // Clear Queue (monitor): cancel EVERY pending job site-wide in one shot so
+    // a 939-deep queue empties with a single click (the per-job_keys path only
+    // covers the ≤400 the UI had loaded). 'running' jobs are left to finish.
+    if (!empty($data['all_pending'])) {
+        $stmt = $db->prepare("
+            UPDATE yy_feed_item_transcript_job
+               SET job_status = 'cancelled', job_completed_dtime = NOW()
+             WHERE job_status = 'pending'
+        ");
+        $stmt->execute();
+        jsonResponse(['ok' => true, 'cancelled' => $stmt->rowCount()]);
+    }
+    // Bulk path (Pause / Clear Queue): cancel many waiting jobs in ONE request.
+    // Restricted to 'pending' ONLY so an in-flight 'running' job is never
+    // killed mid-chunk — "let the currently active process finish".
+    if (isset($data['job_keys']) && is_array($data['job_keys'])) {
+        $keys = [];
+        foreach ($data['job_keys'] as $k) { $k = (int)$k; if ($k > 0) $keys[] = $k; }
+        if (!$keys) { jsonResponse(['ok' => true, 'cancelled' => 0]); }
+        $ph = implode(',', array_fill(0, count($keys), '?'));
+        $stmt = $db->prepare("
+            UPDATE yy_feed_item_transcript_job
+               SET job_status = 'cancelled', job_completed_dtime = NOW()
+             WHERE feed_item_transcript_job_key IN ($ph) AND job_status = 'pending'
+        ");
+        $stmt->execute($keys);
+        jsonResponse(['ok' => true, 'cancelled' => $stmt->rowCount(), 'requested' => count($keys)]);
+    }
     if ($jobKey) {
         $db->prepare("
             UPDATE yy_feed_item_transcript_job
@@ -446,6 +641,59 @@ if ($method === 'POST' && $action === 'cancel') {
         errorResponse('job_key or item_key required');
     }
     jsonResponse(['ok' => true]);
+}
+
+if ($method === 'POST' && $action === 'editable_optin') {
+    // Per-item opt-in toggle for auto-building the editable (consensus)
+    // transcript: { item_keys:[...], optin:bool }. When opting in and the
+    // item's baselines are ALREADY done, enqueue the build immediately;
+    // otherwise transcript-worker enqueues it when the last baseline lands.
+    $optin = !empty($data['optin']);
+    $keys = [];
+    foreach ((array)($data['item_keys'] ?? []) as $k) { $k = (int)$k; if ($k > 0) $keys[] = $k; }
+    // Bulk: every item that currently has a pending/running baseline. They all
+    // still have baselines in flight, so opting in just sets the flag — the
+    // editable build auto-fires per item when its last baseline lands.
+    if (empty($keys) && !empty($data['all_queued'])) {
+        $keys = array_map('intval', $db->query("SELECT DISTINCT feed_item_key FROM yy_feed_item_transcript_job WHERE job_status IN ('pending','running')")->fetchAll(PDO::FETCH_COLUMN));
+    }
+    if (!$keys) errorResponse('item_keys[] or all_queued required');
+    $up = $db->prepare("INSERT INTO yy_feed_item_editable_optin (feed_item_key, optin, dtime)
+                         VALUES (?, ?, now())
+                         ON CONFLICT (feed_item_key) DO UPDATE SET optin = EXCLUDED.optin, dtime = now()");
+    $enqueued = [];
+    foreach ($keys as $k) {
+        $up->execute([$k, (int)$optin]);   // (int) — PDO renders bool false as '' which boolean rejects
+        if ($optin) { $ek = maybeEnqueueEditableNow($db, $k); if ($ek) $enqueued[] = $ek; }
+    }
+    jsonResponse(['ok' => true, 'updated' => count($keys), 'optin' => $optin, 'enqueued' => $enqueued]);
+}
+
+// Enqueue a consensus editable-transcript build for $itemKey RIGHT NOW, but only
+// when it's ready and safe: baselines all done, no existing live transcript to
+// clobber, and nothing already building/built. Returns the new init job_key or
+// null. (When baselines are still pending, returns null — transcript-worker's
+// on-complete hook will enqueue it instead.) Mirrors maybeAutoBuildEditable().
+function maybeEnqueueEditableNow(PDO $db, int $itemKey): ?int {
+    $st = $db->prepare("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE feed_item_key = ? AND job_status IN ('pending','running')");
+    $st->execute([$itemKey]); if ((int)$st->fetchColumn() > 0) return null;
+    // Overwrite allowed only with no transcript yet, or a 'Pending' one
+    // (consensus-built, not human-edited); 'Editing' is protected.
+    $st = $db->prepare("SELECT (SELECT COUNT(*) FROM yy_feed_item_transcript WHERE feed_item_key = ?) AS rown,
+                               (SELECT edit_status FROM yy_feed_item_transcript_status WHERE feed_item_key = ?) AS st");
+    $st->execute([$itemKey, $itemKey]); $pr = $st->fetch(PDO::FETCH_ASSOC);
+    if ((int)$pr['rown'] > 0 && (string)($pr['st'] ?? '') !== 'Pending') return null;   // protected (Editing)
+    $st = $db->prepare("SELECT 1 FROM yy_feed_item_transcript_init_job WHERE job_item_key = ? AND job_status IN ('pending','running') LIMIT 1");
+    $st->execute([$itemKey]); if ($st->fetchColumn()) return null;
+    $st = $db->prepare("SELECT DISTINCT feed_item_transcript_auto_model FROM yy_feed_item_transcript_auto WHERE feed_item_key = ?");
+    $st->execute([$itemKey]); $baselines = array_values(array_filter($st->fetchAll(PDO::FETCH_COLUMN)));
+    if (!$baselines) return null;
+    $params = ['max_chars' => 42, 'max_lines' => 2, 'max_secs' => 7.0, 'min_secs' => 1.2, 'break_punct' => true, 'break_gap' => 0, 'dedup' => true];
+    $jp = json_encode(['baselines' => $baselines, 'primary' => '', 'params' => $params, 'wait_for' => []]);
+    $ins = $db->prepare("INSERT INTO yy_feed_item_transcript_init_job (job_item_key, job_model, job_user_key, job_params) VALUES (?, 'consensus', NULL, ?) RETURNING job_key");
+    $ins->execute([$itemKey, $jp]); $ik = (int)$ins->fetchColumn();
+    spawnNextInitWorker($db);   // single-worker editable-build queue
+    return $ik;
 }
 
 if ($method === 'POST' && $action === 'run') {

@@ -16,12 +16,21 @@ set_time_limit(0); // background-safe, no PHP wall-clock limit
 
 $WEB_ROOT = '/var/www/html';
 $MAX_TRIAGE = 1000;
+// Max times a single event may be handed to the Claude fixer before we give
+// up and retire it for human review. Without this, an event Claude can't
+// resolve (crash / timeout / silent exit, which leave no event_action_taken)
+// gets re-enqueued every cron tick forever — one event hit 438 repeat Claude
+// runs, each a ~25-min CPU-capped Node process. The cap bounds it to 3 tries.
+$MAX_FIX_ATTEMPTS = 3;
 // run_id arrives as argv[1] from the admin-monitoring "Auto-Fix" button.
 // When auto-fix-error.php runs from cron there's no caller to provide one,
 // so we synthesize a stable id ourselves. Without this, claude-fix
 // requests dropped into the host queue carried run_id="" and the host
 // runner couldn't correlate them — events stayed unresolved silently.
 $RUN_ID = $argv[1] ?? '';
+// Cron runs supply no run_id; the admin "Auto-Fix" button always passes one.
+// The interval gate (below) applies only to cron — a manual click runs now.
+$IS_CRON = (($argv[1] ?? '') === '');
 if ($RUN_ID === '') {
     $RUN_ID = 'cron_' . date('Ymd_His') . '_' . substr(bin2hex(random_bytes(3)), 0, 6);
 }
@@ -93,16 +102,58 @@ $db = new PDO("pgsql:host=$host;port=$port;dbname=$name", $user, $pass, [
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
 ]);
 
+// ── Auto-Fix settings (admin-settings.html → yy_setting scope 'autofix') ──
+// Drive pause, cadence, and the attempt cap at runtime. Every read falls back
+// to the hardcoded default so a missing/garbled row can never break the agent.
+$afSettings = [];
+try {
+    $afStmt = $db->query("SELECT setting_code, setting_value FROM yy_setting WHERE setting_scope_code = 'autofix'");
+    foreach ($afStmt->fetchAll() as $r) { $afSettings[$r['setting_code']] = $r['setting_value']; }
+} catch (Throwable $e) { /* table/rows missing → defaults below */ }
+$afInt = function (string $code, int $default, int $min, int $max) use ($afSettings) {
+    $v = (isset($afSettings[$code]) && is_numeric($afSettings[$code])) ? (int)$afSettings[$code] : $default;
+    return max($min, min($max, $v));
+};
+
+// Admin pause (indefinite; separate from the dev-session PAUSED file above).
+if (($afSettings['paused'] ?? '0') === '1') {
+    $reason = 'Auto-fix paused via admin Settings. Skipping.';
+    echo "[" . date('c') . "] $reason\n";
+    writeStatus($STATUS_FILE, ['state' => 'paused', 'started' => $STARTED_AT, 'finished' => date('c'), 'total' => 0, 'processed' => 0, 'log_tail' => $reason]);
+    exit(0);
+}
+
+// Attempt cap from settings (overrides the seeded default at the top).
+$MAX_FIX_ATTEMPTS = $afInt('max_fix_attempts', $MAX_FIX_ATTEMPTS, 1, 10);
+
+// Interval gate — cron only. Measured run-start to run-start so the effective
+// cadence matches the "every N minutes" setting regardless of cron tick rate.
+$LAST_RUN_FILE = "$STATUS_DIR/last_run.txt";
+if ($IS_CRON) {
+    $intervalSecs = $afInt('interval_minutes', 30, 5, 1440) * 60;
+    $last = is_file($LAST_RUN_FILE) ? (int)trim((string)@file_get_contents($LAST_RUN_FILE)) : 0;
+    $elapsed = time() - $last;
+    if ($last > 0 && $elapsed < $intervalSecs) {
+        // Quiet exit — don't write a run_*.json for every gated tick (would spam the dir).
+        echo "[" . date('c') . "] Interval gate: {$elapsed}s < {$intervalSecs}s since last run. Skipping.\n";
+        exit(0);
+    }
+}
+// Passed the gate (or manual run): stamp the start so the gate measures from here.
+@file_put_contents($LAST_RUN_FILE, (string)time());
+
 echo "[" . date('c') . "] Auto-fix starting" . ($RUN_ID ? " (run $RUN_ID)" : '') . "\n";
 writeStatus($STATUS_FILE, ['state' => 'starting', 'started' => date('c')]);
 
 // ── Fetch unresolved errors ──
 $stmt = $db->prepare("
-    SELECT event_key, event_source, event_severity, event_message, event_detail, event_file, event_referer
+    SELECT event_key, event_source, event_severity, event_message, event_detail, event_file, event_referer,
+           COALESCE(event_fix_attempts, 0) AS event_fix_attempts
     FROM yy_monitor_event
     WHERE event_resolved_flag = FALSE
       AND event_source NOT IN ('agent_op', 'honeypot')
       AND event_severity IN ('error', 'warning')
+      AND COALESCE(event_fix_attempts, 0) < $MAX_FIX_ATTEMPTS
     ORDER BY event_dtime DESC
     LIMIT $MAX_TRIAGE
 ");
@@ -469,25 +520,52 @@ foreach ($errors as $error) {
         // well-known permanent failures explicitly here with specific, actionable notes.
         $resolved = false;
         if ($source === 'transcript_worker') {
+            // Transcript failures are OPERATIONAL (GPU OOM/busy, YouTube IP blocks,
+            // unavailable videos) — never code bugs auto-fix can edit away. So they
+            // always resolve OUT of the auto-fix queue. First reconcile: if the item
+            // is now transcribed (a later retry or another consensus model succeeded),
+            // close it as completed; otherwise close it with an actionable note and
+            // let the transcript pipeline / admin-feeds own any retry.
             $hay = $msg . ' ' . $detail;
             $itemKeyMatch = [];
             preg_match('/item (\d+)/', $msg, $itemKeyMatch);
-            $ik = $itemKeyMatch[1] ?? '?';
-            if (stripos($hay, 'private video') !== false || stripos($hay, 'video unavailable') !== false || stripos($hay, 'has been removed') !== false) {
-                $resolved = true;
-                $note = 'Auto-resolved: YouTube video is private, deleted, or unavailable — cannot transcribe. No code fix possible.';
+            $ik    = $itemKeyMatch[1] ?? '?';
+            $ikInt = is_numeric($ik) ? (int)$ik : 0;
+
+            // Coverage = how much of the item's duration the transcript segments span.
+            $cov = null; $segs = 0;
+            if ($ikInt > 0) {
+                try {
+                    $cs = $db->prepare("
+                        SELECT count(t.*) AS segs,
+                               EXTRACT(EPOCH FROM MAX(t.feed_item_transcript_segment))
+                                 / NULLIF(fi.feed_item_duration_seconds, 0) AS cov
+                          FROM yy_feed_item fi
+                          LEFT JOIN yy_feed_item_transcript t ON t.feed_item_key = fi.feed_item_key
+                         WHERE fi.feed_item_key = ?
+                         GROUP BY fi.feed_item_duration_seconds");
+                    $cs->execute([$ikInt]);
+                    if ($crow = $cs->fetch()) { $segs = (int)$crow['segs']; $cov = $crow['cov'] !== null ? (float)$crow['cov'] : null; }
+                } catch (Throwable $e) { /* leave cov null → classify by message */ }
+            }
+
+            $resolved = true; // operational → always leave the auto-fix queue
+            if ($cov !== null && $cov >= 0.80) {
+                $note = "Auto-resolved: transcript now present for item {$ik} ({$segs} segments, ~" . round($cov * 100) . "% coverage) — a retry or another model succeeded.";
+            } elseif (stripos($hay, 'private video') !== false || stripos($hay, 'video unavailable') !== false || stripos($hay, 'has been removed') !== false) {
+                $note = 'Auto-resolved (operational): YouTube video is private, deleted, or unavailable — cannot transcribe.';
             } elseif (stripos($hay, 'live event will begin') !== false || stripos($hay, 'future live event') !== false || stripos($hay, 'will begin in a few moments') !== false) {
-                $resolved = true;
-                $note = 'Auto-resolved: Scheduled future live stream — cannot transcribe until after broadcast. Retry manually after the event.';
+                $note = 'Auto-resolved (operational): scheduled future live stream — re-run after broadcast.';
             } elseif (stripos($hay, 'community post') !== false || stripos($hay, 'only images are available') !== false) {
-                $resolved = true;
-                $note = 'Auto-resolved: YouTube Community post or image-only item (no audio track) — cannot transcribe. Remove from transcription queue.';
+                $note = 'Auto-resolved (operational): YouTube Community/image-only item (no audio track) — cannot transcribe.';
             } elseif (stripos($hay, 'age-restricted') !== false || stripos($hay, 'sign-in or is age-restricted') !== false) {
-                $note = "Needs human review: Age-restricted video. Upload YouTube cookies via admin-cookies.php, or manually upload audio/VTT to /tmp/transcript_uploads/{$ik}.vtt";
-            } elseif (stripos($hay, "you're not a bot") !== false || stripos($hay, 'bot-detection blocked') !== false || stripos($hay, 'confirm you') !== false) {
-                $note = "Needs human review: YouTube bot-detection blocking server IP. Upload fresh cookies via admin-cookies.php, or manually upload audio/VTT to /tmp/transcript_uploads/{$ik}.vtt";
+                $note = "Auto-resolved (operational, not auto-fixable): age-restricted video for item {$ik}. To transcribe: upload YouTube cookies via admin-cookies.php, or re-run from the uploaded MP3 in admin-feeds.";
+            } elseif (stripos($hay, "you're not a bot") !== false || stripos($hay, 'bot-detection') !== false || stripos($hay, 'confirm you') !== false) {
+                $note = "Auto-resolved (operational, not auto-fixable): YouTube bot-detection blocked the server IP for item {$ik}. The MP3 is usually already on disk — re-run transcription from admin-feeds (Generate), or upload fresh cookies via admin-cookies.php.";
+            } elseif (stripos($hay, 'out of memory') !== false || stripos($hay, 'CUDA') !== false || stripos($hay, 'unreachable') !== false || stripos($hay, 'engine error') !== false) {
+                $note = "Auto-resolved (operational, not auto-fixable): GPU/engine failure (e.g. CUDA OOM, box busy) for item {$ik} — transient. The pipeline retries across models; re-run from admin-feeds if it stays missing.";
             } else {
-                $note = "Needs human review: transcript_worker failure (external/infra). Check transcript job details in admin panel. Source detail: " . substr($detail, 0, 200);
+                $note = "Auto-resolved (operational, not auto-fixable): transcript_worker failure for item {$ik}. Manage retries in the transcript admin (admin-feeds) — not a code bug. Detail: " . substr($detail, 0, 150);
             }
         } else {
             $note = "Infra/external-service issue — not fixable by editing code. Source: $source. Needs manual review.";
@@ -537,7 +615,20 @@ foreach ($errors as $error) {
                 'msg_preview' => substr($msg, 0, 120),
             ], JSON_PRETTY_PRINT));
             @chmod($reqFile, 0664);
-            $line = "  [claude-fix] #{$error['event_key']} {$source}: enqueued for host runner";
+            // Count this attempt. Claude marks event_action_taken itself when it
+            // finishes (success or an explicit "couldn't fix" note), which trips
+            // the [already-analyzed] guard above. But a crashed/timed-out/silent
+            // run leaves no marker, so the event would be re-enqueued forever.
+            // Increment here so those cases still retire after $MAX_FIX_ATTEMPTS.
+            $attemptNow = (int)$error['event_fix_attempts'] + 1;
+            if ($attemptNow >= $MAX_FIX_ATTEMPTS) {
+                $db->prepare("UPDATE yy_monitor_event SET event_fix_attempts = ?, event_action_taken = COALESCE(event_action_taken, ?) WHERE event_key = ?")
+                   ->execute([$attemptNow, "Needs human review: Claude auto-fix could not resolve after {$MAX_FIX_ATTEMPTS} attempts.", (int)$error['event_key']]);
+            } else {
+                $db->prepare("UPDATE yy_monitor_event SET event_fix_attempts = ? WHERE event_key = ?")
+                   ->execute([$attemptNow, (int)$error['event_key']]);
+            }
+            $line = "  [claude-fix] #{$error['event_key']} {$source} (attempt {$attemptNow}/{$MAX_FIX_ATTEMPTS}): enqueued for host runner";
             echo $line . "\n";
             recordCounter('claude-fix', $line, $counters, $logLines, $STATUS_FILE, $processed, $total, $currentLabel);
             $fixedMessages[$msgHash] = $error['event_key'];

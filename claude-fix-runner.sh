@@ -39,6 +39,24 @@ flock -n 9 || exit 0
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*"; }
 
+# ── Auto-Fix settings (admin-settings.html → yy_setting scope 'autofix') ──
+# Resource caps, run timeout, and the admin pause are read from the DB at
+# runtime so they can be changed from the admin UI without editing this file.
+# Every read falls back to its hardcoded default, so a DB hiccup or missing row
+# can never break the runner.
+get_setting() {
+    docker exec yada-postgres-prod psql -U postgres -d yada -tA -c \
+        "SELECT setting_value FROM yy_setting WHERE setting_scope_code='autofix' AND setting_code='$1' LIMIT 1" \
+        2>/dev/null | tr -d '[:space:]'
+}
+cfg_int() { # code default min max
+    local v; v=$(get_setting "$1")
+    case "$v" in ''|*[!0-9]*) v=$2 ;; esac
+    [ "$v" -lt "$3" ] && v=$3
+    [ "$v" -gt "$4" ] && v=$4
+    echo "$v"
+}
+
 # ── Pause flag: skip while a developer is editing prod from VS Code. ──
 # Mirrors the check in auto-fix-error.php. A SessionStart hook on the dev
 # machine touches this file; honored for a bounded window so a forgotten
@@ -51,6 +69,14 @@ if [ -f "$PAUSE_FLAG" ]; then
         log "Skip: auto-fix paused by dev flag (age ${flag_age}s < ${PAUSE_TTL}s)"
         exit 0
     fi
+fi
+
+# Admin pause (yy_setting autofix.paused) — indefinite, set from the Settings
+# UI. Mirrors the check in auto-fix-error.php so a paused agent launches no
+# Claude even if a request was already queued.
+if [ "$(get_setting paused)" = "1" ]; then
+    log "Skip: auto-fix paused via admin Settings"
+    exit 0
 fi
 
 # Pre-flight: don't spawn Claude when host is busy. Same gate as the cron-
@@ -148,16 +174,27 @@ process_one() {
     local pg_ip
     pg_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' yada-postgres-prod 2>/dev/null)
     [ -z "$pg_ip" ] && pg_ip=postgres
-    # Auto-fix MUST authenticate via the OAuth/subscription session at
-    # /opt/yada-www/claude-home/.claude/. It must NEVER fall back to the
-    # Anthropic API key — that drains the workspace API budget reserved for
-    # Ask Yada. If OAuth is expired, fail fast: refresh via `claude login`
-    # as the claudefix user instead of patching this script.
+    # Resource caps + run timeout from Settings (fallbacks = the prior hardcoded
+    # values). cfg_int clamps to a sane range so a bad UI value can't, say, set
+    # CPUQuota=0% and wedge every fix.
+    local cfg_cpu cfg_mem cfg_timeout
+    cfg_cpu=$(cfg_int cpu_quota_pct 70 10 100)
+    cfg_mem=$(cfg_int mem_max_mb 1200 256 8192)
+    cfg_timeout=$(cfg_int timeout_seconds 1500 60 3600)
+    # Auto-fix MUST authenticate via OAuth/subscription. It must NEVER fall
+    # back to the Anthropic API key — that drains the workspace API budget
+    # reserved for Ask Yada. Two OAuth mechanisms are accepted (claude-fix.sh
+    # resolves them, env-var token first):
+    #   - a long-lived setup-token at .claude/oauth_token (preferred, ~1yr),
+    #   - the interactive session .claude/.credentials.json.
+    # Both are installed from admin Settings → Auto-Fix → Authentication. If
+    # neither is present, fail fast (don't patch this script to use an API key).
     local creds=/opt/yada-www/claude-home/.claude/.credentials.json
-    if [ ! -s "$creds" ]; then
+    local token=/opt/yada-www/claude-home/.claude/oauth_token
+    if [ ! -s "$creds" ] && [ ! -s "$token" ]; then
         {
-            echo "[$(date +%H:%M:%S)] OAuth credentials missing at $creds — refusing to run."
-            echo "[$(date +%H:%M:%S)] Refresh by running 'sudo -u claudefix HOME=/opt/yada-www/claude-home claude login' on the host."
+            echo "[$(date +%H:%M:%S)] No OAuth auth: neither $token nor $creds present — refusing to run."
+            echo "[$(date +%H:%M:%S)] Fix from admin Settings → Auto-Fix → Authentication, or run 'sudo -u claudefix HOME=/opt/yada-www/claude-home claude login' on the host."
         } >> "$log_file" 2>&1
         rc=2
     else
@@ -168,10 +205,11 @@ process_one() {
                 --setenv=HOME=/opt/yada-www/claude-home \
                 --setenv=PG_HOST="$pg_ip" --setenv=PG_PORT=5432 \
                 --setenv=PG_DB=yada --setenv=PG_USER=postgres --setenv=PG_PASS=yada_password \
-                --property=MemoryMax=1200M \
+                --setenv=TIMEOUT_SECS="$cfg_timeout" \
+                --property=MemoryMax=${cfg_mem}M \
                 --property=MemorySwapMax=0 \
-                --property=CPUQuota=70% \
-                timeout 1620 bash "$CLAUDE_FIX" "$event_key"
+                --property=CPUQuota=${cfg_cpu}% \
+                timeout $((cfg_timeout + 120)) bash "$CLAUDE_FIX" "$event_key"
             rc=$?
             echo "[$(date +%H:%M:%S)] claude-fix.sh exited with rc=$rc"
         } >> "$log_file" 2>&1

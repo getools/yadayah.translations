@@ -8,37 +8,32 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 $pdo = getDb();
 
 $citeBookId = isset($_GET['cite_book_key']) && $_GET['cite_book_key'] !== '' ? (int)$_GET['cite_book_key'] : null;
-$scrollKey  = isset($_GET['scroll_key']) && $_GET['scroll_key'] !== '' ? (int)$_GET['scroll_key'] : null;
 $chapter    = isset($_GET['chapter']) && $_GET['chapter'] !== '' ? (int)$_GET['chapter'] : null;
 $verse      = isset($_GET['verse']) && $_GET['verse'] !== '' ? (int)$_GET['verse'] : null;
 
 // Require at least one filter. Without this guard the endpoint returns the
 // entire 23 MB translations dataset (~14k rows) and takes ~40s — long enough
 // to OOM the host under any concurrency. The frontend always provides at
-// minimum a cite_book_key or scroll_key on initial load.
-if ($citeBookId === null && $scrollKey === null && $chapter === null && $verse === null) {
-    errorResponse('At least one of cite_book_key, scroll_key, chapter, or verse is required', 400);
+// minimum a cite_book_key on initial load.
+if ($citeBookId === null && $chapter === null && $verse === null) {
+    errorResponse('At least one of cite_book_key, chapter, or verse is required', 400);
 }
 
 $conditions = [];
 $params = [];
 
 if ($citeBookId !== null) {
-    // Map cite_book_key to yah_scroll_key via yy_cite_book
-    $conditions[] = "t.yah_scroll_key IN (SELECT yah_scroll_key FROM yy_cite_book WHERE cite_book_key = ?)";
+    $conditions[] = "t.cite_book_key = ?";
     $params[] = $citeBookId;
-} elseif ($scrollKey !== null) {
-    $conditions[] = "t.yah_scroll_key = ?";
-    $params[] = $scrollKey;
 }
 
 if ($chapter !== null) {
-    $conditions[] = "c.yah_chapter_number = ?";
+    $conditions[] = "c.cite_chapter_number = ?";
     $params[] = $chapter;
 }
 
 if ($verse !== null) {
-    $conditions[] = "v.yah_verse_number = ?";
+    $conditions[] = "v.cite_verse_number = ?";
     $params[] = $verse;
 }
 
@@ -55,19 +50,19 @@ $stmt = $pdo->prepare("
            t.translation_page AS translation_page,
            t.translation_paragraph AS translation_paragraph,
            t.translation_copy AS translation_text_word,
-           s.yah_scroll_label_yy || ' / ' || s.yah_scroll_label_common AS translation_cite,
-           s.yah_scroll_label_yy AS cite_book_hebrew,
-           s.yah_scroll_label_common AS cite_book_common,
-           c.yah_chapter_number AS translation_cite_chapter,
-           v.yah_verse_number AS translation_cite_verse,
+           cb.cite_book_hebrew || ' / ' || cb.cite_book_common AS translation_cite,
+           cb.cite_book_hebrew AS cite_book_hebrew,
+           cb.cite_book_common AS cite_book_common,
+           c.cite_chapter_number AS translation_cite_chapter,
+           v.cite_verse_number AS translation_cite_verse,
            NULL AS translation_cite_verse_end,
-           t.yah_scroll_key AS translation_cite_book_key,
+           t.cite_book_key AS translation_cite_book_key,
            vol.volume_flip_code,
            cn.chapter_name
     FROM yy_translation t
-    JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
-    JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
-    JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
+    JOIN yy_cite_book cb ON cb.cite_book_key = t.cite_book_key
+    JOIN yy_cite_chapter c ON c.cite_chapter_key = t.cite_chapter_key
+    JOIN yy_cite_verse v ON v.cite_verse_key = t.cite_verse_key
     JOIN yy_volume vol ON vol.volume_key = t.volume_key AND vol.volume_active_flag = TRUE
     LEFT JOIN LATERAL (
         SELECT 'Chapter ' || ch.chapter_number || ':' || ch.chapter_name AS chapter_name
@@ -78,8 +73,8 @@ $stmt = $pdo->prepare("
         LIMIT 1
     ) cn ON TRUE
     $where
-    ORDER BY s.yah_scroll_sort ASC, s.yah_scroll_label_yy ASC,
-             c.yah_chapter_number ASC, v.yah_verse_number ASC,
+    ORDER BY cb.cite_book_sort ASC, cb.cite_book_hebrew ASC,
+             c.cite_chapter_number ASC, v.cite_verse_number ASC,
              vol.volume_file, t.translation_page
 ");
 $stmt->execute($params);

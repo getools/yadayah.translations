@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782136814">
+    <meta name="page-version" content="1782367203">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chat — Yada Yah</title>
@@ -517,7 +517,7 @@
         <nav><div class="nav-row"></div><div class="nav-row"></div></nav>
     </div>
 </header>
-<script src="/js/site-nav.js?v=53"></script>
+<script src="/js/site-nav.js?v=54"></script>
 <script>
 // Font size control — persisted to user account (logged in) or localStorage (guest)
 (function() {
@@ -672,12 +672,12 @@ window.ensureTinyMCE = function(callback) {
 };
 </script>
 <script src="/js/bg-video.js"></script>
-<script src="/js/community.js?v=38"></script>
+<script src="/js/community.js?v=39"></script>
 <script src="/js/community-auth.js?v=24"></script>
-<script src="/js/community-topics.js?v=72"></script>
+<script src="/js/community-topics.js?v=73"></script>
 <script src="/js/community-notifications.js?v=25"></script>
 <script src="/js/community-profile.js?v=21"></script>
-<script src="/js/community-dm.js?v=44"></script>
+<script src="/js/community-dm.js?v=45"></script>
 <script src="/js/community-search.js?v=16"></script>
 <script src="/js/community-members.js?v=6"></script>
 <script>
@@ -688,7 +688,7 @@ window.ensureTinyMCE = function(callback) {
         origRenderAuth();
         var bar = document.getElementById('new-topic-bar');
         if (bar) {
-            bar.innerHTML = Community.currentUser
+            bar.innerHTML = Community.canPost()
                 ? '<button class="btn btn-primary" onclick="window.location.hash=\'#new-topic\'">New Topic</button>'
                 : '';
         }
@@ -738,6 +738,6 @@ document.addEventListener('click', function(e) {
 });
 </script>
 <script src="/js/site-footer.js?v=128"></script>
-<script src="/js/video-comments.js?v=13"></script>
+<script src="/js/video-comments.js?v=14"></script>
 </body>
 </html>

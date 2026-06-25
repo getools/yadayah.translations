@@ -283,10 +283,9 @@ def reparse_volume(vol_key, verbose=False):
     # ── Phase 2: translations ─────────────────────────────────────────
     # Load FK lookup tables for cite resolution
     cur.execute("""
-        SELECT cbm.cite_book_map_hebrew, cb.yah_scroll_key
+        SELECT cbm.cite_book_map_hebrew, cbm.cite_book_key
           FROM yy_cite_book_map cbm
-          JOIN yy_cite_book cb ON cb.cite_book_key = cbm.cite_book_key
-         WHERE cb.yah_scroll_key IS NOT NULL
+         WHERE cbm.cite_book_key IS NOT NULL
     """)
     cite_book_map = {}
     for cite_hebrew, scroll_key in cur.fetchall():
@@ -295,17 +294,17 @@ def reparse_volume(vol_key, verbose=False):
         if norm != cite_hebrew:
             cite_book_map[norm] = scroll_key
 
-    cur.execute("SELECT yah_chapter_key, yah_scroll_key, yah_chapter_number FROM yah_chapter")
+    cur.execute("SELECT cite_chapter_key, cite_book_key, cite_chapter_number FROM yy_cite_chapter")
     chapter_map = {(sk, cn): ck for ck, sk, cn in cur.fetchall()}
-    cur.execute("SELECT yah_verse_key, yah_chapter_key, yah_verse_number FROM yah_verse")
+    cur.execute("SELECT cite_verse_key, cite_chapter_key, cite_verse_number FROM yy_cite_verse")
     verse_map = {(ck, vn): vk for vk, ck, vn in cur.fetchall()}
 
     def ensure_chapter(scroll_key, ch_num):
         key = (scroll_key, ch_num)
         if key not in chapter_map:
             cur.execute(
-                "INSERT INTO yah_chapter (yah_scroll_key, yah_chapter_number, yah_chapter_sort) "
-                "VALUES (%s, %s, %s) RETURNING yah_chapter_key",
+                "INSERT INTO yy_cite_chapter (cite_book_key, cite_chapter_number, cite_chapter_sort) "
+                "VALUES (%s, %s, %s) RETURNING cite_chapter_key",
                 (scroll_key, ch_num, ch_num * 10))
             chapter_map[key] = cur.fetchone()[0]
             conn.commit()
@@ -315,8 +314,8 @@ def reparse_volume(vol_key, verbose=False):
         key = (ch_key, verse_num)
         if key not in verse_map:
             cur.execute(
-                "INSERT INTO yah_verse (yah_chapter_key, yah_verse_number, yah_verse_sort) "
-                "VALUES (%s, %s, %s) RETURNING yah_verse_key",
+                "INSERT INTO yy_cite_verse (cite_chapter_key, cite_verse_number, cite_verse_sort) "
+                "VALUES (%s, %s, %s) RETURNING cite_verse_key",
                 (ch_key, verse_num, verse_num * 10))
             verse_map[key] = cur.fetchone()[0]
             conn.commit()
@@ -352,7 +351,7 @@ def reparse_volume(vol_key, verbose=False):
     if trans_rows:
         execute_values(cur, """
             INSERT INTO yy_translation (
-                yah_scroll_key, yah_chapter_key, yah_verse_key,
+                cite_book_key, cite_chapter_key, cite_verse_key,
                 series_key, volume_key, chapter_key,
                 translation_page, translation_paragraph,
                 translation_copy, translation_sort

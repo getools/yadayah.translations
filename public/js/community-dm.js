@@ -380,10 +380,13 @@ CommunityDM.loadInbox = function() {
         threads.forEach(function(t) { if (t.chime_pitch != null) _threadChimePitches[t.thread_key] = parseInt(t.chime_pitch); });
         var html = '<div class="section-header">'
             + '<h2 class="section-title">&#128172; Messages</h2>'
-            + '<div style="display:flex;gap:8px;">'
-            + '<button class="btn btn-primary btn-sm" onclick="CommunityDM.showCompose()">New Message</button>'
-            + '<button class="btn btn-sm" style="background:#4a4e7a;color:#fff;" onclick="CommunityDM.showComposeGroup()">New Group</button>'
-            + '</div></div>';
+            + (Community.canPost()
+                ? '<div style="display:flex;gap:8px;">'
+                    + '<button class="btn btn-primary btn-sm" onclick="CommunityDM.showCompose()">New Message</button>'
+                    + '<button class="btn btn-sm" style="background:#4a4e7a;color:#fff;" onclick="CommunityDM.showComposeGroup()">New Group</button>'
+                  + '</div>'
+                : '')
+            + '</div>';
 
         if (!threads.length) {
             html += '<div class="empty-state">No messages yet</div>';
@@ -498,7 +501,7 @@ CommunityDM.loadThread = function(threadKey) {
                 if (isMine) _msgBodies[m.message_key] = m.message_body || '';
                 var senderLabel = isGroup && !isMine ? '<div class="dm-sender-name">' + Community.esc(m.user_name_display || '') + '</div>' : '';
                 var editedTag = ((m.message_revision_num || 1) > 1) ? ' <span class="dm-edited-tag" title="' + Community.esc(m.message_revision_dtime || '') + '">(edited)</span>' : '';
-                var editBtn = isMine ? '<button type="button" class="dm-edit-btn" onclick="CommunityDM.beginEdit(' + threadKey + ',' + m.message_key + ')" title="Edit message">&#9998;</button>' : '';
+                var editBtn = (isMine && Community.canPost()) ? '<button type="button" class="dm-edit-btn" onclick="CommunityDM.beginEdit(' + threadKey + ',' + m.message_key + ')" title="Edit message">&#9998;</button>' : '';
                 html += '<div class="dm-message' + (isMine ? ' mine' : '') + '" id="dm-msg-' + m.message_key + '">'
                     + senderLabel
                     + '<div class="dm-message-bubble">' + (m.message_body_html || Community.formatBody(m.message_body)) + '</div>'
@@ -508,7 +511,10 @@ CommunityDM.loadThread = function(threadKey) {
         });
         html += '</div>';
 
-        html += composeHtml('dm-reply-body', 'Type a message...', 2, 'Send', 'CommunityDM.sendMessage(' + threadKey + ')');
+        // Banned users can read the thread but not send (no compose box, silent).
+        if (Community.canPost()) {
+            html += composeHtml('dm-reply-body', 'Type a message...', 2, 'Send', 'CommunityDM.sendMessage(' + threadKey + ')');
+        }
         el.innerHTML = html;
 
         var msgContainer = document.getElementById('dm-messages');
@@ -530,13 +536,16 @@ CommunityDM.loadThread = function(threadKey) {
         setTimeout(scrollToThread, 500);
         setTimeout(scrollToThread, 1200);
 
-        wireCompose('dm-reply-body', function() { CommunityDM.sendMessage(threadKey); });
-        initDmEditor('dm-reply-body', threadKey);
+        if (Community.canPost()) {
+            wireCompose('dm-reply-body', function() { CommunityDM.sendMessage(threadKey); });
+            initDmEditor('dm-reply-body', threadKey);
+        }
     });
 };
 
 // ── Send message ──
 CommunityDM.sendMessage = function(threadKey) {
+    if (!Community.canPost()) return; // banned: silent
     var body = '';
     var bodyHtml = '';
     if (CommunityDM._editor) {
@@ -563,6 +572,7 @@ CommunityDM.sendMessage = function(threadKey) {
 // `isPop` indicates the popover view (different element id prefix and a
 // non-reload save path so we don't blow away the popover state).
 CommunityDM.beginEdit = function(threadKey, messageKey, isPop) {
+    if (!Community.canPost()) return; // banned: silent
     var idPrefix = isPop ? 'dm-pop-msg-' : 'dm-msg-';
     var wrap = document.getElementById(idPrefix + messageKey);
     if (!wrap) return;
@@ -607,6 +617,7 @@ CommunityDM.cancelEdit = function(messageKey, isPop) {
 };
 
 CommunityDM.saveEdit = function(threadKey, messageKey, isPop) {
+    if (!Community.canPost()) return; // banned: silent
     var idPrefix = isPop ? 'dm-pop-msg-' : 'dm-msg-';
     var wrap = document.getElementById(idPrefix + messageKey);
     if (!wrap) return;
@@ -648,6 +659,7 @@ CommunityDM.saveEdit = function(threadKey, messageKey, isPop) {
 
 // ── Show compose new message ──
 CommunityDM.showCompose = function(recipientKey) {
+    if (!Community.canPost()) return; // banned: silent
     _activeThreadKey = null;
     Community.showView('view-messages');
     var el = document.getElementById('view-messages');
@@ -717,6 +729,7 @@ CommunityDM.startNew = function(userKey) {
 
 // ── Submit new thread ──
 CommunityDM.submitNew = function() {
+    if (!Community.canPost()) return; // banned: silent
     var recipientKey = document.getElementById('dm-recipient').getAttribute('data-key');
     var body = '';
     var bodyHtml = '';
@@ -748,6 +761,7 @@ CommunityDM.submitNew = function() {
 var _groupMembers = [];
 
 CommunityDM.showComposeGroup = function() {
+    if (!Community.canPost()) return; // banned: silent
     _activeThreadKey = null;
     _groupMembers = [];
     Community.showView('view-messages');
@@ -834,6 +848,7 @@ function _removeGroupMember(index) {
 window._removeGroupMember = _removeGroupMember;
 
 CommunityDM.submitGroup = function() {
+    if (!Community.canPost()) return; // banned: silent
     if (_groupMembers.length < 1) { alert('Add at least one member'); return; }
     var groupName = (document.getElementById('dm-group-name') || {}).value || '';
     var body = '';

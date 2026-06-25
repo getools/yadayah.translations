@@ -10,6 +10,7 @@ if (session_status() === PHP_SESSION_NONE) session_start();
 
 $userKey = $_SESSION['user_key'] ?? null;
 if (!$userKey) errorResponse('Login required', 401);
+denyIfBanned('Chat'); // banned users stay logged in, but can't participate in Chat
 
 $db = getDb();
 $method = $_SERVER['REQUEST_METHOD'];

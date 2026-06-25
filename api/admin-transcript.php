@@ -34,6 +34,18 @@ function secondsToInterval(int $secs): string {
 // it can snapshot the "auto-fix" pass alongside Whisper's raw output.
 require_once __DIR__ . '/transcript-helpers.php';
 
+// An admin changed this item's editable transcript → flag it 'Editing' so the
+// consensus (re)build never overwrites it. Best-effort; never breaks the save.
+function markTranscriptEditing(PDO $db, int $itemKey): void {
+    if ($itemKey <= 0) return;
+    try {
+        $db->prepare("INSERT INTO yy_feed_item_transcript_status (feed_item_key, edit_status, dtime)
+                       VALUES (?, 'Editing', now())
+                       ON CONFLICT (feed_item_key) DO UPDATE SET edit_status = 'Editing', dtime = now()")
+           ->execute([$itemKey]);
+    } catch (\Throwable $e) { /* status is advisory — don't fail the edit */ }
+}
+
 // ── GET: load transcript + job status ──
 if ($method === 'GET') {
     $itemKey = (int)($_GET['item_key'] ?? 0);
@@ -326,6 +338,9 @@ if ($method === 'POST') {
                 }
             }
             $db->commit();
+            // A real change → the transcript is now human-edited ('Editing'),
+            // which protects it from being overwritten by a consensus rebuild.
+            if (($updated + $inserted + $deleted) > 0) markTranscriptEditing($db, $itemKey);
             // inserted/deleted signal a structural change → the client reloads to
             // pick up the new rows' primary keys (so a follow-up save UPDATEs
             // them instead of re-INSERTing).
@@ -398,6 +413,7 @@ if ($method === 'POST') {
         ");
         $upd->execute(array_merge([$to], $itemKeys, [$from]));
         $changed = $upd->rowCount();
+        if ($changed > 0) foreach ($itemKeys as $ik) markTranscriptEditing($db, (int)$ik);
         jsonResponse(['renamed' => $changed, 'from' => $from, 'to' => $to]);
     }
 
@@ -414,6 +430,7 @@ if ($method === 'POST') {
                 $changed++;
             }
         }
+        if ($changed > 0) markTranscriptEditing($db, $itemKey);
         jsonResponse(['changed' => $changed]);
     }
 

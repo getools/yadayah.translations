@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782136815">
+    <meta name="page-version" content="1782367204">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -186,7 +186,7 @@
         }
 
     </style>
-<script src="/js/site-nav.js?v=53"></script>
+<script src="/js/site-nav.js?v=54"></script>
 </head>
 <body>
     <header>
@@ -261,8 +261,7 @@
             return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
 
-        // ── Cite book data with scroll key mapping ──
-        var citeBookScrollMap = {};
+        // ── Cite book data ──
         var initialLoad = true;
 
         // ── Load cite books ──
@@ -276,9 +275,6 @@
                     option.value = book.cite_book_key;
                     option.textContent = book.cite_book_hebrew + ' / ' + book.cite_book_common;
                     select.appendChild(option);
-                    if (book.yah_scroll_key) {
-                        citeBookScrollMap[book.cite_book_key] = book.yah_scroll_key;
-                    }
                 });
                 if (select.options.length > 0) {
                     select.selectedIndex = 0;
@@ -297,21 +293,21 @@
             verseSel.innerHTML = '<option value="">All</option>';
             verseSel.disabled = true;
 
-            var scrollKey = citeBookScrollMap[this.value];
-            if (!scrollKey) {
+            var citeBookKey = this.value;
+            if (!citeBookKey) {
                 chapterSel.disabled = true;
                 if (!initialLoad) fetchResults();
                 return;
             }
 
-            fetch('/api/display-chapters.php?scroll_key=' + scrollKey)
+            fetch('/api/display-chapters.php?cite_book_key=' + citeBookKey)
                 .then(function(r) { return r.json(); })
                 .then(function(chapters) {
                     chapters.forEach(function(ch) {
                         var opt = document.createElement('option');
-                        opt.value = ch.yah_chapter_number;
-                        opt.setAttribute('data-key', ch.yah_chapter_key);
-                        opt.textContent = ch.yah_chapter_number;
+                        opt.value = ch.cite_chapter_number;
+                        opt.setAttribute('data-key', ch.cite_chapter_key);
+                        opt.textContent = ch.cite_chapter_number;
                         chapterSel.appendChild(opt);
                     });
                     chapterSel.disabled = false;
@@ -340,8 +336,8 @@
                 .then(function(verses) {
                     verses.forEach(function(v) {
                         var opt = document.createElement('option');
-                        opt.value = v.yah_verse_number;
-                        opt.textContent = v.yah_verse_number;
+                        opt.value = v.cite_verse_number;
+                        opt.textContent = v.cite_verse_number;
                         verseSel.appendChild(opt);
                     });
                     verseSel.disabled = false;

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="page-version" content="1782367203">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - Yada Yah</title>
+    <link rel="stylesheet" href="css/app.css?v=13">
+    <link rel="stylesheet" href="css/login.css">
+    <style>
+        .settings-tabs { display:flex; gap:4px; border-bottom:2px solid #e0e0e0; margin-bottom:20px; }
+        .settings-tabs button { background:none; border:none; padding:10px 18px; font-size:0.95rem; font-weight:600; color:#888; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-2px; }
+        .settings-tabs button.active { color:#2c3e50; border-bottom-color:#3498db; }
+        .settings-tabs button:hover { color:#2c3e50; }
+        .setting-row { display:flex; align-items:center; gap:16px; padding:14px 0; border-bottom:1px solid #eee; }
+        .setting-row:last-child { border-bottom:none; }
+        .setting-row .s-label { flex:0 0 220px; font-weight:600; color:#34495e; }
+        .setting-row .s-control { flex:0 0 160px; }
+        .setting-row .s-help { flex:1; color:#888; font-size:0.82rem; line-height:1.35; }
+        .setting-row input[type=number] { width:120px; padding:7px 9px; border:1px solid #ccc; border-radius:4px; font-size:0.95rem; }
+        .setting-row input[type=number]:focus { outline:none; border-color:#3498db; box-shadow:0 0 0 2px rgba(52,152,219,0.2); }
+        .s-unit { color:#888; font-size:0.85rem; margin-left:6px; }
+        .switch { position:relative; display:inline-block; width:50px; height:26px; }
+        .switch input { opacity:0; width:0; height:0; }
+        .slider { position:absolute; cursor:pointer; inset:0; background:#ccc; transition:.2s; border-radius:26px; }
+        .slider:before { position:absolute; content:""; height:20px; width:20px; left:3px; bottom:3px; background:#fff; transition:.2s; border-radius:50%; }
+        input:checked + .slider { background:#e67e22; }
+        input:checked + .slider:before { transform:translateX(24px); }
+        .status-panel { display:flex; flex-wrap:wrap; gap:14px; margin-bottom:20px; }
+        .status-pill { background:#f8f9fa; border:1px solid #e0e0e0; border-radius:8px; padding:10px 14px; min-width:130px; }
+        .status-pill .s-val { font-size:1.25rem; font-weight:700; color:#2c3e50; }
+        .status-pill .s-cap { font-size:0.72rem; text-transform:uppercase; letter-spacing:0.04em; color:#999; }
+        .status-pill.warn .s-val { color:#e67e22; }
+        .status-pill.bad  .s-val { color:#c0392b; }
+        .status-pill.good .s-val { color:#27ae60; }
+        .hint-box { background:#fef9e7; border:1px solid #f7dc6f; border-radius:6px; padding:10px 14px; font-size:0.85rem; color:#7d6608; margin-bottom:18px; }
+        .auth-field { margin-top:18px; padding-top:16px; border-top:1px solid #eee; }
+        .auth-field label { display:block; font-weight:600; color:#34495e; margin-bottom:4px; }
+        .auth-field label span { font-weight:600; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em; color:#27ae60; background:#eafaf1; border:1px solid #abebc6; border-radius:4px; padding:1px 6px; margin-left:8px; }
+        .auth-help { margin:2px 0 8px; color:#888; font-size:0.82rem; line-height:1.4; }
+        .auth-help code { background:#f4f4f4; border:1px solid #e0e0e0; border-radius:3px; padding:1px 5px; font-size:0.8rem; color:#c0392b; }
+        .auth-field textarea { width:100%; box-sizing:border-box; padding:8px 10px; border:1px solid #ccc; border-radius:4px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:0.82rem; resize:vertical; margin-bottom:8px; }
+        .auth-field textarea:focus { outline:none; border-color:#3498db; box-shadow:0 0 0 2px rgba(52,152,219,0.2); }
+        .auth-msg { margin:10px 0 0; font-size:0.86rem; min-height:1.2em; }
+    </style>
+</head>
+<body>
+
+<div id="login-screen" class="login-screen">
+    <div class="login-card">
+        <h1>Admin</h1>
+        <div class="field">
+            <label for="login-user">Login</label>
+            <input type="text" id="login-user" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="login-pass">Password</label>
+            <div class="pass-wrap">
+                <input type="password" id="login-pass" autocomplete="current-password">
+                <button type="button" class="pass-toggle" onclick="togglePassword()" title="Show/hide password">&#128065;</button>
+            </div>
+        </div>
+        <div id="login-error" class="error-messages" style="display:none"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Login</button>
+    </div>
+</div>
+
+<div id="app" class="container" style="display:none">
+    <div class="app-header">
+        <nav class="nav-tabs"></nav>
+<script src="/js/admin-nav.js?v=17"></script>
+        <div class="user-info">
+            <span id="user-display"></span>
+            <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
+        </div>
+    </div>
+
+    <h1>Settings</h1>
+
+    <div class="settings-tabs">
+        <button class="active" data-tab="autofix" onclick="showTab('autofix')">Auto-Fix</button>
+    </div>
+
+    <div id="tab-autofix" class="settings-tab">
+        <div class="hint-box">
+            The auto-fix agent triages logged site errors and asks Claude Code to fix the unresolved ones.
+            It runs one at a time, capped by the limits below. Changes here take effect on the next cron tick.
+        </div>
+
+        <div class="status-panel" id="status-panel"></div>
+
+        <div class="card">
+            <div class="setting-row">
+                <div class="s-label">Pause Auto-Fix</div>
+                <div class="s-control">
+                    <label class="switch"><input type="checkbox" id="f-paused"><span class="slider"></span></label>
+                </div>
+                <div class="s-help">When on, the agent is fully paused — no triage, no Claude runs. (Separate from the temporary pause set automatically during VS Code editing sessions.)</div>
+            </div>
+            <div class="setting-row">
+                <div class="s-label">Run Interval</div>
+                <div class="s-control"><input type="number" id="f-interval_minutes" min="5" max="1440"><span class="s-unit">min</span></div>
+                <div class="s-help">How often the agent checks for unresolved errors. Minimum 5 minutes.</div>
+            </div>
+            <div class="setting-row">
+                <div class="s-label">Max Run Time</div>
+                <div class="s-control"><input type="number" id="f-timeout_seconds" min="60" max="3600"><span class="s-unit">sec</span></div>
+                <div class="s-help">A single fix attempt is killed if it runs longer than this. 60–3600s (1800 = 30 min).</div>
+            </div>
+            <div class="setting-row">
+                <div class="s-label">CPU Cap</div>
+                <div class="s-control"><input type="number" id="f-cpu_quota_pct" min="10" max="100"><span class="s-unit">% of 1 core</span></div>
+                <div class="s-help">Hard CPU ceiling for the Claude process (systemd CPUQuota). 70 = 0.7 of one core.</div>
+            </div>
+            <div class="setting-row">
+                <div class="s-label">Memory Cap</div>
+                <div class="s-control"><input type="number" id="f-mem_max_mb" min="256" max="8192"><span class="s-unit">MB</span></div>
+                <div class="s-help">Hard memory ceiling (systemd MemoryMax). The process is killed if it exceeds this.</div>
+            </div>
+            <div class="setting-row">
+                <div class="s-label">Max Fix Attempts</div>
+                <div class="s-control"><input type="number" id="f-max_fix_attempts" min="1" max="10"></div>
+                <div class="s-help">After this many failed attempts on one error, it is retired for human review instead of retried forever.</div>
+            </div>
+        </div>
+
+        <div class="button-row" style="margin-top:18px;">
+            <button class="btn btn-primary" id="btn-save" onclick="saveSettings()">Save</button>
+            <span id="save-msg" style="margin-left:14px; align-self:center;"></span>
+        </div>
+
+        <div class="card" style="margin-top:26px;">
+            <h2 style="margin-top:0; font-size:1.05rem; color:#2c3e50;">Authentication</h2>
+            <div class="hint-box">
+                The agent signs in with the Claude <b>subscription</b> session — never the API key.
+                When that session expires it stops fixing anything until you supply fresh credentials.
+                A long-lived token is the durable fix; a pasted <code style="color:#7d6608">.credentials.json</code> works too but expires sooner.
+            </div>
+
+            <div class="status-panel" id="auth-status-panel"></div>
+            <div class="auth-msg" id="auth-msg"></div>
+
+            <div class="button-row" style="margin-top:6px;">
+                <button class="btn btn-secondary btn-sm" id="btn-auth-refresh" onclick="authRefresh()">Refresh status</button>
+                <button class="btn btn-secondary btn-sm" id="btn-auth-test" onclick="authTest()">Test auth now</button>
+                <button class="btn btn-secondary btn-sm" id="btn-auth-clear" onclick="authClear()">Clear token</button>
+            </div>
+
+            <div class="auth-field">
+                <label>Long-lived token <span>recommended</span></label>
+                <p class="auth-help">
+                    On any machine with a browser, run <code>claude setup-token</code>, finish the browser login,
+                    and paste the printed token here. It authenticates as your subscription and does <b>not</b> expire
+                    for ~1&nbsp;year, so this exact breakage won't recur.
+                </p>
+                <textarea id="auth-token" rows="2" placeholder="sk-ant-oat01-..." autocomplete="off" spellcheck="false"></textarea>
+                <button class="btn btn-primary btn-sm" id="btn-apply-token" onclick="authApplyToken()">Install token</button>
+            </div>
+
+            <div class="auth-field">
+                <label>Or paste credentials.json</label>
+                <p class="auth-help">
+                    From a machine where <code>claude login</code> succeeded, paste the full contents of
+                    <code>~/.claude/.credentials.json</code> (must contain <code>claudeAiOauth.accessToken</code>).
+                    Its access token expires sooner than a setup-token.
+                </p>
+                <textarea id="auth-creds" rows="4" placeholder='{"claudeAiOauth":{"accessToken":"...","refreshToken":"...","expiresAt":...}}' autocomplete="off" spellcheck="false"></textarea>
+                <button class="btn btn-primary btn-sm" id="btn-apply-creds" onclick="authApplyCreds()">Install credentials</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+var API = '/api';
+var NUMERIC = ['interval_minutes','timeout_seconds','cpu_quota_pct','mem_max_mb','max_fix_attempts'];
+
+function checkAuth() {
+    fetch(API + '/auth.php', {credentials:'include'}).then(function(r){return safeJson(r);}).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+            loadSettings();
+        } else {
+            document.getElementById('login-screen').classList.add('visible');
+        }
+    });
+}
+
+function doLogin() {
+    var user = document.getElementById('login-user').value;
+    var pass = document.getElementById('login-pass').value;
+    var errEl = document.getElementById('login-error');
+    errEl.style.display = 'none';
+    fetch(API + '/auth.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({login: user, password: pass})
+    }).then(function(r){return safeJson(r);}).then(function(d) {
+        if (d.authenticated) {
+            document.getElementById('login-screen').classList.remove('visible');
+            document.getElementById('app').style.display = '';
+            document.getElementById('user-display').textContent = d.user_name;
+            loadSettings();
+        } else {
+            errEl.textContent = d.error || 'Login failed';
+            errEl.style.display = '';
+        }
+    });
+}
+
+function doLogout() {
+    fetch(API + '/auth.php', {method:'DELETE', credentials:'include'}).then(function(){ location.reload(); });
+}
+
+function showTab(name) {
+    var btns = document.querySelectorAll('.settings-tabs button');
+    for (var i=0;i<btns.length;i++) btns[i].classList.toggle('active', btns[i].getAttribute('data-tab')===name);
+    var tabs = document.querySelectorAll('.settings-tab');
+    for (var j=0;j<tabs.length;j++) tabs[j].style.display = (tabs[j].id === 'tab-'+name) ? '' : 'none';
+}
+
+function fmtAgo(secs) {
+    if (secs === null || secs === undefined) return '—';
+    if (secs < 60) return secs + 's ago';
+    if (secs < 3600) return Math.floor(secs/60) + 'm ago';
+    if (secs < 86400) return Math.floor(secs/3600) + 'h ago';
+    return Math.floor(secs/86400) + 'd ago';
+}
+
+function renderStatus(st) {
+    if (!st) { document.getElementById('status-panel').innerHTML = ''; return; }
+    var paused = document.getElementById('f-paused').checked;
+    var pills = [];
+    pills.push(['State', paused ? 'Paused' : (st.dev_pause_active ? 'Dev-Paused' : 'Active'),
+                paused ? 'bad' : (st.dev_pause_active ? 'warn' : 'good')]);
+    pills.push(['Last Run', fmtAgo(st.last_run_ago_secs), '']);
+    pills.push(['Queue Depth', (st.queue_depth!=null?st.queue_depth:'—'), st.queue_depth>0?'warn':'']);
+    pills.push(['Pending Errors', (st.unresolved_pending!=null?st.unresolved_pending:'—'), st.unresolved_pending>0?'warn':'']);
+    document.getElementById('status-panel').innerHTML = pills.map(function(p){
+        return '<div class="status-pill '+(p[2]||'')+'"><div class="s-val">'+p[1]+'</div><div class="s-cap">'+p[0]+'</div></div>';
+    }).join('');
+}
+
+function loadSettings() {
+    fetch(API + '/admin-settings.php', {credentials:'include'}).then(function(r){return safeJson(r);}).then(function(d) {
+        if (!d || !d.settings) return;
+        var map = {};
+        d.settings.forEach(function(s){ map[s.setting_code] = s.setting_value; });
+        document.getElementById('f-paused').checked = (map.paused === '1' || map.paused === 1);
+        NUMERIC.forEach(function(code){
+            var el = document.getElementById('f-'+code);
+            if (el && map[code] !== undefined) el.value = map[code];
+        });
+        renderStatus(d.status);
+    });
+    loadAuth();
+}
+
+// ── Auto-Fix Authentication ──────────────────────────────────────────────
+var AUTH_API = API + '/admin-autofix-auth.php';
+
+function authSetMsg(text, kind) {
+    var el = document.getElementById('auth-msg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = kind === 'ok' ? '#27ae60' : kind === 'bad' ? '#c0392b' : '#888';
+}
+
+function authButtons(disabled) {
+    ['btn-auth-refresh','btn-auth-test','btn-auth-clear','btn-apply-token','btn-apply-creds']
+        .forEach(function(id){ var b=document.getElementById(id); if (b) b.disabled = disabled; });
+}
+
+function renderAuth(d) {
+    var panel = document.getElementById('auth-status-panel');
+    if (!panel) return;
+    var st = d && d.status;
+    if (!st) {
+        panel.innerHTML = '<div class="status-pill"><div class="s-val">—</div><div class="s-cap">No status yet</div></div>';
+        return;
+    }
+    var pills = [];
+    var mode = st.active_mode;
+    var modeLabel = mode === 'token' ? 'Token' : mode === 'credentials' ? 'Session' : 'None';
+    // Active auth is "good" if a token is set, or a non-expired session exists.
+    var modeGood = mode === 'token' || (mode === 'credentials' && st.creds_expired === false);
+    pills.push(['Active Auth', modeLabel, modeGood ? 'good' : 'bad']);
+
+    pills.push(['Token', st.token_present ? 'Installed' : '—', st.token_present ? 'good' : '']);
+
+    var sessVal = !st.creds_present ? '—' : (st.creds_expired ? 'Expired' : 'Valid');
+    var sessCls = !st.creds_present ? '' : (st.creds_expired ? 'bad' : 'good');
+    pills.push(['Session', sessVal, sessCls]);
+
+    if (st.creds_present && st.creds_expires_in_secs != null) {
+        var secs = st.creds_expires_in_secs;
+        var exp = secs <= 0 ? ('expired ' + fmtAgo(-secs)) : ('in ' + fmtAgo(secs).replace(' ago',''));
+        pills.push(['Session Expiry', exp, secs <= 0 ? 'bad' : (secs < 86400 ? 'warn' : '')]);
+    }
+
+    if (st.last_test) {
+        pills.push(['Last Test', st.last_test.ok ? 'OK' : 'Failed', st.last_test.ok ? 'good' : 'bad']);
+    }
+    panel.innerHTML = pills.map(function(p){
+        return '<div class="status-pill '+(p[2]||'')+'"><div class="s-val">'+p[1]+'</div><div class="s-cap">'+p[0]+'</div></div>';
+    }).join('');
+
+    if (st.subscription_type) {
+        panel.innerHTML += '<div class="status-pill"><div class="s-val" style="font-size:0.95rem">'+st.subscription_type+'</div><div class="s-cap">Plan</div></div>';
+    }
+    // Surface a failing test message so the operator sees the actual error.
+    if (st.last_test && !st.last_test.ok && st.last_test.message) {
+        authSetMsg('Last test: ' + st.last_test.message, 'bad');
+    }
+}
+
+function loadAuth() {
+    fetch(AUTH_API, {credentials:'include'}).then(function(r){return safeJson(r);}).then(function(d){
+        renderAuth(d);
+    }).catch(function(){});
+}
+
+// Enqueue an action, then poll for the host helper's result (≤90s).
+function authAction(action, extra, pendingMsg) {
+    authButtons(true);
+    authSetMsg(pendingMsg || 'Working…', '');
+    var body = Object.assign({action: action}, extra || {});
+    fetch(AUTH_API, {
+        method:'POST', credentials:'include',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body)
+    }).then(function(r){return safeJson(r);}).then(function(d){
+        if (!d || !d.queued) {
+            authButtons(false);
+            authSetMsg((d && d.error) ? d.error : 'Could not queue request', 'bad');
+            return;
+        }
+        var tries = 0, max = 90;
+        var iv = setInterval(function(){
+            tries++;
+            fetch(AUTH_API + '?result=' + encodeURIComponent(d.id), {credentials:'include'})
+                .then(function(r){return safeJson(r);}).then(function(rd){
+                    if (rd && rd.ready) {
+                        clearInterval(iv);
+                        authButtons(false);
+                        var res = rd.result || {};
+                        authSetMsg(res.message || (res.ok ? 'Done' : 'Failed'), res.ok ? 'ok' : 'bad');
+                        loadAuth();
+                    } else if (tries >= max) {
+                        clearInterval(iv);
+                        authButtons(false);
+                        authSetMsg('Timed out waiting for the host helper. Is claude-auth-helper installed?', 'bad');
+                        loadAuth();
+                    }
+                }).catch(function(){});
+        }, 1000);
+    }).catch(function(){ authButtons(false); authSetMsg('Request failed', 'bad'); });
+}
+
+function authRefresh() { authAction('status', null, 'Refreshing…'); }
+function authTest()    { authAction('test', null, 'Testing auth (can take ~30s)…'); }
+function authClear() {
+    if (!confirm('Remove the long-lived token? The agent will fall back to credentials.json.')) return;
+    authAction('clear_token', null, 'Clearing token…');
+}
+function authApplyToken() {
+    var t = document.getElementById('auth-token').value.trim();
+    if (!t) { authSetMsg('Paste a token first.', 'bad'); return; }
+    authAction('apply_token', {token: t}, 'Installing & verifying token…');
+    document.getElementById('auth-token').value = '';
+}
+function authApplyCreds() {
+    var c = document.getElementById('auth-creds').value.trim();
+    if (!c) { authSetMsg('Paste credentials.json first.', 'bad'); return; }
+    try { JSON.parse(c); } catch(e) { authSetMsg('That is not valid JSON.', 'bad'); return; }
+    authAction('apply_creds', {creds: c}, 'Installing & verifying credentials…');
+    document.getElementById('auth-creds').value = '';
+}
+
+function saveSettings() {
+    var btn = document.getElementById('btn-save');
+    var msg = document.getElementById('save-msg');
+    btn.disabled = true; msg.textContent = 'Saving…'; msg.style.color = '#888';
+    var body = { paused: document.getElementById('f-paused').checked ? 1 : 0 };
+    NUMERIC.forEach(function(code){ body[code] = document.getElementById('f-'+code).value; });
+    fetch(API + '/admin-settings.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body)
+    }).then(function(r){return safeJson(r);}).then(function(d) {
+        btn.disabled = false;
+        if (d && d.saved) {
+            msg.textContent = 'Saved ✓'; msg.style.color = '#27ae60';
+            loadSettings();
+            setTimeout(function(){ msg.textContent=''; }, 2500);
+        } else {
+            msg.textContent = (d && d.error) ? d.error : 'Save failed';
+            msg.style.color = '#c0392b';
+        }
+    }).catch(function(){ btn.disabled=false; msg.textContent='Save failed'; msg.style.color='#c0392b'; });
+}
+
+checkAuth();
+</script>
+<script src="/js/admin-login.js?v=8"></script>
+<script src="/js/session-state.js?v=1"></script>
+<script src="/js/error-reporter.js?v=5"></script>
+</body>
+</html>

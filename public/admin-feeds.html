@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782160731">
+    <meta name="page-version" content="1782371576">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
@@ -65,6 +65,8 @@
         .sync-bar-track { width:100%; height:6px; background:#e8e8e8; border-radius:3px; overflow:hidden; }
         .sync-bar-fill { width:30%; height:100%; background:linear-gradient(90deg,#3498db,#2980b9); border-radius:3px; animation:sync-slide 1.4s ease-in-out infinite; }
         @keyframes sync-slide { 0%{transform:translateX(-100%);width:30%} 50%{transform:translateX(150%);width:50%} 100%{transform:translateX(400%);width:30%} }
+        @keyframes gsspin { to { transform: rotate(360deg); } }
+        .gs-spin { display:inline-block; width:13px; height:13px; border:2px solid rgba(255,255,255,.45); border-top-color:#fff; border-radius:50%; vertical-align:-2px; margin-right:7px; animation:gsspin .7s linear infinite; }
     </style>
 </head>
 <body>
@@ -91,7 +93,7 @@
 <div id="app" class="container" style="display:none">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=15"></script>
+<script src="/js/admin-nav.js?v=17"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -271,7 +273,7 @@
                     </th>
                     <th style="background:#fafafa;border-bottom:0;padding:6px 4px;text-align:center;">
                         <button class="btn btn-primary btn-sm" id="rec-upload-btn" onclick="uploadCaptionsBulkFromHeader(this)" style="background:#31345A;border-color:#31345A;color:#fff;white-space:nowrap;" title="Upload transcripts as YouTube captions for selected rows; if none selected, prompts to upload all queued">↑ Upload</button>
-                        <button class="btn btn-primary btn-sm" id="rec-tx-generate-btn" onclick="openGenerateTranscriptsPopover()" title="Generate transcripts for selected rows using one or more transcription systems" style="margin-top:6px;background:#31345A;border-color:#31345A;color:#fff;white-space:nowrap;">&#9881; Generate</button>
+                        <button class="btn btn-primary btn-sm" id="rec-tx-generate-btn" onclick="openGenerateStudio()" title="Generate baselines + build editable transcripts for selected rows" style="margin-top:6px;background:#31345A;border-color:#31345A;color:#fff;white-space:nowrap;">&#9881; Generate</button>
                         <button class="btn btn-primary btn-sm" id="rec-tx-download-btn" onclick="downloadSelectedTranscripts()" title="Download .vtt files for selected items whose transcript is Approved, Reviewed, or already Uploaded" style="margin-top:6px;background:#31345A;border-color:#31345A;color:#fff;white-space:nowrap;">⬇ Download</button>
                     </th>
                     <th colspan="5" style="background:#fafafa;border-bottom:0;"></th>
@@ -323,6 +325,7 @@
                         <div id="rec-f-cap" class="rec-status-checks" onclick="event.stopPropagation()" style="margin-top:3px;font-weight:normal;">
                             <label style="font-weight:normal;"><input type="checkbox" id="rec-f-cap-captions" value="captions" onchange="loadRecordings(1)" title="Transcript has been uploaded to YouTube as a caption track and is current (no later review)"> Captions</label>
                             <label style="font-weight:normal;"><input type="checkbox" id="rec-f-cap-reviewed" value="reviewed" onchange="loadRecordings(1)" title="Transcript reviewed/Approved; not yet uploaded (or upload is older than review)"> Reviewed</label>
+                            <label style="font-weight:normal;"><input type="checkbox" id="rec-f-cap-editable" value="editable" onchange="loadRecordings(1)" title="Has an editable (live) transcript"> Editable</label>
                             <label style="font-weight:normal;"><input type="checkbox" id="rec-f-cap-pending"  value="pending"  onchange="loadRecordings(1)" title="Transcript records exist but haven't been Approved by an admin"> Pending</label>
                             <label style="font-weight:normal;"><input type="checkbox" id="rec-f-cap-missing"  value="missing"  onchange="loadRecordings(1)" title="No transcript records yet"> None</label>
                         </div>
@@ -1721,10 +1724,27 @@ function openTranscript(itemKey) {
             // smaller). Transcript editor on the right gets the freed
             // space. min-width also dropped proportionally so the column
             // stays sane on smaller screens.
-            + '<div style="flex:0 0 24%;min-width:200px;display:flex;flex-direction:column;gap:10px;">'
-            + '<div id="t-player-wrap" style="background:#000;border-radius:6px;overflow:hidden;aspect-ratio:16/9;">'
+            + '<div id="t-player-col" style="flex:0 0 24%;min-width:200px;display:flex;flex-direction:column;gap:10px;">'
+            // Placeholder reserves the player's space in the column while the
+            // video is floating (popped out as a fixed panel), so the controls
+            // below don't jump up when it pops out.
+            + '<div id="t-player-ph" style="display:none;"></div>'
+            + '<div id="t-player-wrap" style="position:relative;background:#000;border-radius:6px;overflow:hidden;aspect-ratio:16/9;">'
+            // Drag strip — shown only while floating; lets you slide the video
+            // aside while editing. Sits above the iframe (z-index) so the strip,
+            // not the iframe, catches the drag. The ⤓ docks it back.
+            + '<div id="t-player-floatbar" style="display:none;position:absolute;top:0;left:0;right:0;height:22px;background:rgba(0,0,0,0.55);cursor:move;z-index:2;align-items:center;padding:0 8px;gap:10px;">'
+            +   '<span style="color:#bbb;font-size:0.7rem;margin-right:auto;user-select:none;">⠿ drag</span>'
+            +   '<span onclick="toggleVideoFloat()" title="Dock video back into the panel" style="color:#fff;cursor:pointer;font-size:1rem;line-height:1;">⤓</span>'
+            + '</div>'
             + '<div id="t-player-empty" style="color:#888;display:flex;align-items:center;justify-content:center;height:100%;font-size:0.85rem;">Video player loads when transcript opens</div>'
             + '<div id="yt-player" style="width:100%;height:100%;"></div>'
+            + '</div>'
+            // Video-size controls: cycle the column width in place (S/M/L) and a
+            // separate Float toggle that pops the video out over the transcript.
+            + '<div id="t-player-sizebar" style="display:flex;align-items:center;gap:6px;">'
+            +   '<button type="button" onclick="cycleVideoSize()" id="t-size-btn" title="Cycle video size — Small / Medium / Large. Widens the video column; the transcript stays visible and just reflows narrower." style="flex:1;background:#fff;border:1px solid #ccc;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:0.74rem;font-weight:600;color:#333;">⤢ Size: S</button>'
+            +   '<button type="button" onclick="toggleVideoFloat()" id="t-float-btn" title="Pop the video out to float over the transcript (drag the top strip to reposition; click again to dock)" style="flex:1;background:#fff;border:1px solid #ccc;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:0.74rem;font-weight:600;color:#333;">⧉ Float</button>'
             + '</div>'
             + '<div id="t-speed-row" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:#f5f7fa;border:1px solid #e0e4ec;border-radius:6px;padding:6px 8px;">'
             // Removed 2.5×, 3×, 3.5×, 4× — those rates are unusable for
@@ -1763,8 +1783,7 @@ function openTranscript(itemKey) {
             + '<div id="t-table-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
             + '<select id="t-view-select" autocomplete="off" onchange="onTranscriptViewChange(this.value)" title="Switch between the live editable transcript and any per-model Baseline snapshot. Picking a model with no rows offers to generate it." style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;max-width:320px;background:#fff;"><option value="">Current (editable)</option></select>'
             + '<button id="t-rerun-btn" onclick="rerunCurrentView()" title="Re-run the currently selected model. Writes to Baseline only — live transcript is never touched." style="display:none;background:#27ae60;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Re-run</button>'
-            + '<button id="t-genbaselines-btn" onclick="openGenerateBaselinesPopover()" title="Run the self-hosted STT engines for this item to (re)generate the underlying baselines" style="background:#0b7285;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Generate Baselines</button>'
-            + '<button id="t-init-btn" onclick="openInitializeEditsModal()" title="Build the editable transcript from a consensus of chosen baselines, segmented by tunable rules" style="background:#31345A;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Initialize Edits</button>'
+            + '<button id="t-init-btn" onclick="openGenerateStudio(_transcriptItemKey)" title="Generate baselines and build the editable transcript from a consensus of chosen baselines, segmented by tunable rules" style="background:#0b7285;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Generate</button>'
             + '<button onclick="document.getElementById(\'t-upload-input\').click()" title="Upload an MP3 (or M4A/WAV/VTT/SRT) — used as the audio source for transcription instead of downloading from YouTube" style="background:#31345A;color:#fff;border:1px solid #31345A;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">↑ Upload MP3</button>'
             + '<input type="file" id="t-upload-input" accept=".mp3,.m4a,.opus,.wav,.ogg,.aac,.vtt,.srt" style="display:none;" onchange="uploadTranscriptSource(this)">'
             // Push the current transcript out to YouTube as a caption
@@ -1832,6 +1851,7 @@ function openTranscript(itemKey) {
         ov.onclick = function(e) { if (e.target === ov) closeTranscript(); };
     }
     ov.style.display = 'flex';
+    resetVideoView();   // dock + smallest on every open (overlay DOM is reused)
     // The overlay is created once and reused, so #t-rows still holds the
     // PREVIOUS open's rows (possibly a different item, or pre-edit text) until
     // the fetch in loadTranscript() resolves. Blank it first so the user never
@@ -2651,7 +2671,7 @@ function _persistRecFilters() {
         categoryKeys: categoryKeys,
         mp3Yes: c('rec-f-mp3-yes'), mp3No: c('rec-f-mp3-no'),
         capCaptions: c('rec-f-cap-captions'), capReviewed: c('rec-f-cap-reviewed'),
-        capPending: c('rec-f-cap-pending'), capMissing: c('rec-f-cap-missing'),
+        capPending: c('rec-f-cap-pending'), capEditable: c('rec-f-cap-editable'), capMissing: c('rec-f-cap-missing'),
         episode: v('rec-f-episode'),
         perPage: parseInt((document.getElementById('rec-per-page')||{}).value, 10) || 50,
     });
@@ -2683,6 +2703,7 @@ function _restoreRecFiltersFromStorage() {
     setChk('rec-f-cap-captions', saved.capCaptions);
     setChk('rec-f-cap-reviewed', saved.capReviewed);
     setChk('rec-f-cap-pending', saved.capPending);
+    setChk('rec-f-cap-editable', saved.capEditable);
     setChk('rec-f-cap-missing', saved.capMissing);
     setVal('rec-f-episode', saved.episode);
 }
@@ -2710,7 +2731,7 @@ function recClearFilters() {
     var ia = document.getElementById('rec-f-istatus-active');     if (ia) ia.checked = true;
     var ir = document.getElementById('rec-f-istatus-restricted'); if (ir) ir.checked = false;
     var ii = document.getElementById('rec-f-istatus-inactive');   if (ii) ii.checked = false;
-    ['rec-f-mp3-yes','rec-f-mp3-no','rec-f-cap-captions','rec-f-cap-reviewed','rec-f-cap-pending','rec-f-cap-missing'].forEach(function(id){
+    ['rec-f-mp3-yes','rec-f-mp3-no','rec-f-cap-captions','rec-f-cap-reviewed','rec-f-cap-pending','rec-f-cap-editable','rec-f-cap-missing'].forEach(function(id){
         var el = document.getElementById(id); if (el) el.checked = false;
     });
     document.querySelectorAll('#rec-f-pages input[type=checkbox]').forEach(function(cb){ cb.checked = false; });
@@ -2995,6 +3016,7 @@ function renderRecordings(d) {
             || !!it.yt_caption_uploaded_dtime
         ) ? '1' : '';
         var cbAttrs = 'class="rec-cb" value="' + it.feed_item_key + '"'
+                    + ' data-title="' + esc(it.title || it.feed_item_title || '') + '"'
                     + ' data-duration="' + (parseInt(it.feed_item_duration_seconds, 10) || 0) + '"'
                     // data-mp3: relative path under /u/audio/. Empty when no MP3 exists.
                     // updateProcessSelectedLabel() reads this to update the Download button
@@ -3193,8 +3215,11 @@ function _genTxRefreshRunningCount() {
                 };
             });
             _genTxRunningJobs = newMap;
-            if (jobs.length !== _genTxRunningCount) {
-                _genTxRunningCount = jobs.length;
+            // True queue depth (server reports active_count uncapped); jobs[]
+            // is capped at the query LIMIT so jobs.length under-counts.
+            var activeCount = (d && typeof d.active_count === 'number') ? d.active_count : jobs.length;
+            if (activeCount !== _genTxRunningCount) {
+                _genTxRunningCount = activeCount;
                 if (typeof updateProcessSelectedLabel === 'function') updateProcessSelectedLabel();
             }
             // Refresh row-level Transcript badges: the union of items that
@@ -3242,28 +3267,1161 @@ _genTxStartBgPoller();
 // one /api/admin-transcript-models.php?action=run POST per (selected row,
 // selected provider) pair and surfaces per-row outcomes (skipped vs.
 // queued vs. failed).
+// Structured engine registry. `service`/`cost`/`blocks`/`notes` drive the
+// Generate Studio table (Service / Cost / Blocks columns + row tooltip);
+// `label` is the long human string kept for any legacy references.
+//   cost   = USD per audio-minute (0 = free / self-hosted Puget GPU)
+//   blocks = 'segment' | 'word'  (timestamp granularity the engine emits)
 var TRANSCRIPT_GEN_MODELS = [
-    { code: 'gpu-whisper-large-v3',            label: 'Self-hosted faster-whisper large-v3 — segment timestamps (free, Puget GPU)' },
-    { code: 'gpu-whisper-large-v3-word',       label: 'Self-hosted faster-whisper large-v3 — word-level timestamps (free, Puget GPU)' },
-    { code: 'gpu-whisper-large-v3-turbo',      label: 'Self-hosted faster-whisper large-v3-turbo — segment timestamps (free, fast, Puget GPU)' },
-    { code: 'gpu-whisper-large-v3-turbo-word', label: 'Self-hosted faster-whisper large-v3-turbo — word-level timestamps (free, fast, Puget GPU)' },
-    { code: 'gpu-parakeet-tdt-0.6b-v2',        label: 'Self-hosted NVIDIA Parakeet TDT 0.6B v2 — segment timestamps (free, English, top accuracy, Puget GPU)' },
-    { code: 'gpu-parakeet-tdt-0.6b-v2-word',   label: 'Self-hosted NVIDIA Parakeet TDT 0.6B v2 — word-level timestamps (free, English, top accuracy, Puget GPU)' },
-    { code: 'gpu-whisperx',                    label: 'Self-hosted WhisperX (large-v3 + forced alignment) — segment timestamps (free, tight word timing, Puget GPU)' },
-    { code: 'gpu-whisperx-word',               label: 'Self-hosted WhisperX (large-v3 + forced alignment) — word-level timestamps (free, tight word timing, Puget GPU)' },
-    { code: 'gpu-whisperx-diarize',            label: 'Self-hosted WhisperX + speaker diarization (large-v3 + pyannote) — segment timestamps with speaker labels (free, Puget GPU)' },
-    { code: 'gpu-canary-1b-flash',             label: 'Self-hosted NVIDIA Canary 1B Flash — high-accuracy text (correction source; coarse 30s segments, free, Puget GPU)' },
-    { code: 'gpu-qwen2-audio',                 label: 'Self-hosted Qwen2-Audio 7B — high-accuracy text (correction source; audio-LLM, coarse 30s segments, free, Puget GPU)' },
-    { code: 'whisper-1-segment',           label: 'OpenAI whisper-1 — segment timestamps ($0.006/min)' },
-    { code: 'whisper-1-word',              label: 'OpenAI whisper-1 — word-level timestamps ($0.006/min)' },
-    { code: 'groq-whisper-large-v3-turbo', label: 'Groq whisper-large-v3-turbo (~$0.0004/min, fastest)' },
-    { code: 'groq-whisper-large-v3',       label: 'Groq whisper-large-v3 (~$0.0011/min)' },
-    { code: 'deepgram-nova-3',             label: 'Deepgram Nova-3 (~$0.0043/min, smart formatting)' },
-    { code: 'assemblyai-universal-2',      label: 'AssemblyAI Universal-2 (~$0.0062/min)' },
-    { code: 'elevenlabs-scribe',           label: 'ElevenLabs Scribe (~$0.0067/min)' },
-    { code: 'azure-speech-stt',            label: 'Azure Speech Fast Transcription (~$0.017/min)' },
-    { code: 'youtube',                     label: 'YouTube auto-captions (free, requires fresh cookies)' },
+    { code: 'gpu-whisper-large-v3',            service: 'faster-whisper large-v3',                            cost: 0,      blocks: 'segment', notes: 'Self-hosted faster-whisper large-v3 — segment timestamps (free, Puget GPU)' },
+    { code: 'gpu-whisper-large-v3-word',       service: 'faster-whisper large-v3',                            cost: 0,      blocks: 'word',    notes: 'Self-hosted faster-whisper large-v3 — word-level timestamps (free, Puget GPU)' },
+    { code: 'gpu-whisper-large-v3-turbo',      service: 'faster-whisper large-v3-turbo',                      cost: 0,      blocks: 'segment', notes: 'Self-hosted faster-whisper large-v3-turbo — segment timestamps (free, fast, Puget GPU)' },
+    { code: 'gpu-whisper-large-v3-turbo-word', service: 'faster-whisper large-v3-turbo',                      cost: 0,      blocks: 'word',    notes: 'Self-hosted faster-whisper large-v3-turbo — word-level timestamps (free, fast, Puget GPU)' },
+    { code: 'gpu-parakeet-tdt-0.6b-v2',        service: 'NVIDIA Parakeet TDT 0.6B v2',                        cost: 0,      blocks: 'segment', notes: 'Self-hosted NVIDIA Parakeet TDT 0.6B v2 — segment timestamps (free, English, top accuracy, Puget GPU)' },
+    { code: 'gpu-parakeet-tdt-0.6b-v2-word',   service: 'NVIDIA Parakeet TDT 0.6B v2',                        cost: 0,      blocks: 'word',    notes: 'Self-hosted NVIDIA Parakeet TDT 0.6B v2 — word-level timestamps (free, English, top accuracy, Puget GPU)' },
+    { code: 'gpu-whisperx',                    service: 'WhisperX (large-v3 + forced alignment)',             cost: 0,      blocks: 'segment', notes: 'Self-hosted WhisperX (large-v3 + forced alignment) — segment timestamps (free, tight word timing, Puget GPU)' },
+    { code: 'gpu-whisperx-word',               service: 'WhisperX (large-v3 + forced alignment)',             cost: 0,      blocks: 'word',    notes: 'Self-hosted WhisperX (large-v3 + forced alignment) — word-level timestamps (free, tight word timing, Puget GPU)' },
+    { code: 'gpu-whisperx-diarize',            service: 'WhisperX + speaker diarization (large-v3 + pyannote)', cost: 0,    blocks: 'segment', notes: 'Self-hosted WhisperX + speaker diarization (large-v3 + pyannote) — segment timestamps with speaker labels (free, Puget GPU)' },
+    { code: 'gpu-canary-1b-flash',             service: 'NVIDIA Canary 1B Flash',                             cost: 0,      blocks: 'segment', notes: 'Self-hosted NVIDIA Canary 1B Flash — high-accuracy text (correction source; coarse 30s segments, free, Puget GPU)' },
+    { code: 'gpu-qwen2-audio',                 service: 'Qwen2-Audio 7B',                                     cost: 0,      blocks: 'segment', notes: 'Self-hosted Qwen2-Audio 7B — high-accuracy text (correction source; audio-LLM, coarse 30s segments, free, Puget GPU)' },
+    { code: 'whisper-1-segment',               service: 'OpenAI whisper-1',                                   cost: 0.006,  blocks: 'segment', notes: 'OpenAI whisper-1 — segment timestamps ($0.006/min)' },
+    { code: 'whisper-1-word',                  service: 'OpenAI whisper-1',                                   cost: 0.006,  blocks: 'word',    notes: 'OpenAI whisper-1 — word-level timestamps ($0.006/min)' },
+    { code: 'groq-whisper-large-v3-turbo',     service: 'Groq whisper-large-v3-turbo',                        cost: 0.0004, blocks: 'segment', notes: 'Groq whisper-large-v3-turbo (~$0.0004/min, fastest)' },
+    { code: 'groq-whisper-large-v3',           service: 'Groq whisper-large-v3',                              cost: 0.0011, blocks: 'segment', notes: 'Groq whisper-large-v3 (~$0.0011/min)' },
+    { code: 'deepgram-nova-3',                 service: 'Deepgram Nova-3',                                    cost: 0.0043, blocks: 'segment', notes: 'Deepgram Nova-3 (~$0.0043/min, smart formatting)' },
+    { code: 'assemblyai-universal-2',          service: 'AssemblyAI Universal-2',                             cost: 0.0062, blocks: 'segment', notes: 'AssemblyAI Universal-2 (~$0.0062/min)' },
+    { code: 'elevenlabs-scribe',               service: 'ElevenLabs Scribe',                                  cost: 0.0067, blocks: 'segment', notes: 'ElevenLabs Scribe (~$0.0067/min)' },
+    { code: 'azure-speech-stt',                service: 'Azure Speech',                                       cost: 0.017,  blocks: 'segment', notes: 'Azure Speech Fast Transcription (~$0.017/min)' },
+    { code: 'youtube',                         service: 'YouTube auto-captions',                              cost: 0,      blocks: 'segment', notes: 'YouTube auto-captions (free, requires fresh cookies)' },
 ];
+// Back-compat: legacy code reads m.label; derive it from the new fields.
+TRANSCRIPT_GEN_MODELS.forEach(function(m){ if (!m.label) m.label = m.notes; });
+
+// ════════════════════════════════════════════════════════════════════════
+// Generate Studio — one popover that (1) picks which STT engines produce
+// Baselines, (2) picks which baselines feed the Edits consensus + which is
+// Primary (text + segment-block guidance), (3) tunes Segments, then on
+// Generate queues the baselines per selected item and auto-builds the live
+// editable ("Current") transcript for each item once its baselines finish.
+// Serves both the batch case (N rows checked in the feeds table) and the
+// single-item case (opened from one item's Transcript popover).
+// ════════════════════════════════════════════════════════════════════════
+var _GS_PREFS_KEY = 'yada.genStudio.v1';
+var _gsSel    = { baseline: {}, edits: {}, primary: null };
+var _gsSort   = [ { col: 'cost', dir: 1 }, { col: 'blocks', dir: -1 }, { col: 'service', dir: 1 } ];
+var _gsItems  = [];     // [{key, title}]
+var _gsSingle = false;  // opened scoped to a single feed item?
+var _gsState  = {};     // itemKey -> { title, baselineCodes:[], editsCodes:[], primary, jobs:[{model,jobKey,state}], editsState, initJobKey }
+var _gsPollTimer = null;
+var _gsLastScrolledKey = null;  // item the queue last auto-scrolled to (scroll only when processing advances)
+var _gsPaused = false;          // batch paused? (pending jobs cancelled; running one finishes)
+var _gsMonitor = false;         // live-queue monitor mode (opened with no row selection)
+var _gsMonitorActive = 0;       // true (uncapped) active-job count from the server
+var _gsSelItems = [];           // item keys the operator selected to Generate (always shown in the unified view)
+var _gsSelCodes = [];           // baseline engine codes selected this run (so selected items show their full engine set immediately)
+var _gsEditsPlan = [];          // [{key,editsCodes,primary,params,waitFor}] captured at dispatch time; consumed once by _gsEnqueueAllEdits (immune to the monitor rebuilding _gsState)
+
+function _gsModelByCode(code) { for (var i = 0; i < TRANSCRIPT_GEN_MODELS.length; i++) if (TRANSCRIPT_GEN_MODELS[i].code === code) return TRANSCRIPT_GEN_MODELS[i]; return null; }
+function _gsServiceOf(code) { var m = _gsModelByCode(code); return m ? m.service : code; }
+// Format a Postgres timestamp for the queue ("generated <local date-time>").
+function _gsFmtDtime(s) {
+    if (!s) return '';
+    var ms = (typeof parseJobDtime === 'function') ? parseJobDtime(s) : 0;
+    if (ms) { try { return new Date(ms).toLocaleString(); } catch (e) {} }
+    return String(s).replace('T', ' ').substring(0, 16);
+}
+
+function _gsDefaultSel() {
+    var sel = { baseline: {}, edits: {}, primary: null };
+    TRANSCRIPT_GEN_MODELS.forEach(function(m) {
+        if (m.code.indexOf('gpu-') === 0) { sel.baseline[m.code] = true; sel.edits[m.code] = true; }
+    });
+    var pref = ['gpu-whisperx-word', 'gpu-whisper-large-v3-word', 'gpu-whisper-large-v3-turbo-word', 'gpu-parakeet-tdt-0.6b-v2-word'];
+    for (var i = 0; i < pref.length; i++) if (sel.edits[pref[i]]) { sel.primary = pref[i]; break; }
+    if (!sel.primary) for (var k in sel.edits) if (sel.edits[k]) { sel.primary = k; break; }
+    return sel;
+}
+
+// Restore the operator's last selection + segment params (global preference,
+// not per-item). Sanitize codes against the current registry so a renamed /
+// removed engine can't poison the selection. Falls back to a sensible default.
+function _gsReadPrefs() {
+    var p = null; try { p = JSON.parse(localStorage.getItem(_GS_PREFS_KEY) || 'null'); } catch (e) {}
+    if (!p || typeof p !== 'object') return { sel: _gsDefaultSel(), params: null, regen: false, genEditable: true, regenPending: false };
+    var sel = { baseline: {}, edits: {}, primary: null };
+    var valid = {}; TRANSCRIPT_GEN_MODELS.forEach(function(m){ valid[m.code] = 1; });
+    if (p.sel && p.sel.baseline) for (var a in p.sel.baseline) if (valid[a] && p.sel.baseline[a]) sel.baseline[a] = true;
+    if (p.sel && p.sel.edits)    for (var b in p.sel.edits)    if (valid[b] && p.sel.edits[b])    sel.edits[b] = true;
+    if (p.sel && p.sel.primary && valid[p.sel.primary] && sel.edits[p.sel.primary]) sel.primary = p.sel.primary;
+    if (!Object.keys(sel.baseline).length && !Object.keys(sel.edits).length) sel = _gsDefaultSel();
+    return { sel: sel, params: (p.params && typeof p.params === 'object') ? p.params : null, regen: (p.regen !== false), genEditable: (p.genEditable !== false), regenPending: !!p.regenPending };
+}
+function _gsSavePrefs() {
+    try { localStorage.setItem(_GS_PREFS_KEY, JSON.stringify({ sel: _gsSel, params: _gsReadParams(), regen: _gsRegenChecked(), genEditable: _gsGenEditableChecked(), regenPending: _gsRegenPendingChecked() })); } catch (e) {}
+}
+
+function _gsRegenChecked() { var el = document.getElementById('gs-norerun'); return el ? !el.checked : false; } // checkbox = "do NOT regenerate"; regen = !checked
+function _gsGenEditableChecked()  { var el = document.getElementById('gs-gen-editable');  return el ? el.checked : true; }
+function _gsRegenPendingChecked() { var el = document.getElementById('gs-regen-pending'); return el ? (el.checked && !el.disabled) : false; }
+// "Regenerate Pending transcripts" is only meaningful when editable transcripts
+// are being generated — disable it (greyed) otherwise.
+function _gsSyncEditableToggles() {
+    var on = _gsGenEditableChecked();
+    var rp = document.getElementById('gs-regen-pending');
+    var lbl = document.getElementById('gs-regen-pending-label');
+    if (rp) rp.disabled = !on;
+    if (lbl) { lbl.style.opacity = on ? '1' : '0.45'; lbl.style.cursor = on ? 'pointer' : 'not-allowed'; }
+}
+function _gsNum(id, dflt) { var el = document.getElementById(id); var v = el ? parseFloat(el.value) : NaN; return isNaN(v) ? dflt : v; }
+function _gsReadParams() {
+    return {
+        max_chars:   Math.max(10, Math.round(_gsNum('gs-max_chars', 45))),
+        max_lines:   Math.max(1,  Math.round(_gsNum('gs-max_lines', 2))),
+        max_secs:    _gsNum('gs-max_secs', 7.0),
+        min_secs:    _gsNum('gs-min_secs', 1.2),
+        break_gap:   Math.max(0, _gsNum('gs-break_gap', 1.5)),
+        break_punct: !!(document.getElementById('gs-break_punct') || {}).checked,
+        prioritize_primary_breaks: !!(document.getElementById('gs-primary_breaks') || {}).checked,
+        dedup:       !!(document.getElementById('gs-dedup') || {}).checked
+    };
+}
+
+function openGenerateStudio(singleItemKey) {
+    _gsSingle = (singleItemKey != null && singleItemKey !== '');
+    _gsItems = [];
+    if (_gsSingle) {
+        var cb = document.querySelector('.rec-cb[value="' + String(singleItemKey) + '"]');
+        _gsItems = [ { key: parseInt(singleItemKey, 10), title: (cb && cb.dataset.title) || '' } ];
+    } else {
+        var checked = Array.prototype.slice.call(document.querySelectorAll('.rec-cb:checked'));
+        if (!checked.length) {
+            // No rows selected: if work is in flight site-wide, open the LIVE
+            // queue monitor (watch / Pause / Clear everything currently queued)
+            // instead of nagging. Only fall back to the prompt when idle.
+            if ((typeof _genTxRunningCount === 'number' ? _genTxRunningCount : 0) > 0) { _gsOpenMonitor(); return; }
+            alert('Select at least one row first — or wait for queued jobs to appear here.'); return;
+        }
+        _gsItems = checked.map(function(c) { return { key: parseInt(c.value, 10), title: c.dataset.title || '' }; });
+    }
+    _gsMonitor = false;
+    _gsSelItems = []; _gsSelCodes = []; _gsEditsPlan = [];   // cleared until Generate seeds them
+    var prefs = _gsReadPrefs();
+    _gsSel = prefs.sel;
+    if (_gsPollTimer) { clearInterval(_gsPollTimer); _gsPollTimer = null; }
+    _gsState = {};
+
+    var ov = document.getElementById('gs-overlay'); if (ov) ov.remove();
+    ov = document.createElement('div');
+    ov.id = 'gs-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10004;display:flex;align-items:flex-start;justify-content:center;padding:34px 20px;overflow-y:auto;';
+    ov.onclick = function(e) { if (e.target === ov) closeGenerateStudio(); };
+
+    var p = prefs.params || {};
+    // o: { step, width, tenths }. tenths fields render as text so a whole value
+    // still displays its decimal (7 → "7.0"); onchange re-normalizes to one dp.
+    var seg = function(label, id, val, o) {
+        o = o || {};
+        var w = o.width || 64;
+        var st = 'width:' + w + 'px;padding:3px 5px;border:1px solid #ccc;border-radius:4px;font:inherit;';
+        var input;
+        if (o.tenths) {
+            var fv = (isNaN(parseFloat(val)) ? 0 : parseFloat(val)).toFixed(1);
+            input = '<input type="text" inputmode="decimal" id="' + id + '" value="' + fv + '" onchange="this.value=(isNaN(parseFloat(this.value))?0:parseFloat(this.value)).toFixed(1)" style="' + st + '">';
+        } else {
+            input = '<input type="number" id="' + id + '" value="' + val + '"' + (o.step ? ' step="' + o.step + '"' : '') + ' style="' + st + '">';
+        }
+        return '<label style="display:inline-flex;align-items:center;gap:6px;font-size:0.8rem;color:#333;">' + esc(label) + input + '</label>';
+    };
+    var nItems = _gsItems.length;
+    ov.innerHTML =
+        '<div style="background:#fff;border-radius:10px;width:100%;max-width:1040px;box-shadow:0 12px 40px rgba(0,0,0,.4);display:flex;flex-direction:column;max-height:92vh;">'
+      +   '<div style="display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:#f7f8fc;border-radius:10px 10px 0 0;border-bottom:1px solid #ddd;">'
+      +     '<h3 style="margin:0;font-size:1.05rem;color:#31345A;">Generate Transcripts &mdash; ' + nItems + ' item' + (nItems === 1 ? '' : 's') + '</h3>'
+      +     '<button onclick="closeGenerateStudio()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">&times;</button>'
+      +   '</div>'
+      +   '<div id="gs-config" style="padding:14px 20px;overflow-y:auto;">'
+      +     '<div style="font-size:0.82rem;color:#555;margin-bottom:10px;">Select "Baseline"s to generate and which systems should be considered when generating the main editable transcript. The <strong>Primary</strong> system will serve as a special trusted source for identify segmentation and words in transcripts.</div>'
+      +     '<div style="border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;margin-bottom:14px;">'
+      +       '<table id="gs-table" style="width:100%;border-collapse:collapse;font-size:0.82rem;"><thead id="gs-thead"></thead><tbody id="gs-tbody"></tbody></table>'
+      +     '</div>'
+      +     '<label style="display:flex;align-items:center;gap:8px;font-size:0.84rem;color:#444;cursor:pointer;margin-bottom:8px;"><input type="checkbox" id="gs-norerun"' + (prefs.regen ? '' : ' checked') + '> Do not regenerate existing baseline transcripts</label>'
+      +     '<label style="display:flex;align-items:center;gap:8px;font-size:0.84rem;color:#444;cursor:pointer;margin-bottom:8px;"><input type="checkbox" id="gs-gen-editable"' + (prefs.genEditable ? ' checked' : '') + ' onchange="_gsSyncEditableToggles()"> Generate editable transcripts</label>'
+      +     '<label id="gs-regen-pending-label" style="display:flex;align-items:center;gap:8px;font-size:0.84rem;color:#444;cursor:pointer;margin:0 0 12px 24px;"><input type="checkbox" id="gs-regen-pending"' + (prefs.regenPending ? ' checked' : '') + (prefs.genEditable ? '' : ' disabled') + '> Regenerate "Pending" transcripts</label>'
+      +     '<fieldset style="border:1px solid #d8dcec;border-radius:6px;padding:10px 14px;margin:0;">'
+      +       '<legend style="font-weight:600;color:#31345A;font-size:0.85rem;padding:0 6px;">Segments</legend>'
+      +       '<div style="display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;">'
+      +         seg('Lines', 'gs-max_lines', (p.max_lines != null ? p.max_lines : 2), { width: 54 })
+      +         seg('Max Characters Per Line', 'gs-max_chars', (p.max_chars != null ? p.max_chars : 45), { width: 54 })
+      +         seg('Seconds Per Line — Min', 'gs-min_secs', (p.min_secs != null ? p.min_secs : 1.2), { tenths: true })
+      +         seg('Max', 'gs-max_secs', (p.max_secs != null ? p.max_secs : 7.0), { tenths: true })
+      +         seg('Pause Break', 'gs-break_gap', (p.break_gap != null ? p.break_gap : 1.5), { step: '0.1' })
+      +       '</div>'
+      +       '<div style="display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:10px;">'
+      +         '<label style="font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="gs-break_punct"' + (p.break_punct === false ? '' : ' checked') + '> Break on Punctuation</label>'
+      +         '<label style="font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="gs-primary_breaks"' + (p.prioritize_primary_breaks ? ' checked' : '') + '> Prioritize Breaks from Primary</label>'
+      +         '<label style="font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="gs-dedup"' + (p.dedup === false ? '' : ' checked') + '> Collapse Rolling-Caption Duplication</label>'
+      +       '</div>'
+      +     '</fieldset>'
+      +   '</div>'
+      +   '<div id="gs-queue" style="display:none;padding:14px 20px;overflow-y:auto;font-size:0.83rem;"></div>'
+      +   '<div style="display:flex;gap:8px;justify-content:flex-end;padding:12px 20px;border-top:1px solid #e0e0e0;background:#f7f8fc;border-radius:0 0 10px 10px;">'
+      +     '<button id="gs-cancel-btn" onclick="closeGenerateStudio()" style="padding:8px 16px;background:#fff;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Cancel</button>'
+      +     '<button id="gs-clear-btn" onclick="_gsClearQueue()" style="display:none;padding:8px 16px;background:#fff;color:#c0392b;border:1px solid #e2b4ae;border-radius:4px;cursor:pointer;font-weight:600;margin-right:auto;">&#128465; Clear Queue</button>'
+      +     '<button id="gs-pause-btn" onclick="_gsPauseToggle()" style="display:none;padding:8px 16px;background:#fff;color:#31345A;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-weight:600;">&#9208; Pause</button>'
+      +     '<button id="gs-go-btn" onclick="runGenerateStudio()" style="padding:8px 18px;background:#31345A;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Generate</button>'
+      +   '</div>'
+      + '</div>';
+    document.body.appendChild(ov);
+    // Persist segment params + regen toggle as they change.
+    document.getElementById('gs-config').addEventListener('change', function(e) {
+        if (e.target && (e.target.classList.contains('gs-baseline') || e.target.classList.contains('gs-edits') || e.target.classList.contains('gs-primary'))) return; // handled in _gsOnSelChange
+        _gsSavePrefs();
+    });
+    _gsRenderTable();
+    _gsSyncEditableToggles();   // set initial enabled/disabled state of "Regenerate Pending"
+}
+
+function closeGenerateStudio() {
+    if (_gsPollTimer) { clearInterval(_gsPollTimer); _gsPollTimer = null; }
+    var ov = document.getElementById('gs-overlay'); if (ov) ov.remove();
+    if (typeof _genTxRefreshRunningCount === 'function') _genTxRefreshRunningCount();
+}
+
+// Sort comparator value for a model on a given column.
+function _gsSortVal(m, col) {
+    switch (col) {
+        case 'baseline': return _gsSel.baseline[m.code] ? 1 : 0;
+        case 'edits':    return _gsSel.edits[m.code] ? 1 : 0;
+        case 'primary':  return _gsSel.primary === m.code ? 1 : 0;
+        case 'cost':     return m.cost;
+        case 'blocks':   return m.blocks;
+        default:         return (m.service || '').toLowerCase();
+    }
+}
+function _gsSortedModels() {
+    return TRANSCRIPT_GEN_MODELS.slice().sort(function(a, b) {
+        for (var i = 0; i < _gsSort.length; i++) {
+            var s = _gsSort[i], av = _gsSortVal(a, s.col), bv = _gsSortVal(b, s.col);
+            if (av < bv) return -s.dir; if (av > bv) return s.dir;
+        }
+        return 0;
+    });
+}
+function _gsSortBy(col) {
+    var idx = -1; for (var i = 0; i < _gsSort.length; i++) if (_gsSort[i].col === col) { idx = i; break; }
+    if (idx === 0) { _gsSort[0].dir *= -1; }
+    else if (idx > 0) { var s = _gsSort.splice(idx, 1)[0]; _gsSort.unshift(s); }
+    else { _gsSort.unshift({ col: col, dir: (col === 'blocks') ? -1 : 1 }); }
+    _gsRenderTable();
+}
+
+function _gsRenderTable() {
+    var thead = document.getElementById('gs-thead'), tbody = document.getElementById('gs-tbody');
+    if (!thead || !tbody) return;
+    var cols = [
+        { col: 'baseline', label: 'Baseline' }, { col: 'edits', label: 'Edits' }, { col: 'primary', label: 'Primary' },
+        { col: 'service', label: 'Service' }, { col: 'cost', label: 'Cost ($/min)' }, { col: 'blocks', label: 'Blocks' }
+    ];
+    var ind = function(col) {
+        for (var i = 0; i < _gsSort.length; i++) if (_gsSort[i].col === col)
+            return '<span style="color:#0b7285;font-size:0.7rem;"> ' + (_gsSort[i].dir > 0 ? '▲' : '▼') + (_gsSort.length > 1 ? (i + 1) : '') + '</span>';
+        return '';
+    };
+    thead.innerHTML = '<tr style="background:#eef0f7;">' + cols.map(function(c) {
+        var align = (c.col === 'cost') ? 'right' : (c.col === 'service' ? 'left' : 'center');
+        return '<th onclick="_gsSortBy(\'' + c.col + '\')" style="padding:6px 8px;text-align:' + align + ';cursor:pointer;user-select:none;border-bottom:1px solid #d8dcec;white-space:nowrap;">' + esc(c.label) + ind(c.col) + '</th>';
+    }).join('') + '</tr>';
+    tbody.innerHTML = _gsSortedModels().map(function(m) {
+        var bc = _gsSel.baseline[m.code] ? ' checked' : '';
+        var ec = _gsSel.edits[m.code] ? ' checked' : '';
+        var pc = (_gsSel.primary === m.code) ? ' checked' : '';
+        var pdis = _gsSel.edits[m.code] ? '' : ' disabled';
+        return '<tr title="' + esc(m.notes || '') + '" style="border-bottom:1px solid #f0f0f0;">'
+            + '<td style="text-align:center;padding:4px 8px;"><input type="checkbox" class="gs-baseline" data-code="' + esc(m.code) + '"' + bc + ' onchange="_gsOnSelChange(this)"></td>'
+            + '<td style="text-align:center;padding:4px 8px;"><input type="checkbox" class="gs-edits" data-code="' + esc(m.code) + '"' + ec + ' onchange="_gsOnSelChange(this)"></td>'
+            + '<td style="text-align:center;padding:4px 8px;"><input type="radio" name="gs-primary" class="gs-primary" data-code="' + esc(m.code) + '"' + pc + pdis + ' onchange="_gsOnSelChange(this)"></td>'
+            + '<td style="padding:4px 8px;">' + esc(m.service) + '</td>'
+            + '<td style="text-align:right;padding:4px 8px;font-variant-numeric:tabular-nums;">$' + m.cost.toFixed(4) + '</td>'
+            + '<td style="text-align:center;padding:4px 8px;color:#666;">' + esc(m.blocks) + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+// Mutate _gsSel from a checkbox/radio change, keep Primary valid, re-render.
+function _gsOnSelChange(el) {
+    var code = el.getAttribute('data-code');
+    if (el.classList.contains('gs-baseline')) { if (el.checked) _gsSel.baseline[code] = true; else delete _gsSel.baseline[code]; }
+    else if (el.classList.contains('gs-edits')) {
+        if (el.checked) _gsSel.edits[code] = true; else { delete _gsSel.edits[code]; if (_gsSel.primary === code) _gsSel.primary = null; }
+    }
+    else if (el.classList.contains('gs-primary')) { if (_gsSel.edits[code]) _gsSel.primary = code; }
+    // If no primary set but there are edits rows, default it to a sensible spine.
+    if (!_gsSel.primary) {
+        var pref = ['gpu-whisperx-word', 'gpu-whisper-large-v3-word', 'gpu-whisper-large-v3-turbo-word', 'gpu-parakeet-tdt-0.6b-v2-word'];
+        for (var i = 0; i < pref.length; i++) if (_gsSel.edits[pref[i]]) { _gsSel.primary = pref[i]; break; }
+        if (!_gsSel.primary) for (var k in _gsSel.edits) { _gsSel.primary = k; break; }
+    }
+    _gsSavePrefs();
+    _gsRenderTable();
+}
+
+// Generate button: spinner + disabled while pre-flight runs; reset on cancel.
+function _gsSetGoBtnWorking() {
+    var b = document.getElementById('gs-go-btn'); if (!b) return;
+    b.disabled = true; b.style.opacity = '0.7'; b.style.cursor = 'wait';
+    b.innerHTML = '<span class="gs-spin"></span>Working…';
+}
+function _gsResetGoBtn() {
+    var b = document.getElementById('gs-go-btn'); if (!b) return;
+    b.disabled = false; b.style.opacity = '1'; b.style.cursor = 'pointer'; b.textContent = 'Generate';
+}
+
+function runGenerateStudio() {
+    var baselineCodes = Object.keys(_gsSel.baseline).filter(function(c){ return _gsSel.baseline[c]; });
+    // "Generate editable transcripts" is the master switch for the consensus
+    // build; the Edits column picks which engines feed it. Unchecking it runs
+    // baselines only, without disturbing the saved Edits selection.
+    var genEditable = _gsGenEditableChecked();
+    var editsCodes  = genEditable ? Object.keys(_gsSel.edits).filter(function(c){ return _gsSel.edits[c]; }) : [];
+    if (!baselineCodes.length && !editsCodes.length) {
+        alert('Select at least one Baseline to generate' + (genEditable ? ', or at least one Edits engine for the editable transcript.' : ' (or check “Generate editable transcripts”).'));
+        return;
+    }
+    if (editsCodes.length && (!_gsSel.primary || !_gsSel.edits[_gsSel.primary])) { alert('Choose a Primary baseline (it must be one of the checked Edits rows).'); return; }
+    var params = _gsReadParams();
+    var primary = editsCodes.length ? _gsSel.primary : null;
+    var regenPending = _gsRegenPendingChecked();
+    _gsSavePrefs();
+
+    // Pre-flight (per-item status checks below) can take a few seconds before the
+    // queue view appears, so give immediate feedback: disable Generate + spinner
+    // the instant it's clicked. Re-enabled only if the user cancels the confirm.
+    _gsSetGoBtnWorking();
+
+    // Decide which items' editable transcript to (re)build based on status +
+    // the "Regenerate Pending" checkbox (Editing is always protected), then run.
+    _gsResolveEditsSkip(editsCodes, regenPending, function(skipEdits) {
+    skipEdits = skipEdits || {};
+
+    var cfg = document.getElementById('gs-config'); if (cfg) cfg.style.display = 'none';
+    var q = document.getElementById('gs-queue'); if (q) q.style.display = 'block';
+
+    // Pre-flight existing baselines (per item × baseline engine) so "Do not
+    // regenerate" can skip pairs that already exist. forceRegen skips the check.
+    var forceRegen = _gsRegenChecked();
+    var keys = _gsItems.map(function(it){ return it.key; }).join(',');
+    var existingPromise = (!forceRegen && baselineCodes.length)
+        ? fetch(API + '/admin-transcript-models.php?action=existing&keys=' + encodeURIComponent(keys) + '&models=' + encodeURIComponent(baselineCodes.join(',')), { credentials: 'include' })
+              .then(function(r){ return safeJson(r); }).catch(function(){ return { existing: [] }; })
+        : Promise.resolve({ existing: [] });
+
+    existingPromise.then(function(d) {
+        var exist = {}; ((d && d.existing) || []).forEach(function(e){ exist[e.item_key + '|' + e.model] = e; });
+        _gsState = {};
+        _gsEditsPlan = [];   // captured below from the intact seed, before any monitor rebuild
+        _gsItems.forEach(function(it) {
+            var jobs = baselineCodes.map(function(code) {
+                var ex = exist[it.key + '|' + code];
+                return { model: code, jobKey: null, state: ex ? 'exists' : 'queued', dtime: ex ? ex.last_dtime : null, segs: ex ? (ex.row_count || null) : null };
+            });
+            _gsState[it.key] = {
+                title: it.title, baselineCodes: baselineCodes.slice(), editsCodes: editsCodes.slice(),
+                primary: primary, params: params, jobs: jobs,
+                editsState: (editsCodes.length ? (skipEdits[it.key] ? 'skip' : 'waiting') : 'none'), initJobKey: null
+            };
+            // Snapshot the editable-build plan NOW (waitFor = the item's edits
+            // engines that aren't already generated). The server drains these as
+            // a single-worker queue; capturing here makes the enqueue immune to
+            // the monitor rebuilding _gsState mid-dispatch.
+            if (editsCodes.length && !skipEdits[it.key]) {
+                _gsEditsPlan.push({
+                    key: it.key, editsCodes: editsCodes.slice(), primary: primary, params: params,
+                    waitFor: editsCodes.filter(function(c){ return baselineCodes.indexOf(c) >= 0 && !exist[it.key + '|' + c]; })
+                });
+            }
+        });
+        _gsLastScrolledKey = null;
+        _gsPaused = false;
+        // Unify the just-initiated view with the come-back-later monitor: after
+        // creating the jobs, drive the display from the SAME server-truth poll,
+        // passing the selected items so they're ALWAYS shown — including ⏭
+        // already-generated rows. (The single-item Transcript popover keeps its
+        // own light per-job poll.)
+        if (!_gsSingle) { _gsMonitor = true; _gsSelItems = _gsItems.map(function(it){ return it.key; }); _gsSelCodes = baselineCodes.slice(); }
+        _gsRenderQueue();
+        _gsUpdatePauseBtn();
+        var clrb = document.getElementById('gs-clear-btn'); if (clrb) clrb.style.display = 'inline-block';
+        _gsDispatchPending();   // creates baseline jobs in page order, then enqueues Edits (from _gsEditsPlan)
+        if (_gsPollTimer) clearInterval(_gsPollTimer);
+        _gsPollTimer = setInterval(_gsSingle ? _gsPollTick : _gsMonitorTick, 2000);
+    });
+
+    });   // end _gsResolveEditsSkip proceed callback
+}
+
+// Decide which items' editable transcript to (re)build, by edit status:
+//   • no transcript → build
+//   • Pending       → build ONLY when "Regenerate Pending transcripts" is on
+//   • Editing       → always kept (admin-edited; the init worker also refuses)
+// Calls proceed(skipSet) where skipSet[itemKey]=true means keep the existing
+// transcript (no editable build for it). Summarises the effect for a confirm.
+function _gsResolveEditsSkip(editsCodes, regenPending, proceed) {
+    if (!editsCodes.length) { proceed({}); return; }   // editable not being generated this run
+    Promise.all(_gsItems.map(function(it) {
+        return fetch(API + '/admin-transcript-models.php?action=live_count&item_key=' + encodeURIComponent(it.key), { credentials: 'include' })
+            .then(function(r){ return safeJson(r); })
+            .then(function(d){ return { it: it, rows: (d && d.live_rows) || 0, status: (d && d.edit_status) || null }; })
+            .catch(function(){ return { it: it, rows: 0, status: null }; });
+    })).then(function(results) {
+        var skip = {}, willRebuild = 0, keptEditing = 0, keptPending = 0;
+        results.forEach(function(x) {
+            if (x.rows <= 0) return;                                  // no transcript → build
+            if (x.status === 'Editing') { skip[x.it.key] = true; keptEditing++; }      // protected
+            else if (!regenPending)     { skip[x.it.key] = true; keptPending++; }      // keep Pending
+            else                          willRebuild++;                               // Pending + regen → rebuild
+        });
+        if (keptEditing || keptPending || willRebuild) {
+            var lines = [];
+            if (willRebuild) lines.push('• ' + willRebuild + ' existing Pending transcript' + (willRebuild === 1 ? '' : 's') + ' will be regenerated.');
+            if (keptPending) lines.push('• ' + keptPending + ' Pending transcript' + (keptPending === 1 ? '' : 's') + ' kept (tick “Regenerate Pending” to rebuild).');
+            if (keptEditing) lines.push('• ' + keptEditing + ' Editing transcript' + (keptEditing === 1 ? '' : 's') + ' kept (admin-edited — protected).');
+            if (!confirm('Editable transcripts:\n\n' + lines.join('\n') + '\n\nContinue?')) { _gsResetGoBtn(); return; }
+        }
+        proceed(skip);
+    });
+}
+
+// Create every not-yet-created baseline job SEQUENTIALLY in page order. The
+// single STT worker pulls pending jobs ORDER BY job_key (creation order), so
+// creating them one-at-a-time top-to-bottom makes the queue run tasks in the
+// exact order they're listed on the page — firing them in parallel (the old
+// forEach) raced the inserts and scrambled the order. Only touches jobs that
+// have no jobKey yet, so it's safe to re-call after a Resume. Stops early if
+// the operator hits Pause mid-creation. Enqueues Edits once creation drains.
+function _gsDispatchPending() {
+    var list = [];
+    _gsItems.forEach(function(it) {
+        _gsState[it.key].jobs.forEach(function(j) {
+            if (j.state === 'queued' && j.jobKey == null) list.push({ key: it.key, job: j });
+        });
+    });
+    (function next(i) {
+        if (_gsPaused) return;                       // Pause halts further creation
+        if (i >= list.length) { _gsEnqueueAllEdits(); return; }   // queue all editable builds in the DB (server runs them in order)
+        var it = list[i], j = it.job;
+        if (j.state !== 'queued') { next(i + 1); return; }   // skip jobs cleared/paused since list build
+        fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'run', item_key: it.key, model: j.model }) })
+            .then(function(r){ return safeJson(r); }).then(function(rd) {
+                if (rd && rd.job_key) { j.jobKey = rd.job_key; j.state = (rd.queued === false) ? 'running' : 'queued'; }
+                else { j.state = 'failed'; j.err = (rd && rd.error) || 'dispatch failed'; }
+            })
+            .catch(function(){ j.state = 'failed'; j.err = 'network'; })
+            .then(function(){ _gsRenderQueue(); next(i + 1); });
+    })(0);
+}
+
+// Pause/Resume the batch. Pause cancels every still-PENDING baseline job of
+// this batch (server-side) so the worker won't pick them up — the job already
+// RUNNING is left alone and finishes, which is the "stop when the current
+// process completes" semantics. Resume re-queues the paused jobs, pokes the
+// worker, and resumes creating any jobs that hadn't been created yet.
+function _gsPauseToggle() {
+    if (_gsPaused) {
+        // ── Resume ──
+        _gsPaused = false;
+        _gsUpdatePauseBtn();
+        var keys = [];
+        _gsItems.forEach(function(it) {
+            _gsState[it.key].jobs.forEach(function(j) {
+                if (j.state === 'paused' && j.jobKey != null) { keys.push(j.jobKey); j.state = 'queued'; }
+            });
+        });
+        _gsRenderQueue();
+        var done = function() {
+            // Wake the worker so it starts on the oldest pending job, then keep
+            // creating any jobs that were never dispatched before the pause.
+            fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'poke' }) }).catch(function(){});
+            _gsDispatchPending();
+        };
+        if (keys.length) {
+            fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'retry', job_keys: keys }) })
+                .then(function(){ done(); }).catch(function(){ done(); });
+        } else { done(); }
+    } else {
+        // ── Pause ── cancel only the jobs that haven't started yet.
+        _gsPaused = true;
+        _gsUpdatePauseBtn();
+        var keys = [];
+        _gsItems.forEach(function(it) {
+            _gsState[it.key].jobs.forEach(function(j) {
+                if (j.state === 'queued' && j.jobKey != null) { keys.push(j.jobKey); j.state = 'paused'; }
+            });
+        });
+        _gsRenderQueue();
+        if (keys.length) {
+            fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'cancel', job_keys: keys }) }).catch(function(){});
+        }
+    }
+}
+
+// Reflect pause state on the footer button (hidden until a run starts, and
+// after everything is terminal).
+function _gsUpdatePauseBtn() {
+    var b = document.getElementById('gs-pause-btn'); if (!b) return;
+    b.style.display = 'inline-block';
+    if (_gsPaused) { b.textContent = '▶ Resume'; b.style.background = '#1d6b3a'; b.style.color = '#fff'; b.style.borderColor = '#1d6b3a'; }
+    else           { b.textContent = '⏸ Pause';  b.style.background = '#fff';    b.style.color = '#31345A'; b.style.borderColor = '#ccc'; }
+}
+
+// If we're building Edits and any selected item already has an editable
+// transcript, ask the operator (per item) which to overwrite. proceed() is
+// called with a skip-set of itemKeys to leave untouched (existing transcripts
+// the operator left unchecked); items with no existing transcript always build.
+function _gsConfirmReplaceEdits(editsCodes, proceed) {
+    if (!editsCodes.length) { proceed({}); return; }   // baseline-only: nothing replaced
+    Promise.all(_gsItems.map(function(it) {
+        return fetch(API + '/admin-transcript-models.php?action=live_count&item_key=' + encodeURIComponent(it.key), { credentials: 'include' })
+            .then(function(r){ return safeJson(r); }).then(function(d){ return { it: it, rows: (d && d.live_rows) || 0 }; })
+            .catch(function(){ return { it: it, rows: 0 }; });
+    })).then(function(results) {
+        var hit = results.filter(function(x){ return x.rows > 0; });
+        if (!hit.length) { proceed({}); return; }   // nothing to overwrite — build all
+        _gsShowReplacePopover(hit, proceed);
+    });
+}
+
+// Checkbox popover: each item with an existing editable transcript gets a
+// checkbox (UNCHECKED by default). Checked = overwrite it. On Continue, every
+// listed item left unchecked is added to the skip-set (its transcript is kept).
+function _gsShowReplacePopover(hit, proceed) {
+    var ov = document.getElementById('gs-replace-overlay'); if (ov) ov.remove();
+    ov = document.createElement('div');
+    ov.id = 'gs-replace-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10006;display:flex;align-items:center;justify-content:center;padding:30px 20px;';
+    var rows = hit.map(function(x) {
+        return '<label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:0.86rem;cursor:pointer;border-bottom:1px solid #f0f0f0;">'
+            + '<input type="checkbox" class="gs-replace-cb" data-key="' + x.it.key + '">'
+            + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><span style="font-family:monospace;color:#6e7585;">' + x.it.key + '</span>' + (x.it.title ? ' \u2014 ' + esc(x.it.title) : '') + '</span>'
+            + '<span style="color:#999;font-size:0.78rem;white-space:nowrap;">' + x.rows + ' rows</span></label>';
+    }).join('');
+    ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(560px,95vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.4);">'
+        + '<div style="padding:14px 18px;border-bottom:1px solid #e0e0e0;background:#f7f8fc;"><h3 style="margin:0;color:#31345A;font-size:1.02rem;">Overwrite existing editable transcripts?</h3></div>'
+        + '<div style="padding:12px 18px;font-size:0.82rem;color:#555;border-bottom:1px solid #eee;">'
+        +   (hit.length === 1 ? 'This item already has' : 'These ' + hit.length + ' items already have') + ' an editable transcript. '
+        +   'Check the ones you want to <strong>overwrite</strong> with the new consensus — unchecked items keep their current transcript.</div>'
+        + '<div style="padding:6px 18px;overflow-y:auto;">'
+        +   '<label style="display:inline-flex;align-items:center;gap:6px;font-size:0.8rem;color:#0b7285;cursor:pointer;margin:4px 0 8px;"><input type="checkbox" id="gs-replace-all"> Select all</label>'
+        +   rows
+        + '</div>'
+        + '<div style="display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid #e0e0e0;background:#f7f8fc;">'
+        +   '<button id="gs-replace-cancel" style="padding:7px 14px;background:#fff;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Cancel</button>'
+        +   '<button id="gs-replace-continue" style="padding:7px 16px;background:#31345A;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Continue</button>'
+        + '</div></div>';
+    document.body.appendChild(ov);
+    ov.onclick = function(e){ if (e.target === ov) ov.remove(); };   // click-outside = cancel (no run)
+    var allCb = document.getElementById('gs-replace-all');
+    allCb.addEventListener('change', function(){
+        Array.prototype.forEach.call(ov.querySelectorAll('.gs-replace-cb'), function(c){ c.checked = allCb.checked; });
+    });
+    document.getElementById('gs-replace-cancel').addEventListener('click', function(){ ov.remove(); });
+    document.getElementById('gs-replace-continue').addEventListener('click', function(){
+        var skip = {};
+        Array.prototype.forEach.call(ov.querySelectorAll('.gs-replace-cb'), function(c){
+            if (!c.checked) skip[parseInt(c.getAttribute('data-key'), 10)] = true;   // unchecked = keep existing
+        });
+        ov.remove();
+        proceed(skip);
+    });
+}
+
+function _gsJobTerminal(s) { return s === 'complete' || s === 'failed' || s === 'exists' || s === 'cancelled'; }
+
+function _gsPollTick() {
+    var pending = [];
+    _gsItems.forEach(function(it) {
+        _gsState[it.key].jobs.forEach(function(j) {
+            if (j.jobKey && (j.state === 'queued' || j.state === 'running')) pending.push(j);
+        });
+    });
+    pending.forEach(function(j) {
+        fetch(API + '/admin-transcript-models.php?action=job&job_key=' + j.jobKey, { credentials: 'include' })
+            .then(function(r){ return safeJson(r); }).then(function(d) {
+                if (!d) return;
+                if (d.job_status === 'complete') { j.state = 'complete'; j.msg = d.job_message; var cp = _gsParseSegs(d.job_message); if (cp && cp.done != null) j.segDone = cp.done; }
+                else if (d.job_status === 'failed') { j.state = 'failed'; j.err = d.job_error || d.job_message; }
+                else if (d.job_status === 'cancelled') { j.state = 'cancelled'; }
+                else if (d.job_status === 'pending') { j.state = 'queued'; }   // still waiting its turn — NOT running
+                else {
+                    j.state = 'running'; j.pct = d.job_progress; j.msg = d.job_message;
+                    var sp = _gsParseSegs(d.job_message);
+                    if (sp) { j.segDone = sp.done; j.segTotal = sp.total; }
+                    if (sp && sp.done != null && sp.total) {
+                        j._hist = j._hist || []; j._hist.push({ t: Date.now(), done: sp.done });
+                        if (j._hist.length > 6) j._hist.shift();
+                        var h0 = j._hist[0], h1 = j._hist[j._hist.length - 1];
+                        var dt = (h1.t - h0.t) / 1000, dd = h1.done - h0.done;
+                        if (dt > 0 && dd > 0) j.etaSec = Math.max(0, Math.round((sp.total - sp.done) / (dd / dt)));
+                    }
+                }
+                _gsRenderQueue();
+            }).catch(function(){});
+    });
+    // Watch each item's editable build in the server-side queue: 'pending' =
+    // waiting its turn, 'running' = building (or waiting for its baselines),
+    // then done/error. The SERVER drives the order — we only reflect status.
+    _gsItems.forEach(function(it) {
+        var st = _gsState[it.key];
+        if ((st.editsState === 'queued' || st.editsState === 'building') && st.initJobKey) {
+            fetch(API + '/admin-transcript-init.php?action=status&job_key=' + st.initJobKey, { credentials: 'include' })
+                .then(function(r){ return safeJson(r); }).then(function(d) {
+                    if (!d) return;
+                    if (d.job_status === 'done') { st.editsState = 'done'; st.editsRows = d.job_rows_written; _gsAfterEditsDone(it.key); }
+                    else if (d.job_status === 'error') { st.editsState = 'failed'; st.editsErr = d.job_error || 'init failed'; }
+                    else if (d.job_status === 'cancelled') { st.editsState = 'skip'; }
+                    else if (d.job_status === 'running') { st.editsState = 'building'; }
+                    else { st.editsState = 'queued'; }   // pending in the build-queue
+                    _gsRenderQueue();
+                }).catch(function(){});
+        }
+    });
+    // Stop when everything is terminal.
+    var allDone = _gsItems.every(function(it) {
+        var st = _gsState[it.key];
+        var jobsDone = st.jobs.every(function(j){ return _gsJobTerminal(j.state); });
+        var editsDone = (st.editsState === 'done' || st.editsState === 'failed' || st.editsState === 'none' || st.editsState === 'skip');
+        return jobsDone && editsDone;
+    });
+    if (allDone) {
+        clearInterval(_gsPollTimer); _gsPollTimer = null;
+        var b = document.getElementById('gs-go-btn');
+        if (b) { b.disabled = false; b.style.opacity = '1'; b.textContent = 'Done'; b.style.background = '#27ae60'; b.onclick = closeGenerateStudio; }
+        var pb = document.getElementById('gs-pause-btn'); if (pb) pb.style.display = 'none';
+        var cb = document.getElementById('gs-clear-btn'); if (cb) cb.style.display = 'none';
+    }
+}
+
+function _gsJobStateFor(itemKey, code) {
+    var st = _gsState[itemKey]; if (!st) return null;
+    for (var i = 0; i < st.jobs.length; i++) if (st.jobs[i].model === code) return st.jobs[i].state;
+    return null;
+}
+// Queue EVERY waiting item's editable (consensus) build in the DATABASE, up
+// front, in page order — sequential POSTs so the init job_keys ascend page-
+// order — each with wait_for for its still-generating baselines. The SERVER
+// then drains them as a single-worker queue (admin-transcript-init's
+// spawnNextInitWorker): one at a time, in job_key (= page) order, each waiting
+// for its item's baselines. So the editable builds are NOT client-orchestrated
+// and SURVIVE the operator closing this popover — the poll only watches each
+// initJobKey for display.
+function _gsEnqueueAllEdits() {
+    // Consume the plan captured at dispatch time (see runGenerateStudio). Reading
+    // from this snapshot — not _gsState — means a concurrent monitor rebuild
+    // can't strip the edits mid-loop. Cleared after capture so a Resume-triggered
+    // re-call can't double-enqueue.
+    var plan = _gsEditsPlan; _gsEditsPlan = [];
+    if (!plan.length) return;
+    (function next(i) {
+        if (i >= plan.length) return;
+        var e = plan[i];
+        var st = _gsState[e.key];
+        if (st && st.editsState === 'waiting') { st.editsState = 'queued'; _gsRenderQueue(); }   // reflect in the (pre-monitor) seed render
+        fetch(API + '/admin-transcript-init.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_key: e.key, mode: 'consensus', baselines: e.editsCodes, primary: e.primary, params: e.params, wait_for: e.waitFor }) })
+            .then(function(r){ return safeJson(r); }).then(function(d) {
+                var s2 = _gsState[e.key];   // may be monitor-rebuilt state by now
+                if (s2) {
+                    if (!d || d.error) { s2.editsState = 'failed'; s2.editsErr = (d && d.error) || 'init request failed'; }
+                    else if (d.async && d.job_key) { s2.initJobKey = d.job_key; }
+                    else { s2.editsState = 'done'; s2.editsRows = d.rows_written; _gsAfterEditsDone(e.key); }
+                    _gsRenderQueue();
+                }
+                next(i + 1);   // sequential → next init job_key is the page-next item
+            }).catch(function(){ var s3 = _gsState[e.key]; if (s3) { s3.editsState = 'failed'; s3.editsErr = 'network'; _gsRenderQueue(); } next(i + 1); });
+    })(0);
+}
+
+// When the single-item case finishes its Edits build, refresh the open
+// Transcript view so the operator immediately sees the new live transcript.
+function _gsAfterEditsDone(itemKey) {
+    // Single-item case: refresh the open Transcript view so the new live
+    // transcript shows immediately.
+    if (_gsSingle && typeof _transcriptItemKey !== 'undefined' && itemKey === _transcriptItemKey && typeof loadTranscript === 'function') {
+        _transcriptView = ''; _transcriptReadonly = false;
+        var sel = document.getElementById('t-view-select'); if (sel) sel.value = '';
+        if (typeof updateTranscriptRerunBtn === 'function') updateTranscriptRerunBtn();
+        loadTranscript();
+    }
+    // The item now has a live editable transcript — surgically update its
+    // Transcript-column cell in the main Feed Items table (no full reload).
+    try {
+        if (typeof _recItems !== 'undefined' && Array.isArray(_recItems)) {
+            var ri = _recItems.find(function(x){ return String(x.feed_item_key) === String(itemKey); });
+            if (ri) ri.has_transcript = true;
+        }
+        if (typeof _allItems !== 'undefined' && Array.isArray(_allItems)) {
+            var ai = _allItems.find(function(x){ return String(x.feed_item_key) === String(itemKey); });
+            if (ai) ai.has_transcript = true;
+        }
+        if (typeof _genTxRunningJobs === 'object' && _genTxRunningJobs) delete _genTxRunningJobs[itemKey];
+        if (typeof _genTxRefreshOneTxCell === 'function') _genTxRefreshOneTxCell(itemKey);
+    } catch (e) {}
+}
+
+// Parse the worker's progress message: "Saving K / N segments" -> {done,total};
+// "Done \u2014 N segments" / "Built N rows" -> {done, total:null}.
+function _gsParseSegs(msg) {
+    if (!msg) return null;
+    var m = String(msg).match(/(\d+)\s*\/\s*(\d+)\s*segments/i);
+    if (m) return { done: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+    m = String(msg).match(/(\d+)\s*(?:segments|rows)/i);
+    if (m) return { done: parseInt(m[1], 10), total: null };
+    return null;
+}
+// Strip the trailing "(model=...)" noise from a phase message.
+function _gsPhaseMsg(msg) { return msg ? String(msg).replace(/\s*\(model=[^)]*\)\s*/i, ' ').trim() : ''; }
+function _gsFmtEta(sec) {
+    sec = Math.max(0, Math.round(sec));
+    if (sec < 60) return '~' + sec + 's';
+    var m = Math.floor(sec / 60), x = sec % 60;
+    if (m < 60) return '~' + m + 'm' + (x ? ' ' + x + 's' : '');
+    var hh = Math.floor(m / 60); m = m % 60;
+    return '~' + hh + 'h' + (m ? ' ' + m + 'm' : '');
+}
+// Pull an ETA (seconds) out of a worker message like "… (ETA ~120s)" or
+// "… (ETA 00:08)" so the row can still show an ETA once the phase text is
+// dropped — used when no client-side rolling-rate ETA is available yet
+// (e.g. during transcription, or in the monitor which doesn't track rate).
+function _gsEtaFromMsg(msg) {
+    if (!msg) return null;
+    var m = String(msg).match(/ETA\s*~?\s*(\d+)\s*s\b/i);
+    if (m) return parseInt(m[1], 10);
+    m = String(msg).match(/ETA\s*~?\s*(\d+):(\d{2})(?::(\d{2}))?/i);
+    if (m) return (m[3] != null)
+        ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3])    // H:MM:SS
+        : (+m[1]) * 60 + (+m[2]);                     // MM:SS
+    return null;
+}
+// Freeze the FINISH clock-time per job estimate. The worker's transcription ETA
+// is static (set once, doesn't count down), so recomputing now+eta every poll
+// would push the finish time later each tick. Keyed by jobKey + the eta value:
+// while the estimate is unchanged the frozen finishAt is kept; a NEW estimate
+// (e.g. the rolling save-phase rate) recomputes it. Works across monitor
+// rebuilds (global map). Returns an absolute ms timestamp, or null.
+var _gsEtaFinish = {};
+function _gsEtaFinishAt(jobKey, etaSec) {
+    if (etaSec == null || jobKey == null) return null;
+    var p = _gsEtaFinish[jobKey];
+    if (!p || p.etaSec !== etaSec) p = _gsEtaFinish[jobKey] = { etaSec: etaSec, finishAt: Date.now() + etaSec * 1000 };
+    return p.finishAt;
+}
+// Format an absolute timestamp as a finish clock-time ("5:42 PM"); "soon" if
+// the estimate has already passed.
+function _gsFmtClock(ms) {
+    if (ms - Date.now() < 30000) return 'soon';
+    var d = new Date(ms), h = d.getHours(), m = d.getMinutes(), ap = h >= 12 ? 'PM' : 'AM';
+    h = h % 12; if (h === 0) h = 12;
+    return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ap;
+}
+// Shared grid template so the column header + rows align.
+var _GS_GRID = 'display:grid;grid-template-columns:16px minmax(150px,1.4fr) 72px minmax(150px,2.4fr);gap:8px;align-items:center;';
+function _gsRenderQueue() {
+    var host = document.getElementById('gs-queue'); if (!host) return;
+    var activeKey = null;   // first item currently being processed → auto-scroll target
+    var prevScroll = host.scrollTop;   // preserve the operator's scroll across the re-render
+    host.innerHTML = _gsItems.map(function(it) {
+        var st = _gsState[it.key]; if (!st) return '';
+        var jobLines = st.jobs.map(function(j) {
+            var ic, col;
+            switch (j.state) {
+                case 'complete': ic = '✓'; col = '#1d6b3a'; break;
+                case 'exists':   ic = '⏭'; col = '#6e7585'; break;
+                case 'failed':   ic = '✗'; col = '#c0392b'; break;
+                case 'cancelled':ic = '⊘'; col = '#888';    break;
+                case 'paused':   ic = '⏸'; col = '#a36100'; break;
+                case 'running':  ic = '⟳'; col = '#1d4d8a'; break;
+                default:         ic = '⏳'; col = '#6f7a99';
+            }
+            var blocks = (_gsModelByCode(j.model) || {}).blocks || '';
+            var status;
+            if (j.state === 'running') {
+                // Baseline STT rows: percent · ETA only. The segment count isn't
+                // meaningful until the save phase (single blocking provider call),
+                // so per request it's omitted here — segment counts are shown on
+                // the editable-transcript (Edits) line where they're built.
+                var parts = [];
+                // Hide the percent when it's a frozen, uninformative value — the
+                // worker parks at 70% through the whole (blocking) transcription
+                // and 0% before it starts; only the moving values (download %,
+                // save %) are worth showing.
+                if (j.pct != null && j.pct !== 0 && j.pct !== 70) parts.push(j.pct + '%');
+                // ETA as the clock-time it should FINISH (not a remaining duration).
+                var eta = (j.etaSec != null) ? j.etaSec : _gsEtaFromMsg(j.msg);
+                var finishAt = _gsEtaFinishAt(j.jobKey, eta);
+                if (finishAt != null) parts.push('ETA ' + _gsFmtClock(finishAt));
+                status = parts.join(' · ') || 'Running…';
+            } else if (j.state === 'complete') {
+                status = j.segDone ? (j.segDone + ' segments') : 'done';
+            } else if (j.state === 'exists') {
+                status = (j.segs ? j.segs + ' segments · ' : '') + (j.dtime ? 'generated ' + esc(_gsFmtDtime(j.dtime)) : 'already generated');
+            } else if (j.state === 'failed') {
+                status = 'Failed: ' + esc(j.err || 'error');
+            } else if (j.state === 'cancelled') {
+                status = 'Cancelled';
+            } else if (j.state === 'paused') {
+                status = 'Paused';
+            } else { status = 'Queued'; }
+            var hl = (j.state === 'running') ? 'background:#eaf1ff;box-shadow:inset 2px 0 0 #4b7bec;' : '';
+            return '<div style="' + _GS_GRID + 'padding:3px 6px;border-radius:3px;color:' + col + ';' + hl + '">'
+                + '<span style="text-align:center;">' + ic + '</span>'
+                + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(_gsServiceOf(j.model)) + '">' + esc(_gsServiceOf(j.model)) + '</span>'
+                + '<span style="color:#8a92a5;font-size:0.76rem;">' + esc(blocks) + '</span>'
+                + '<span style="font-size:0.8rem;color:#444;">' + status + '</span>'
+                + '</div>';
+        }).join('') || (_gsMonitor ? '' : '<div style="padding:2px 6px;color:#999;">No baselines to generate (using existing).</div>');
+        var colHead = st.jobs.length
+            ? '<div style="' + _GS_GRID + 'padding:0 6px 3px;font-size:0.66rem;text-transform:uppercase;letter-spacing:.04em;color:#9aa1b2;border-bottom:1px solid #eef0f5;margin-bottom:3px;"><span></span><span>Service</span><span>Blocks</span><span>Status</span></div>'
+            : '';
+        var editsLine;
+        switch (st.editsState) {
+            case 'none':     editsLine = '<span style="color:#999;">Edits: not requested</span>'; break;
+            case 'waiting':  editsLine = '<span style="color:#6f7a99;">⏳ Edits: waiting for baselines…</span>'; break;
+            case 'queued':   editsLine = '<span style="color:#6f7a99;">⏳ Edits: queued in build queue (server builds in order)</span>'; break;
+            case 'skip':     editsLine = '<span style="color:#6e7585;">⏭ Edits: kept existing transcript (not overwritten)</span>'; break;
+            case 'building': {
+                var bDone = st.jobs.every(function(j){ return _gsJobTerminal(j.state); });
+                editsLine = bDone
+                    ? '<span style="color:#a36100;">⟳ Edits: building consensus' + (st.primary ? ' (primary: ' + esc(_gsServiceOf(st.primary)) + ')' : '') + '…</span>'
+                    : '<span style="color:#6f7a99;">⏳ Edits: queued — builds automatically when baselines finish</span>';
+                break;
+            }
+            case 'done':     editsLine = '<span style="color:#1d6b3a;">✓ Edits: built live transcript' + (st.editsRows ? ' (' + st.editsRows + ' rows)' : '') + '</span>'; break;
+            case 'failed':   editsLine = '<span style="color:#c0392b;">✗ Edits: ' + esc(st.editsErr || 'failed') + '</span>'; break;
+            default:         editsLine = '';   // 'hidden' (monitor mode) and unknown → no edits row
+        }
+        var editsActive = (st.editsState === 'building' && st.jobs.every(function(j){ return _gsJobTerminal(j.state); }));
+        var editsHl = editsActive ? 'background:#fff6e6;box-shadow:inset 2px 0 0 #e0a32e;' : '';
+        // Monitor mode: per-item Editable opt-in checkbox + the consensus build's
+        // live status/segment-count line (driven by the separate init queue).
+        var editChk = '', monEdit = '';
+        if (_gsMonitor) {
+            var editing = (st.tstatus === 'Editing');
+            // 'Editing' transcripts are protected \u2014 never overwritten \u2014 so the
+            // opt-in checkbox is locked (a rebuild would be a no-op anyway).
+            editChk = editing
+                ? '<span style="float:right;font-weight:600;font-size:0.74rem;color:#7a5300;" title="An admin has edited this transcript (status Editing) \u2014 it is protected and will never be reset/overwritten by a rebuild">\ud83d\udd12 Editing</span>'
+                : '<label style="float:right;font-weight:400;font-size:0.74rem;color:#0b7285;cursor:pointer;user-select:none;" title="Reset / rebuild this item\'s editable transcript once its baselines finish. A Pending transcript is rebuilt; an Editing one would be protected.">'
+                  + '<input type="checkbox"' + (st.optin ? ' checked' : '') + ' onchange="_gsToggleEditable(' + it.key + ',this.checked)" style="vertical-align:middle;margin-right:3px;">\u270e Reset Pending</label>';
+            var ej = st.editJob, el = '';
+            if (ej && ej.job_status === 'running') {
+                // The init worker flips to 'running' the moment it CLAIMS its slot,
+                // then blocks waiting for this item's baselines. running + 0 rows +
+                // baselines still going = it's WAITING, not building. Don't claim
+                // it's building until it has actually started writing rows.
+                var baseStillGoing = st.jobs.some(function(j){ return j.state === 'queued' || j.state === 'running' || j.state === 'paused'; });
+                var erows = ej.job_rows_written || 0;
+                el = (erows === 0 && baseStillGoing)
+                    ? '<span style="color:#6f7a99;">\u23f3 Editable transcript: waiting for baselines\u2026</span>'
+                    : '<span style="color:#a36100;">\u27f3 Editable transcript: building' + (erows ? ' \u2014 ' + erows + ' segments' : '') + '\u2026</span>';
+            }
+            else if (ej && ej.job_status === 'pending') el = '<span style="color:#6f7a99;">\u23f3 Editable transcript: queued</span>';
+            else if (editing) el = '<span style="color:#7a5300;">\ud83d\udd12 Editable transcript: Editing (protected \u2014 never overwritten)</span>';
+            else if (ej && ej.job_status === 'done') el = '<span style="color:#1d6b3a;">\u2713 Editable transcript: ' + (ej.job_rows_written || 0) + ' segments \u00b7 Pending</span>';
+            else if (st.tstatus === 'Pending') el = '<span style="color:#6f7a99;">Editable transcript: Pending (rebuildable)</span>';
+            else if (ej && ej.job_status === 'error' && !st.jobs.length) el = '<span style="color:#c0392b;">\u2717 Editable transcript: ' + esc(ej.job_error || 'failed') + '</span>';
+            else if (st.optin) el = '<span style="color:#6f7a99;">\u23f3 Editable transcript: builds when baselines finish</span>';
+            if (el) monEdit = '<div style="padding:4px 6px;font-size:0.8rem;border-top:1px solid #f0f0f0;margin-top:4px;border-radius:3px;' + (ej && ej.job_status === 'running' ? 'background:#fff6e6;box-shadow:inset 2px 0 0 #e0a32e;' : '') + '">' + el + '</div>';
+            if (activeKey == null && ej && ej.job_status === 'running') activeKey = it.key;
+        }
+        if (activeKey == null && (st.jobs.some(function(j){ return j.state === 'running'; }) || editsActive)) activeKey = it.key;
+        return '<div id="gs-item-' + it.key + '" style="margin-bottom:12px;border:1px solid #e6e8f0;border-radius:6px;padding:8px 10px;">'
+            + '<div style="font-weight:600;color:#31345A;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid #eef0f5;overflow:hidden;white-space:nowrap;">' + editChk + '<span style="font-family:monospace;color:#6e7585;">' + it.key + '</span>' + (st.title ? ' \u2014 ' + esc(st.title) : '') + '</div>'
+            + colHead
+            + jobLines
+            + (editsLine ? '<div style="padding:4px 6px;font-size:0.82rem;border-top:1px solid #f0f0f0;margin-top:4px;border-radius:3px;' + editsHl + '">' + editsLine + '</div>' : '')
+            + monEdit
+            + '</div>';
+    }).join('');
+    if (!_gsItems.length && _gsMonitor) host.innerHTML = '<div style="color:#999;padding:10px 4px;">Queue is empty — nothing waiting or running.</div>';
+    host.scrollTop = prevScroll;   // restore scroll the innerHTML reset clobbered
+    _gsScrollToActive(activeKey);
+}
+
+// Keep the item currently being processed in view. Scrolls only the queue
+// container (never the page) and only when processing ADVANCES to a new item,
+// so the operator can freely scroll to read other rows without being yanked
+// back every poll tick.
+function _gsScrollToActive(activeKey) {
+    if (activeKey == null || activeKey === _gsLastScrolledKey) return;
+    var host = document.getElementById('gs-queue'); if (!host) return;
+    var el = document.getElementById('gs-item-' + activeKey); if (!el) return;
+    _gsLastScrolledKey = activeKey;
+    var top = el.offsetTop, bot = top + el.offsetHeight;
+    var viewTop = host.scrollTop, viewBot = viewTop + host.clientHeight;
+    if (top < viewTop || bot > viewBot) {
+        host.scrollTo({ top: Math.max(0, top - 8), behavior: 'smooth' });
+    }
+}
+
+// ── Live queue monitor ──────────────────────────────────────────────────
+// Opened from the Generate button when no rows are selected but jobs are in
+// flight site-wide. Shows EVERY queued/running (and recently-finished) STT
+// job grouped by item, in execution order, and reuses the same queue render
+// + Pause/Resume + Clear Queue controls. Read-through of
+// admin-transcript-models.php?action=running&include_recent=1.
+function _gsOpenMonitor() {
+    _gsSingle = false; _gsMonitor = true; _gsPaused = false; _gsLastScrolledKey = null;
+    _gsSelItems = []; _gsSelCodes = []; _gsEditsPlan = [];   // pure monitor = no selection (show the whole queue)
+    if (_gsPollTimer) { clearInterval(_gsPollTimer); _gsPollTimer = null; }
+    _gsItems = []; _gsState = {};
+    var ov = document.getElementById('gs-overlay'); if (ov) ov.remove();
+    ov = document.createElement('div');
+    ov.id = 'gs-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10004;display:flex;align-items:flex-start;justify-content:center;padding:34px 20px;overflow-y:auto;';
+    ov.onclick = function(e) { if (e.target === ov) closeGenerateStudio(); };
+    ov.innerHTML =
+        '<div style="background:#fff;border-radius:10px;width:100%;max-width:1040px;box-shadow:0 12px 40px rgba(0,0,0,.4);display:flex;flex-direction:column;max-height:92vh;">'
+      +   '<div style="display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:#f7f8fc;border-radius:10px 10px 0 0;border-bottom:1px solid #ddd;">'
+      +     '<h3 style="margin:0;font-size:1.05rem;color:#31345A;">Transcription Queue <span id="gs-mon-count" style="color:#8a92a5;font-weight:400;font-size:0.85rem;"></span></h3>'
+      +     '<button onclick="closeGenerateStudio()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">&times;</button>'
+      +   '</div>'
+      +   '<div id="gs-queue" style="display:block;padding:14px 20px;overflow-y:auto;font-size:0.83rem;"><div style="color:#999;padding:8px 4px;">Loading queue…</div></div>'
+      +   '<div style="display:flex;gap:8px;justify-content:flex-end;padding:12px 20px;border-top:1px solid #e0e0e0;background:#f7f8fc;border-radius:0 0 10px 10px;">'
+      +     '<button id="gs-clear-btn" onclick="_gsClearQueue()" style="display:none;padding:8px 16px;background:#fff;color:#c0392b;border:1px solid #e2b4ae;border-radius:4px;cursor:pointer;font-weight:600;margin-right:auto;">&#128465; Clear Queue</button>'
+      +     '<button id="gs-editall-btn" onclick="_gsEditableAllQueued()" title="Rebuild the editable transcript for every queued item once its baselines finish. Items with status Editing (admin-edited) are NOT reset; existing transcripts that are Pending WILL be reset/rebuilt." style="padding:8px 14px;background:#fff;color:#0b7285;border:1px solid #9fd0d8;border-radius:4px;cursor:pointer;font-weight:600;">&#9998; Reset Pending</button>'
+      +     '<button id="gs-pause-btn" onclick="_gsPauseToggle()" style="display:none;padding:8px 16px;background:#fff;color:#31345A;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-weight:600;">&#9208; Pause</button>'
+      +     '<button onclick="closeGenerateStudio()" style="padding:8px 18px;background:#31345A;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Close</button>'
+      +   '</div>'
+      + '</div>';
+    document.body.appendChild(ov);
+    _gsMonitorTick();                                         // initial load
+    _gsPollTimer = setInterval(_gsMonitorTick, 2000);
+}
+
+// Map a server job_status to the client queue state vocabulary.
+function _gsMapStatus(s) { return s === 'pending' ? 'queued' : s; }
+
+// One monitor refresh: pull the live job list, merge into _gsState (preserving
+// the client-only 'paused' marker), re-render. A transient fetch error is
+// swallowed so the existing render is never wiped.
+function _gsMonitorTick() {
+    var itemsQ = (_gsSelItems && _gsSelItems.length) ? '&items=' + encodeURIComponent(_gsSelItems.join(',')) : '';
+    fetch(API + '/admin-transcript-models.php?action=running&include_recent=1' + itemsQ, { credentials: 'include' })
+        .then(function(r) { return safeJson(r); })
+        .then(function(d) {
+            if (!d || !d.jobs) return;
+            _gsMonitorApply(d);
+            var act = (typeof d.active_count === 'number')
+                ? d.active_count
+                : d.jobs.filter(function(j){ return j.job_status === 'pending' || j.job_status === 'running'; }).length;
+            _gsMonitorActive = act;
+            var c = document.getElementById('gs-mon-count');
+            if (c) {
+                // Running totals: baselines done (complete) / queued (active);
+                // feed-items done (have an editable transcript) / queued (active).
+                var bits = ['Baselines: ' + (d.baselines_done != null ? d.baselines_done : '–') + ' done / ' + act + ' queued'];
+                if (d.items_done != null && d.items_queued != null) bits.push('Items: ' + d.items_done + ' done / ' + d.items_queued + ' queued');
+                c.innerHTML = '&mdash; ' + bits.join(' &nbsp;·&nbsp; ') + (act > 400 ? ' (first 400 shown)' : '');
+            }
+        })
+        .catch(function(){ /* keep last render on a blip */ });
+}
+
+// Rebuild _gsItems/_gsState from a server job list. Items are ordered by their
+// earliest job_key (the order the single worker will run them); jobs within an
+// item by job_key. Jobs the operator paused this session stay 'paused' even
+// though the server reports them 'cancelled'.
+function _gsMonitorApply(d) {
+    var jobs = d.jobs || [];
+    // Opt-in set + best editable (consensus) job per item + per-item edit status.
+    var optin = {}; (d.optin || []).forEach(function(k){ optin[k] = true; });
+    var tstatus = d.tstatus || {};
+    var rank = function(s){ return s === 'running' ? 4 : s === 'pending' ? 3 : s === 'done' ? 2 : 1; };
+    var editByItem = {};
+    (d.edit_jobs || []).forEach(function(e) {
+        var k = e.feed_item_key, cur = editByItem[k];
+        if (!cur || rank(e.job_status) > rank(cur.job_status)) editByItem[k] = e;
+    });
+    // Already-generated baselines per item: item -> { model -> {row_count,last_dtime} }.
+    var existByItem = {};
+    (d.existing || []).forEach(function(e){ (existByItem[e.item_key] = existByItem[e.item_key] || {})[e.model] = e; });
+    // Selected items (always shown) + the engine set they were generated with.
+    var selItems = _gsSelItems || [], selSet = {}, selOrder = {};
+    selItems.forEach(function(k, i){ selSet[k] = true; selOrder[k] = i; });
+    var selCodes = _gsSelCodes || [];
+    var paused = {};
+    _gsItems.forEach(function(it) {
+        var st = _gsState[it.key]; if (!st) return;
+        st.jobs.forEach(function(j){ if (j.state === 'paused' && j.jobKey != null) paused[j.jobKey] = true; });
+    });
+    var byItem = {};
+    jobs.forEach(function(j){ (byItem[j.feed_item_key] = byItem[j.feed_item_key] || []).push(j); });
+    // Item titles (from jobs or edit_jobs), so selected items with no jobs still
+    // show a title.
+    var titleOf = {};
+    jobs.forEach(function(j){ if (j.item_title && titleOf[j.feed_item_key] == null) titleOf[j.feed_item_key] = j.item_title; });
+    (d.edit_jobs || []).forEach(function(e){ if (e.item_title && titleOf[e.feed_item_key] == null) titleOf[e.feed_item_key] = e.item_title; });
+    // Every item to show = items with jobs ∪ selected items ∪ items with an
+    // active editable build. (Closing the gap that hid skipped/finished items.)
+    var keySet = {}; var allKeys = [];
+    var addKey = function(k){ k = parseInt(k, 10); if (!keySet[k]) { keySet[k] = true; allKeys.push(k); } };
+    Object.keys(byItem).forEach(addKey);
+    selItems.forEach(addKey);
+    (d.edit_jobs || []).forEach(function(e){ if (e.job_status === 'pending' || e.job_status === 'running') addKey(e.feed_item_key); });
+    var groups = allKeys.map(function(k) {
+        var arr = (byItem[k] || []).slice().sort(function(a,b){ return a.job_key - b.job_key; });
+        // Order by the item's lowest PENDING/RUNNING job_key — its NEXT job to be
+        // processed (the worker pulls the lowest pending key). Idle items (no
+        // active job) get Infinity and fall to the bottom, ordered by selection.
+        var minKey = arr.reduce(function(m,x){ return (x.job_status === 'pending' || x.job_status === 'running') ? Math.min(m, x.job_key) : m; }, Infinity);
+        return { key: k, title: titleOf[k] || (arr[0] && arr[0].item_title) || '', minKey: minKey, jobs: arr };
+    });
+    groups.sort(function(a,b){
+        if (a.minKey !== b.minKey) return a.minKey - b.minKey;            // active first, in run order
+        var ao = selOrder[a.key] != null ? selOrder[a.key] : 1e9;          // then selected, in selection order
+        var bo = selOrder[b.key] != null ? selOrder[b.key] : 1e9;
+        return ao !== bo ? ao - bo : a.key - b.key;
+    });
+    var items = [], state = {};
+    groups.forEach(function(g) {
+        var isSel = !!selSet[g.key];
+        // ONE row per engine: repeated Generate/Clear cycles leave several jobs
+        // for the same model — keep the most-advanced (running > queued/paused >
+        // complete > failed > cancelled), newest on ties.
+        var rankS = function(s){ return s === 'running' ? 5 : (s === 'queued' || s === 'paused') ? 4 : s === 'complete' ? 3 : s === 'failed' ? 2 : 1; };
+        var best = {};
+        g.jobs.forEach(function(sj) {
+            var stt = paused[sj.job_key] ? 'paused' : _gsMapStatus(sj.job_status);
+            var cur = best[sj.job_model];
+            if (!cur || rankS(stt) > rankS(cur.stt) || (rankS(stt) === rankS(cur.stt) && sj.job_key > cur.sj.job_key)) best[sj.job_model] = { sj: sj, stt: stt };
+        });
+        var ex = existByItem[g.key] || {};
+        // Engine set = engines with a job ∪ already-generated engines ∪ (the
+        // selected engine set, if this is a selected item — so its queued engines
+        // appear instantly before their jobs are even created).
+        var engineSet = {};
+        Object.keys(best).forEach(function(m){ engineSet[m] = true; });
+        Object.keys(ex).forEach(function(m){ engineSet[m] = true; });
+        if (isSel) selCodes.forEach(function(m){ engineSet[m] = true; });
+        var jobRow = function(b) {
+            var sj = b.sj, stt = b.stt;
+            var o = { model: sj.job_model, jobKey: sj.job_key, state: stt, msg: sj.job_message, pct: sj.job_progress };
+            var sp = _gsParseSegs(sj.job_message); if (sp) { o.segDone = sp.done; o.segTotal = sp.total; }
+            if (stt === 'failed') o.err = sj.job_error || sj.job_message;
+            return o;
+        };
+        var existRow = function(m) { return { model: m, jobKey: null, state: 'exists', dtime: ex[m].last_dtime, segs: ex[m].row_count ? parseInt(ex[m].row_count, 10) : null }; };
+        var mapped = Object.keys(engineSet).map(function(m) {
+            var b = best[m];
+            var liveJob = b && (b.stt === 'running' || b.stt === 'queued' || b.stt === 'paused' || b.stt === 'complete');
+            if (liveJob)  return jobRow(b);                 // an active/done job this run wins
+            if (ex[m])    return existRow(m);               // else already-generated → ⏭ with date (don't let a cancelled re-run hide it)
+            if (b)        return jobRow(b);                 // a cancelled/failed job, no prior baseline (filtered from view below)
+            return { model: m, jobKey: null, state: 'queued' };   // selected engine, not yet dispatched
+        });
+        var anyActive = mapped.some(function(o){ return o.state === 'queued' || o.state === 'running' || o.state === 'paused'; });
+        var ej = editByItem[g.key];
+        var editActive = ej && (ej.job_status === 'pending' || ej.job_status === 'running');
+        // Non-selected items drop off once nothing's active (existing monitor
+        // behavior — keeps Clear/supersede churn out). Selected items ALWAYS show,
+        // with their full engine detail (⏭ dates included).
+        if (!anyActive && !editActive && !isSel) return;
+        // Visible rows: active + complete (✓) + exists (⏭); hide cancelled/failed
+        // churn. Order engines by the config table order so it's stable.
+        var jobs2 = mapped.filter(function(o){ return o.state === 'queued' || o.state === 'running' || o.state === 'paused' || o.state === 'complete' || o.state === 'exists'; })
+                          .sort(function(a, b){ return _gsModelOrder(a.model) - _gsModelOrder(b.model); });
+        items.push({ key: g.key, title: g.title });
+        state[g.key] = {
+            title: g.title, baselineCodes: [], editsCodes: [], primary: null, params: {},
+            editsState: 'hidden', initJobKey: null, jobs: jobs2,
+            optin: !!optin[g.key], editJob: ej || null, tstatus: tstatus[g.key] || null
+        };
+    });
+    _gsItems = items; _gsState = state;
+    _gsRenderQueue();
+    var pausable = jobs.some(function(j){ return j.job_status === 'pending'; });
+    if (pausable || _gsPaused) { _gsUpdatePauseBtn(); var cb = document.getElementById('gs-clear-btn'); if (cb) cb.style.display = 'inline-block'; }
+}
+
+// Engine display order = its position in the config table (TRANSCRIPT_GEN_MODELS).
+function _gsModelOrder(code) {
+    for (var i = 0; i < TRANSCRIPT_GEN_MODELS.length; i++) { if (TRANSCRIPT_GEN_MODELS[i].code === code) return i; }
+    return 999;
+}
+
+// Toggle a single item's editable-transcript opt-in, then refresh the monitor.
+function _gsToggleEditable(key, checked) {
+    fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'editable_optin', item_keys: [key], optin: !!checked }) })
+        .then(function(){ _gsMonitorTick(); })
+        .catch(function(){});
+}
+
+// Opt EVERY queued item (pending/running baseline) in to (re)building its
+// editable transcript when its baselines finish. Items already edited by an
+// admin (status 'Editing') are protected and never reset; existing 'Pending'
+// transcripts are rebuilt. Confirms first — it can be a lot of items.
+function _gsEditableAllQueued() {
+    if (!confirm('Reset the editable transcript for every queued item once its baselines finish?\n\nItems with status Editing (admin-edited) will NOT be reset. Existing transcripts that are Pending WILL be reset/rebuilt, along with items that have no transcript yet. You can still uncheck individual items.')) return;
+    fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'editable_optin', all_queued: true, optin: true }) })
+        .then(function(r){ return safeJson(r); })
+        .then(function(d){ _gsMonitorTick(); if (d && d.updated != null) { var b = document.getElementById('gs-editall-btn'); if (b) b.textContent = '✓ ' + d.updated + ' set to reset'; } })
+        .catch(function(){});
+}
+
+// Clear Queue: cancel every job that hasn't started yet (pending/paused) so the
+// worker won't pick them up; the currently RUNNING job(s) are left to finish.
+// Unlike Pause this is not resumable — it empties the waiting queue.
+function _gsClearQueue() {
+    // ── Monitor (global live queue) ── cancel EVERY pending job site-wide, not
+    // just the ≤400 the window loaded. The running job(s) finish.
+    if (_gsMonitor) {
+        var nAct = _gsMonitorActive || 0;
+        if (!nAct) { alert('No waiting jobs to clear — only running job(s) remain.'); return; }
+        if (!confirm('Remove all ' + nAct + ' waiting job' + (nAct === 1 ? '' : 's') + ' from the queue?\n\nThe currently running job(s) will finish; nothing new will start.')) return;
+        _gsPaused = false; _gsUpdatePauseBtn();
+        _gsItems = []; _gsState = {}; _gsRenderQueue();   // optimistic empty; tick restores any running job
+        fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'cancel', all_pending: true }) })
+            .then(function(){ _gsMonitorTick(); })
+            .catch(function(){ _gsMonitorTick(); });
+        return;
+    }
+    // ── Batch (this run only) ── cancel this batch's waiting jobs by key.
+    var keys = [];
+    _gsItems.forEach(function(it) {
+        _gsState[it.key].jobs.forEach(function(j) {
+            if ((j.state === 'queued' || j.state === 'paused') && j.jobKey != null) keys.push(j.jobKey);
+        });
+    });
+    if (!keys.length) { alert('No waiting jobs to clear — only running job(s) remain.'); return; }
+    if (!confirm('Remove ' + keys.length + ' waiting job' + (keys.length === 1 ? '' : 's') + ' from the queue?\n\nThe currently running job' + (keys.length === 1 ? '' : '(s)') + ' will finish; nothing new will start.')) return;
+    _gsPaused = false; _gsUpdatePauseBtn();
+    // Mark every waiting job cancelled — including ones not yet created
+    // (jobKey == null), so the in-flight creation chain skips them too. Also
+    // stop any not-yet-started editable build (a 'building' one finishes).
+    _gsItems.forEach(function(it) {
+        var st = _gsState[it.key];
+        st.jobs.forEach(function(j) {
+            if (j.state === 'queued' || j.state === 'paused') j.state = 'cancelled';
+        });
+        if (st.editsState === 'waiting' || st.editsState === 'queued') st.editsState = 'skip';
+    });
+    _gsRenderQueue();
+    fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel', job_keys: keys }) })
+        .catch(function(){});
+    // Also clear the editable builds queued in the DB for these items (a build
+    // already actively running finishes — the worker re-checks before writing).
+    var itemKeys = _gsItems.map(function(it){ return it.key; });
+    fetch(API + '/admin-transcript-init.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel', item_keys: itemKeys }) })
+        .catch(function(){});
+}
 
 function openGenerateTranscriptsPopover() {
     var checked = Array.prototype.slice.call(document.querySelectorAll('.rec-cb:checked'));
@@ -3319,11 +4477,14 @@ function openGenerateTranscriptsPopover() {
     _genTxLoadRunningJobs();
 }
 
-// Pull every pending/running job from the server and seed the results
-// panel + tracking list so the existing _genTxPollTick loop picks up
-// where it left off. Called on every popover open.
+// Pull in-flight jobs AND jobs that finished in the last hour, then seed the
+// results panel + tracking list so the existing _genTxPollTick loop picks up
+// where it left off. Called on every popover open. Including recently-finished
+// jobs (include_recent=1) is what makes a job that completed while the popover
+// was closed still show as ✓ Complete and count toward the "Complete:" tally —
+// the old in-flight-only snapshot silently dropped them (under-counting).
 function _genTxLoadRunningJobs() {
-    fetch(API + '/admin-transcript-models.php?action=running', { credentials: 'include' })
+    fetch(API + '/admin-transcript-models.php?action=running&include_recent=1', { credentials: 'include' })
         .then(function(r) { return safeJson(r); })
         .then(function(d) {
             var jobs = (d && d.jobs) || [];
@@ -3333,27 +4494,42 @@ function _genTxLoadRunningJobs() {
             _genTxJobs = [];
             var results = document.getElementById('gen-tx-results');
             if (!results) return;
+            var inflight = jobs.filter(function(j){ return j.job_status === 'pending' || j.job_status === 'running'; }).length;
             results.style.display = 'block';
             results.innerHTML = '<div id="gen-tx-summary" style="margin-bottom:6px;color:#555;"></div>'
                               + '<div id="gen-tx-health" style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #ddd;font-size:0.78rem;"></div>'
-                              + '<div style="font-size:0.75rem;color:#888;margin-bottom:6px;">Currently running across the site (' + jobs.length + ')</div>'
+                              + '<div style="font-size:0.75rem;color:#888;margin-bottom:6px;">Across the site: ' + inflight + ' in flight, ' + (jobs.length - inflight) + ' finished in the last hour</div>'
                               + '<div id="gen-tx-lines"></div>';
             var lines = document.getElementById('gen-tx-lines');
             jobs.forEach(function(j) {
                 var t = { key: j.feed_item_key, model: j.job_model };
-                var state = j.job_status === 'running' ? 'running' : 'queued';
+                // Map every terminal + in-flight status so finished jobs show
+                // their ✓/✗ outcome instead of being forced to queued/running.
+                var state;
+                switch (j.job_status) {
+                    case 'complete':  state = 'complete'; break;
+                    case 'failed':    state = 'failed';   break;
+                    case 'cancelled': state = 'cancelled';break;
+                    case 'running':   state = 'running';  break;
+                    default:          state = 'queued';   break; // pending
+                }
                 var line = document.createElement('div');
                 line.setAttribute('data-job-key', String(j.job_key));
                 line.innerHTML = _genTxLineHtml(state, t, {
                     jobKey: j.job_key,
                     progress: j.job_progress,
                     message: j.job_message,
+                    error: j.job_error,
                 });
                 lines.appendChild(line);
                 _genTxJobs.push({ jobKey: j.job_key, key: t.key, model: t.model, lineEl: line, state: state });
             });
             _genTxUpdateSummary();
-            _genTxPollTimer = setInterval(_genTxPollTick, 2000);
+            // Only poll if something is still in flight; an all-finished
+            // snapshot needs no further ticking.
+            if (_genTxJobs.some(function(j){ return j.state === 'queued' || j.state === 'running'; })) {
+                _genTxPollTimer = setInterval(_genTxPollTick, 2000);
+            }
         })
         .catch(function(){ /* silent — nothing-to-show is fine */ });
 }
@@ -4144,7 +5320,7 @@ function transcriptRowCells(seg, secs, text, speaker) {
         + '<td style="padding:6px 2px;border-top:1px solid #eee;vertical-align:top;text-align:center;white-space:nowrap;">'
         +   speakerChipForRow(s)
         + '</td>'
-        + '<td class="t-time-cell" data-secs="' + secs + '" title="Click to jump video here · double-click to edit" style="padding:6px;border-top:1px solid #eee;vertical-align:top;"><input type="text" value="' + esc(displaySegment(seg)) + '" data-field="segment" readonly style="width:100%;font-size:0.82rem;font-family:monospace;border:1px solid #ddd;border-radius:3px;padding:3px 6px;background:transparent;cursor:pointer;"></td>'
+        + '<td class="t-time-cell" data-secs="' + secs + '" title="Click to jump video here · double-click to edit" style="padding:6px;border-top:1px solid #eee;vertical-align:top;"><input type="text" value="' + esc(fmtSegHundredths(seg)) + '" data-field="segment" readonly style="width:100%;min-width:92px;box-sizing:border-box;font-size:0.82rem;font-family:monospace;border:1px solid #ddd;border-radius:3px;padding:3px 6px;background:transparent;cursor:pointer;"></td>'
         + '<td style="padding:6px;border-top:1px solid #eee;"><textarea data-field="text" rows="1"' + roAttr + ' style="width:100%;font-size:0.85rem;font-family:inherit;line-height:1.4;border:1px solid #ddd;border-radius:3px;padding:3px 6px;resize:none;overflow-y:hidden;box-sizing:border-box;display:block;' + roStyle + '">' + esc(text || '') + '</textarea></td>'
         + '<td style="padding:6px;border-top:1px solid #eee;text-align:center;white-space:nowrap;vertical-align:top;">'
         +   rowActions
@@ -4288,8 +5464,14 @@ function bindTimeCellHandlers(td) {
     td.addEventListener('dblclick', function() {
         var input = td.querySelector('input[data-field="segment"]');
         if (!input) return;
+        // Pause playback the moment the operator starts editing a timestamp.
+        if (typeof _ytPlayer !== 'undefined' && _ytPlayer && typeof _ytPlayer.pauseVideo === 'function') { try { _ytPlayer.pauseVideo(); } catch (e) {} }
+        if (_tsPlayTimer) { clearInterval(_tsPlayTimer); _tsPlayTimer = null; }
         input.readOnly = false;
         input.style.cursor = 'text';
+        // Save the original time so the adjust button can compute the delta.
+        td.dataset.origSecs = String(parseSegmentToSeconds(input.value));
+        _tsShowEditTools(td);
         input.focus();
         input.select();
     });
@@ -4298,10 +5480,110 @@ function bindTimeCellHandlers(td) {
         seg.addEventListener('blur', function() {
             seg.readOnly = true;
             seg.style.cursor = 'pointer';
+            // Never persist an empty timestamp: if the field was cleared, restore
+            // the value it had when editing began (or the last-known-good secs).
+            if (seg.value.trim() === '') {
+                var origS = parseFloat(td.dataset.origSecs);
+                if (isNaN(origS)) origS = parseFloat(td.dataset.secs);
+                if (isNaN(origS)) origS = 0;
+                seg.value = fmtSegHundredths(origS);
+            }
             // refresh data-secs on the cell so click-to-seek uses the new value
             td.dataset.secs = parseSegmentToSeconds(seg.value);
+            _tsHideEditTools(td);
         });
     }
+}
+
+// ── Timestamp edit tools (play-segment + shift-following) ──────────────────
+var _tsPlayTimer = null;
+
+// Show the play + adjust buttons below a time field that's being edited.
+function _tsShowEditTools(td) {
+    if (td.querySelector('.ts-edit-tools')) return;
+    var box = document.createElement('div');
+    box.className = 'ts-edit-tools';
+    box.style.cssText = 'display:flex;gap:6px;margin-top:5px;';
+    box.innerHTML =
+        '<button type="button" class="ts-play-btn" onmousedown="event.preventDefault()" title="Play this segment (up to the next row timestamp)" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #ccc;border-radius:4px;padding:2px 8px;cursor:pointer;color:#1d6b3a;">'
+      +   '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'
+      + '</button>'
+      + '<button type="button" class="ts-adjust-btn" onmousedown="event.preventDefault()" title="Shift all later timestamps by the same amount you changed this one" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #ccc;border-radius:4px;padding:2px 8px;cursor:pointer;color:#31345A;">'
+      +   '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="8"/><path d="M10 5.5 V10 H6"/><circle cx="18" cy="18" r="5.4" fill="#fff"/><text x="18" y="20.7" text-anchor="middle" font-size="9" font-weight="700" stroke="none" fill="currentColor">\u00b1</text></svg>'
+      + '</button>';
+    td.appendChild(box);
+    box.querySelector('.ts-play-btn').addEventListener('click', function(){ _tsPlaySegment(td); });
+    box.querySelector('.ts-adjust-btn').addEventListener('click', function(){ _tsAdjustFollowing(td); });
+}
+
+function _tsHideEditTools(td) {
+    var b = td.querySelector('.ts-edit-tools'); if (b) b.remove();
+    if (_tsPlayTimer) { clearInterval(_tsPlayTimer); _tsPlayTimer = null; }
+}
+
+// Play the video from this row's (possibly just-edited) time up to the next row's.
+function _tsPlaySegment(td) {
+    var input = td.querySelector('input[data-field="segment"]');
+    if (!input) return;
+    var start = parseSegmentToSeconds(input.value);
+    var tr = td.closest('tr');
+    var end = null;
+    var nextTr = tr ? tr.nextElementSibling : null;
+    if (nextTr) { var ni = nextTr.querySelector('input[data-field="segment"]'); if (ni) end = parseSegmentToSeconds(ni.value); }
+    if (_tsPlayTimer) { clearInterval(_tsPlayTimer); _tsPlayTimer = null; }
+    seekVideoTo(start);
+    if (end != null && end > start) {
+        _tsPlayTimer = setInterval(function() {
+            var ct = start; try { ct = _ytPlayer.getCurrentTime(); } catch (e) {}
+            if (ct >= end) { try { _ytPlayer.pauseVideo(); } catch (e) {} clearInterval(_tsPlayTimer); _tsPlayTimer = null; }
+        }, 150);
+    }
+}
+
+// Shift every following row's timestamp by (current - original), after confirm.
+function _tsAdjustFollowing(td) {
+    var input = td.querySelector('input[data-field="segment"]');
+    if (!input) return;
+    var orig = parseFloat(td.dataset.origSecs);
+    if (isNaN(orig)) { alert('Double-click the time to edit it first.'); return; }
+    var now = parseSegmentToSeconds(input.value);
+    var delta = now - orig;
+    if (Math.abs(delta) < 0.005) { alert('Edit this timestamp first — there is no change to apply.'); return; }
+    var tr = td.closest('tr');
+    _tsConfirmAdjust(delta, function() {
+        var sib = tr ? tr.nextElementSibling : null;
+        while (sib) {
+            var si = sib.querySelector('input[data-field="segment"]');
+            if (si) {
+                var v = parseSegmentToSeconds(si.value) + delta;
+                if (v < 0) v = 0;
+                si.value = fmtSegHundredths(v);
+                var cell = sib.querySelector('td.t-time-cell'); if (cell) cell.dataset.secs = String(v);
+            }
+            sib = sib.nextElementSibling;
+        }
+        td.dataset.origSecs = String(now);   // new baseline for any further adjust
+        scheduleAutoSave();
+    });
+}
+
+// Confirmation popover for the shift; amt is signed to 2 decimals (+1.34 / -0.56).
+function _tsConfirmAdjust(delta, onApply) {
+    var ov = document.getElementById('ts-adjust-overlay'); if (ov) ov.remove();
+    var amt = (delta >= 0 ? '+' : '') + delta.toFixed(2);
+    ov = document.createElement('div');
+    ov.id = 'ts-adjust-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10008;display:flex;align-items:center;justify-content:center;padding:30px;';
+    ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(420px,95vw);box-shadow:0 12px 40px rgba(0,0,0,.4);overflow:hidden;">'
+        + '<div style="padding:16px 18px;font-size:0.9rem;color:#333;">Apply a <strong>' + amt + '</strong> adjustment to all subsequent segments?</div>'
+        + '<div style="display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid #eee;background:#f7f8fc;">'
+        +   '<button id="ts-adjust-cancel" style="padding:7px 14px;background:#fff;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Cancel</button>'
+        +   '<button id="ts-adjust-apply" style="padding:7px 16px;background:#31345A;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Apply</button>'
+        + '</div></div>';
+    document.body.appendChild(ov);
+    ov.onclick = function(e){ if (e.target === ov) ov.remove(); };
+    document.getElementById('ts-adjust-cancel').addEventListener('click', function(){ ov.remove(); });
+    document.getElementById('ts-adjust-apply').addEventListener('click', function(){ ov.remove(); onApply(); });
 }
 
 function addTranscriptRow() {
@@ -4627,7 +5909,7 @@ function openInitializeEditsModal() {
     ov = document.createElement('div');
     ov.id = 'init-overlay';
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:10002;';
-    ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(640px,95vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.4);">'
+    ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(740px,95vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.4);">'
         + '<div style="padding:14px 18px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;">'
         +   '<h3 style="margin:0;color:#31345A;font-size:1.05rem;">Initialize Edits</h3>'
         +   '<button onclick="closeInitializeModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">&times;</button>'
@@ -4684,6 +5966,25 @@ var _gbPollTimer = null;
 var _gbJobs = [];   // [{code, jobKey, state, pct, msg, err}]
 var _gbExisting = {};   // code -> { last_run, rows } for baselines that already exist on this item
 
+// Persist the Generate-Baselines engine selection + "Re-generate" toggle across
+// sessions (global preference, NOT per-item) so the operator's preferred engine
+// set is pre-checked next time the popover opens. Wrapped in try/catch for
+// private-mode / quota safety — failure just falls back to "nothing checked".
+var _GB_PREFS_KEY = 'yada.genBaselines.prefs.v1';
+function _gbReadPrefs() {
+    try {
+        var p = JSON.parse(localStorage.getItem(_GB_PREFS_KEY) || '{}');
+        return { codes: Array.isArray(p.codes) ? p.codes : [], regen: !!p.regen };
+    } catch (e) { return { codes: [], regen: false }; }
+}
+function _gbSavePrefs() {
+    try {
+        var codes = Array.prototype.slice.call(document.querySelectorAll('#genbase-overlay .gb-model:checked')).map(function(c){ return c.value; });
+        var regen = !!(document.getElementById('gb-regen') || {}).checked;
+        localStorage.setItem(_GB_PREFS_KEY, JSON.stringify({ codes: codes, regen: regen }));
+    } catch (e) {}
+}
+
 function openGenerateBaselinesPopover() {
     if (!_transcriptItemKey) { alert('No transcript loaded.'); return; }
     var ov = document.getElementById('genbase-overlay');
@@ -4692,23 +5993,29 @@ function openGenerateBaselinesPopover() {
     ov.id = 'genbase-overlay';
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:10002;';
     var gpu = TRANSCRIPT_GEN_MODELS.filter(function(m){ return m.code.indexOf('gpu-') === 0; });
+    // Restore the operator's last engine + "Re-generate" selection. First-ever
+    // open (no saved prefs) leaves everything unchecked, as before.
+    var _gbPrefs = _gbReadPrefs();
     var rows = gpu.map(function(m){
+        var on = _gbPrefs.codes.indexOf(m.code) >= 0 ? ' checked' : '';
         return '<label style="display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:0.83rem;cursor:pointer;">'
-            + '<input type="checkbox" class="gb-model" value="' + esc(m.code) + '" style="margin-top:3px;">'
+            + '<input type="checkbox" class="gb-model" value="' + esc(m.code) + '"' + on + ' style="margin-top:3px;">'
             + '<span><span class="gb-exists" data-code="' + esc(m.code) + '" style="color:#27ae60;font-size:0.72rem;font-weight:600;"></span>' + esc(m.label) + '</span></label>';
     }).join('');
-    ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(640px,95vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.4);">'
+    ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(740px,95vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.4);">'
         + '<div style="padding:14px 18px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;"><h3 style="margin:0;color:#31345A;font-size:1.05rem;">Generate Baselines</h3><button onclick="closeGenerateBaselinesPopover()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">&times;</button></div>'
         + '<div style="padding:10px 18px;font-size:0.82rem;color:#555;border-bottom:1px solid #eee;">Run the free self-hosted STT engines for this item. Checked engines are queued and run <strong>sequentially</strong> on the GPU box; progress shows below. Engines that already have a baseline are marked <span style="color:#1d6b3a;font-weight:700;">✓ done</span> and are skipped unless you tick “Re-generate”.</div>'
         + '<div style="padding:10px 18px;overflow-y:auto;">' + rows + '</div>'
         + '<div id="gb-status" style="display:none;padding:8px 18px;border-top:1px solid #eee;font-size:0.78rem;font-family:monospace;max-height:220px;overflow-y:auto;"></div>'
         + '<div style="padding:12px 18px;border-top:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;gap:8px;background:#f7f8fc;">'
-        +   '<label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:#555;cursor:pointer;"><input type="checkbox" id="gb-regen" style="margin:0;"> Re-generate engines that already have a baseline</label>'
+        +   '<label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:#555;cursor:pointer;"><input type="checkbox" id="gb-regen"' + (_gbPrefs.regen ? ' checked' : '') + ' style="margin:0;"> Re-generate engines that already have a baseline</label>'
         +   '<div style="display:flex;gap:8px;"><button onclick="closeGenerateBaselinesPopover()" style="background:#fff;border:1px solid #ccc;padding:6px 14px;border-radius:4px;cursor:pointer;">Close</button><button id="gb-go-btn" onclick="runGenerateBaselines()" style="background:#0b7285;color:#fff;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font-weight:600;">Generate</button></div>'
         + '</div>'
         + '</div>';
     document.body.appendChild(ov);
     ov.onclick = function(e){ if (e.target === ov) closeGenerateBaselinesPopover(); };
+    ov.addEventListener('change', _gbSavePrefs);   // persist engine + regen picks as the operator toggles them
+    _gbReconnectJobs();   // re-attach to jobs still running / just-finished from a previous (closed) session
     _gbExisting = {};
     fetch(API + '/admin-transcript-models.php?action=status&item_key=' + encodeURIComponent(_transcriptItemKey), { credentials:'include' })
         .then(function(r){ return safeJson(r); }).then(function(d){
@@ -4735,6 +6042,45 @@ function closeGenerateBaselinesPopover() {
 
 function _gbFind(code) { for (var i = 0; i < _gbJobs.length; i++) if (_gbJobs[i].code === code) return _gbJobs[i]; return null; }
 function _gbLabel(code) { var m = null; TRANSCRIPT_GEN_MODELS.forEach(function(x){ if (x.code === code) m = x; }); return m ? m.label : code; }
+
+// Map a server job row to the popover's internal job-state shape.
+function _gbApplyStatus(j, d) {
+    var st = d.job_status;
+    if (st === 'complete')      { j.state = 'complete'; j.msg = d.job_message; }
+    else if (st === 'failed')   { j.state = 'failed';   j.err = d.job_error || d.job_message; }
+    else if (st === 'cancelled'){ j.state = 'failed';   j.err = 'cancelled'; }
+    else if (st === 'running')  { j.state = 'running';  j.pct = d.job_progress; j.msg = d.job_message; }
+    else                        { j.state = 'queued'; }
+    return j;
+}
+
+// On (re)open, pull the latest job per engine for this item that's still
+// running or just finished, rebuild the progress list, and resume polling any
+// still active. Lets the operator close the popover mid-run and come back to
+// live status / success / error messages instead of losing all visibility.
+function _gbReconnectJobs() {
+    fetch(API + '/admin-transcript-models.php?action=item_jobs&item_key=' + encodeURIComponent(_transcriptItemKey), { credentials:'include' })
+        .then(function(r){ return safeJson(r); }).then(function(d){
+            if (!d || !d.jobs || !d.jobs.length) return;
+            // Don't clobber a run the operator just kicked off in this same open
+            // popover (poll timer already active) — we're already tracking it.
+            if (_gbPollTimer) return;
+            var gpuCodes = {};
+            TRANSCRIPT_GEN_MODELS.forEach(function(m){ if (m.code.indexOf('gpu-') === 0) gpuCodes[m.code] = 1; });
+            var jobs = d.jobs.filter(function(jr){ return gpuCodes[jr.job_model]; }).map(function(jr){
+                return _gbApplyStatus({ code: jr.job_model, jobKey: jr.job_key }, jr);
+            });
+            if (!jobs.length) return;
+            _gbJobs = jobs;
+            var statusEl = document.getElementById('gb-status'); if (statusEl) statusEl.style.display = 'block';
+            _gbRender();
+            if (_gbJobs.some(function(j){ return j.state === 'queued' || j.state === 'running'; })) {
+                var b = document.getElementById('gb-go-btn'); if (b) { b.disabled = true; b.style.opacity = '0.5'; }
+                if (_gbPollTimer) clearInterval(_gbPollTimer);
+                _gbPollTimer = setInterval(_gbPollTick, 2000);
+            }
+        }).catch(function(){});
+}
 
 function runGenerateBaselines() {
     var checked = Array.prototype.slice.call(document.querySelectorAll('#genbase-overlay .gb-model:checked')).map(function(c){ return c.value; });
@@ -5142,6 +6488,23 @@ window._bookmarkSort   = window._bookmarkSort   || { col: 'segment', dir: 'asc' 
 function displaySegment(seg) {
     if (!seg) return seg;
     return String(seg).replace(/^0(\d:)/, '$1');
+}
+
+// Transcript-editor time display: always H:MM:SS.ss (hundredths), hour with no
+// leading zero — so rows never show ragged precision (0:09:57 vs 0:10:00.8).
+function fmtSegHundredths(seg) {
+    if (seg === null || seg === undefined || seg === '') return seg;
+    var total = parseSegmentToSeconds(seg);
+    if (isNaN(total)) return displaySegment(seg);
+    var neg = total < 0; if (neg) total = -total;
+    var pad2 = function(n){ return n < 10 ? '0' + n : '' + n; };
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
+    var sInt = Math.floor(total % 60);
+    var hund = Math.round((total - Math.floor(total)) * 100);
+    if (hund === 100) { hund = 0; sInt += 1; }
+    if (sInt === 60) { sInt = 0; m += 1; if (m === 60) { m = 0; h += 1; } }
+    return (neg ? '-' : '') + h + ':' + pad2(m) + ':' + pad2(sInt) + '.' + (hund < 10 ? '0' + hund : '' + hund);
 }
 
 function cssEscapeSeg(s) {
@@ -6445,6 +7808,99 @@ function toggleTranscriptMaximize() {
     if (rc) rc.style.maxHeight = isMax ? '70vh' : 'calc(100vh - 180px)';
 }
 
+// ── Video window size controls (transcript editor) ───────────────────────────
+// Two independent ways to enlarge the small player:
+//   cycleVideoSize()   — widens the player COLUMN in place (S→M→L). The transcript
+//                        table is flex:1;min-width:0, so it just reflows narrower
+//                        and stays fully visible/clickable. Pure flex-basis swap.
+//   toggleVideoFloat() — pops the player out as a fixed, draggable panel layered
+//                        over the popover, leaving the transcript full-width
+//                        underneath. The iframe is NEVER reparented (moving an
+//                        iframe in the DOM reloads it and resets _ytPlayer/sync) —
+//                        we only flip its CSS position and park a same-height
+//                        placeholder where it sat so the column doesn't collapse.
+var _vidSizes = ['24%', '46%', '66%'];
+var _vidSizeLabels = ['S', 'M', 'L'];
+var _vidSizeIdx = 0;
+function cycleVideoSize() {
+    var col = document.getElementById('t-player-col');
+    var btn = document.getElementById('t-size-btn');
+    if (!col) return;
+    _vidSizeIdx = (_vidSizeIdx + 1) % _vidSizes.length;
+    col.style.flex = '0 0 ' + _vidSizes[_vidSizeIdx];
+    if (btn) btn.textContent = '⤢ Size: ' + _vidSizeLabels[_vidSizeIdx];
+}
+
+var _vidFloating = false;
+function toggleVideoFloat() {
+    var wrap = document.getElementById('t-player-wrap');
+    var ph   = document.getElementById('t-player-ph');
+    var bar  = document.getElementById('t-player-floatbar');
+    var fbtn = document.getElementById('t-float-btn');
+    if (!wrap || !ph) return;
+    if (!_vidFloating) {
+        var r = wrap.getBoundingClientRect();
+        ph.style.height = r.height + 'px';   // hold the column's space open
+        ph.style.display = 'block';
+        var w = Math.min(680, Math.max(320, window.innerWidth - 60));
+        wrap.style.position = 'fixed';
+        wrap.style.width  = w + 'px';
+        wrap.style.left   = (window.innerWidth - w - 30) + 'px';
+        wrap.style.top    = '30px';
+        wrap.style.zIndex = '10010';
+        wrap.style.boxShadow = '0 10px 40px rgba(0,0,0,0.45)';
+        if (bar)  bar.style.display = 'flex';
+        if (fbtn) { fbtn.textContent = '⧉ Floating'; fbtn.style.background = '#e8ecff'; fbtn.style.borderColor = '#9aa6e0'; }
+        _vidFloating = true;
+    } else {
+        wrap.style.position = 'relative';
+        wrap.style.width = '';
+        wrap.style.left = '';
+        wrap.style.top = '';
+        wrap.style.zIndex = '';
+        wrap.style.boxShadow = '';
+        ph.style.display = 'none';
+        if (bar)  bar.style.display = 'none';
+        if (fbtn) { fbtn.textContent = '⧉ Float'; fbtn.style.background = '#fff'; fbtn.style.borderColor = '#ccc'; }
+        _vidFloating = false;
+    }
+}
+
+// Reset to docked + smallest each time the transcript popover (re)opens — the
+// overlay DOM is reused, so without this it would reopen stuck however it was left.
+function resetVideoView() {
+    _vidSizeIdx = 0;
+    var col = document.getElementById('t-player-col');
+    if (col) col.style.flex = '0 0 ' + _vidSizes[0];
+    var sb = document.getElementById('t-size-btn');
+    if (sb) sb.textContent = '⤢ Size: ' + _vidSizeLabels[0];
+    if (_vidFloating) toggleVideoFloat();
+}
+
+// Drag the floating video by its top strip. Bound once; inert until floating.
+(function bindVideoFloatDrag() {
+    var dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    document.addEventListener('mousedown', function(e) {
+        var bar = document.getElementById('t-player-floatbar');
+        if (!_vidFloating || !bar || !bar.contains(e.target)) return;
+        var wrap = document.getElementById('t-player-wrap');
+        if (!wrap) return;
+        dragging = true;
+        sx = e.clientX; sy = e.clientY;
+        ox = parseInt(wrap.style.left, 10) || 0;
+        oy = parseInt(wrap.style.top, 10) || 0;
+        e.preventDefault();
+    });
+    document.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        var wrap = document.getElementById('t-player-wrap');
+        if (!wrap) return;
+        wrap.style.left = (ox + e.clientX - sx) + 'px';
+        wrap.style.top  = (oy + e.clientY - sy) + 'px';
+    });
+    document.addEventListener('mouseup', function() { dragging = false; });
+})();
+
 // ── Find within current transcript ──
 var _txFindMatches = [];
 var _txFindIdx = -1;
@@ -7508,6 +8964,6 @@ checkAuth();
 </script>
 <script src="/js/admin-login.js?v=8"></script>
 <script src="/js/session-state.js?v=1"></script>
-<script src="/js/error-reporter.js?v=4"></script>
+<script src="/js/error-reporter.js?v=5"></script>
 </body>
 </html>

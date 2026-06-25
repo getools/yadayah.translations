@@ -12,6 +12,6 @@ if (!$chapterKey || !ctype_digit($chapterKey)) {
 }
 
 $db = getDb();
-$stmt = $db->prepare('SELECT yah_verse_key, yah_chapter_key, yah_verse_number, yah_verse_sort FROM yah_verse WHERE yah_chapter_key = ? ORDER BY yah_verse_sort');
+$stmt = $db->prepare('SELECT cite_verse_key, cite_chapter_key, cite_verse_number, cite_verse_sort FROM yy_cite_verse WHERE cite_chapter_key = ? ORDER BY cite_verse_sort');
 $stmt->execute([(int)$chapterKey]);
 jsonResponse($stmt->fetchAll());

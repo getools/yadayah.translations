@@ -475,32 +475,39 @@ function gpuEngineRoute(string $code): array {
     }
 }
 
-function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offsetSecs = 0, ?string &$err = null, string $model = 'gpu-whisper-large-v3', ?PDO $db = null, int $jobKey = 0): array {
-    require_once __DIR__ . '/gpu-client.php';
-    $route    = gpuEngineRoute($model);
-    $wantWord = $route['word'];
-    $r = gpuTranscribe($audioPath, [
-        'language'        => '',                   // auto-detect
-        'word_timestamps' => $wantWord ? true : false,
-        'vad_filter'      => true,
-        'initial_prompt'  => $prompt,
-        'model'           => $route['model'],      // engine picks this model ('' = default)
-        'path'            => $route['path'],       // engine's gateway route
-        'diarize'         => $route['diarize'] ?? false, // whisperx speaker labels
-        'timeout'         => 1800,                 // long audio fine on Blackwell
-    ]);
-    if (!$r['ok']) {
-        // Transport / engine failure. Do NOT fall back to OpenAI (or any other
-        // service) — the operator deliberately chose the self-hosted free
-        // engine, and silently switching to a paid API behind their back is
-        // forbidden. Fail loudly with an actionable error so the box can be
-        // brought back up or a different provider chosen on purpose.
-        $err = 'gpu transcribe failed (Puget box unreachable / engine error): '
-             . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)))
-             . ' — no automatic fallback (selected self-hosted gpu engine); retry when the box is up or pick another provider.';
-        return [];
+/** Largest segment end time (seconds) in a gpu transcribe response — i.e. how
+ *  far into the audio the engine actually produced output. */
+function gpuLastSegmentEnd(array $data): float {
+    $last = 0.0;
+    foreach ($data['segments'] ?? [] as $seg) {
+        $e = (float)($seg['end'] ?? 0);
+        if ($e > $last) $last = $e;
     }
-    $data = $r['data'] ?? [];
+    return $last;
+}
+
+/** True if the [startSec, endSec] span of $audioPath contains audible sound
+ *  (it is NOT digital silence). Used to decide whether an under-covered
+ *  transcript is worth a VAD-off retry: sung/music content has real level
+ *  (~-25 dB mean) while a genuinely silent tail reads ~-90 dB / -inf. Fails
+ *  closed (returns false) if ffmpeg is missing or the probe is unreadable, so
+ *  a silent-tail video never triggers a pointless second transcription. */
+function gpuSpanHasSound(string $audioPath, float $startSec, float $endSec): bool {
+    if (!is_file($audioPath) || ($endSec - $startSec) < 2.0) return false;
+    $cmd = 'ffmpeg -hide_banner -nostdin'
+         . ' -ss ' . escapeshellarg((string)round($startSec, 2))
+         . ' -t '  . escapeshellarg((string)round($endSec - $startSec, 2))
+         . ' -i '  . escapeshellarg($audioPath)
+         . ' -af volumedetect -f null - 2>&1';
+    $out = shell_exec($cmd);
+    if (!$out || !preg_match('/mean_volume:\s*(-?[0-9.]+) dB/', $out, $m)) return false;
+    return (float)$m[1] > -50.0;   // > -50 dB mean → real content, not silence
+}
+
+/** Convert a gpu transcribe response into transcript rows (word-level when
+ *  $wantWord, else segment-level). Extracted so the VAD-off retry path can
+ *  re-parse the second response with identical logic. */
+function gpuParseWhisperRows(array $data, bool $wantWord, int $offsetSecs): array {
     $rows = [];
     if ($wantWord) {
         // Collect words from each segment's words[] (faster-whisper emits them
@@ -528,6 +535,77 @@ function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offse
             $rows[] = $row;
         }
     }
+    return $rows;
+}
+
+function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offsetSecs = 0, ?string &$err = null, string $model = 'gpu-whisper-large-v3', ?PDO $db = null, int $jobKey = 0): array {
+    require_once __DIR__ . '/gpu-client.php';
+    $route    = gpuEngineRoute($model);
+    $wantWord = $route['word'];
+
+    // Single place that issues the transcribe call so the VAD-off recovery pass
+    // below can re-issue it with identical params save the vad_filter flag.
+    $callEngine = function (bool $vad) use ($audioPath, $wantWord, $prompt, $route): array {
+        return gpuTranscribe($audioPath, [
+            'language'        => '',                   // auto-detect
+            'word_timestamps' => $wantWord ? true : false,
+            'vad_filter'      => $vad,
+            'initial_prompt'  => $prompt,
+            'model'           => $route['model'],      // engine picks this model ('' = default)
+            'path'            => $route['path'],       // engine's gateway route
+            'diarize'         => $route['diarize'] ?? false, // whisperx speaker labels
+            'timeout'         => 1800,                 // long audio fine on Blackwell
+        ]);
+    };
+
+    // Pass 1: VAD on (Silero) — best hallucination suppression on true silence.
+    $r = $callEngine(true);
+    if (!$r['ok']) {
+        // Transport / engine failure. Do NOT fall back to OpenAI (or any other
+        // service) — the operator deliberately chose the self-hosted free
+        // engine, and silently switching to a paid API behind their back is
+        // forbidden. Fail loudly with an actionable error so the box can be
+        // brought back up or a different provider chosen on purpose.
+        $err = 'gpu transcribe failed (Puget box unreachable / engine error): '
+             . ($r['error'] ?? ('HTTP ' . ($r['status'] ?? 0)))
+             . ' — no automatic fallback (selected self-hosted gpu engine); retry when the box is up or pick another provider.';
+        return [];
+    }
+    $data = $r['data'] ?? [];
+
+    // VAD-off recovery for sung intros/outros. faster-whisper's Silero VAD
+    // classifies *singing*/music as non-speech and drops it, so an episode that
+    // ends in a song comes back under-covered and trips the caller's coverage
+    // gate (real case: ~80s sung outro → only 67% covered → both engines
+    // rejected). When pass 1 under-covers AND the uncovered span actually
+    // contains sound (music, not digital silence), retry once with VAD off so
+    // the lyrics get transcribed. Gated on the sound check so a genuinely
+    // silent tail is never re-run (which would only invite hallucination).
+    // Only the faster-whisper /stt route honours vad_filter; other engines
+    // ignore it, so this is a harmless extra pass there — but the sound gate
+    // keeps even that rare. Uses the engine's own reported duration as the
+    // denominator (the file the engine actually saw), independent of the
+    // caller's feed_item_duration_seconds gate.
+    $engineDur = (float)($data['duration'] ?? 0);
+    $lastEnd   = gpuLastSegmentEnd($data);
+    if ($engineDur > 60 && $lastEnd > 0 && ($lastEnd / $engineDur) < 0.80
+        && gpuSpanHasSound($audioPath, $lastEnd, $engineDur)) {
+        error_log(sprintf('gpuWhisperTranscribe: pass1 covered %.0f/%.0fs (%d%%) with audible sound in the gap'
+            . ' — retrying VAD off (model=%s job=%d)', $lastEnd, $engineDur,
+            (int)round(100 * $lastEnd / $engineDur), $model, $jobKey));
+        $r2 = $callEngine(false);
+        if (!empty($r2['ok'])) {
+            $data2    = $r2['data'] ?? [];
+            $lastEnd2 = gpuLastSegmentEnd($data2);
+            if ($lastEnd2 > $lastEnd) {
+                error_log(sprintf('gpuWhisperTranscribe: VAD-off retry improved coverage %.0fs -> %.0fs of %.0fs',
+                    $lastEnd, $lastEnd2, $engineDur));
+                $data = $data2;
+            }
+        }
+    }
+
+    $rows = gpuParseWhisperRows($data, $wantWord, $offsetSecs);
     if (!$rows && !empty($data['text'])) {
         $rows[] = ['segment' => secsToInterval($offsetSecs), 'text' => trim((string)$data['text'])];
     }

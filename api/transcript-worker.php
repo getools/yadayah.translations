@@ -197,6 +197,60 @@ function updateJob(PDO $db, int $jobKey, array $fields): void {
 }
 
 /**
+ * Estimate how long this transcription will take, in seconds.
+ *
+ * Primary signal is HISTORY: completed jobs record their real begin→end time
+ * (job_started_dtime → job_completed_dtime), so we learn each engine's actual
+ * throughput instead of guessing. ETA = this episode's audio duration × the
+ * median (processing ÷ audio) ratio of recent same-model jobs. Falls back to a
+ * per-engine cold-start constant — then to a size-based estimate when audio
+ * duration is unknown — until enough history accrues (e.g. just after the
+ * timing column was added, or for a freshly added engine). The learned ratio
+ * is over total job time, which is what a finish-time ETA should reflect.
+ */
+function estimateTranscriptionEtaSecs(PDO $db, string $family, string $model, int $audioDurSec, float $audioSizeMB): int {
+    // Cold-start real-time factors (processing ÷ audio duration), used until
+    // history exists. GPU runs ~30-50× real-time; the cloud APIs ~8-12×.
+    $coldFactors = [
+        'gpu' => 0.03, 'groq' => 0.05, 'deepgram' => 0.04, 'assemblyai' => 0.06,
+        'openai' => 0.10, 'elevenlabs' => 0.10, 'azure' => 0.12,
+    ];
+    $factor = $coldFactors[$family] ?? 0.10;
+    if ($family === 'gpu' && (strpos($model, 'turbo') !== false || strpos($model, 'parakeet') !== false)) {
+        $factor = 0.02;   // turbo / Parakeet are faster again
+    }
+    // Learn from history when we have enough clean samples for this exact model.
+    try {
+        $st = $db->prepare(
+            "SELECT EXTRACT(EPOCH FROM (j.job_completed_dtime - j.job_started_dtime))
+                      / NULLIF(fi.feed_item_duration_seconds, 0) AS ratio
+               FROM yy_feed_item_transcript_job j
+               JOIN yy_feed_item fi ON fi.feed_item_key = j.feed_item_key
+              WHERE j.job_status = 'complete'
+                AND j.job_model = ?
+                AND j.job_started_dtime IS NOT NULL
+                AND j.job_completed_dtime > j.job_started_dtime
+                AND fi.feed_item_duration_seconds > 0
+              ORDER BY j.job_completed_dtime DESC
+              LIMIT 20");
+        $st->execute([$model]);
+        // Drop outliers (bad/zero data, or jobs that stalled past real-time).
+        $ratios = array_values(array_filter(
+            array_map('floatval', $st->fetchAll(PDO::FETCH_COLUMN)),
+            function ($r) { return $r > 0.001 && $r < 1.0; }));
+        if (count($ratios) >= 3) {
+            sort($ratios);
+            $mid = intdiv(count($ratios), 2);
+            $median = (count($ratios) % 2) ? $ratios[$mid] : ($ratios[$mid - 1] + $ratios[$mid]) / 2;
+            if ($median > 0) $factor = $median;
+        }
+    } catch (Throwable $e) { /* fall back to the cold-start factor */ }
+    return $audioDurSec > 0
+        ? max(10, (int)ceil($audioDurSec * $factor))
+        : max(15, (int)ceil($audioSizeMB * 8));   // no duration → size-based
+}
+
+/**
  * Returns true if this job has been cancelled. Worker should bail when this returns true.
  * Caches a stmt for cheap repeated polling.
  */
@@ -239,6 +293,16 @@ $jobStmt->execute([$jobKey]);
 $job = $jobStmt->fetch();
 if (!$job) { fwrite(STDERR, "Job $jobKey not found\n"); exit(1); }
 if ($job['job_status'] === 'cancelled') exit(0);
+
+// Stamp the begin-processing time the instant THIS worker picks the job up.
+// Timeline columns: job_dtime = queued, job_started_dtime = began, and
+// job_completed_dtime = finished (set on every terminal path below). The
+// NULL guard keeps the original start if a job is ever re-spawned/retried,
+// and makes this independent of the dispatcher's pre-claim 'running' flip.
+$db->prepare("UPDATE yy_feed_item_transcript_job
+                 SET job_started_dtime = NOW()
+               WHERE feed_item_transcript_job_key = ? AND job_started_dtime IS NULL")
+   ->execute([$jobKey]);
 
 $itemKey = (int)$job['feed_item_key'];
 $videoId = $job['feed_item_external_id'];
@@ -714,15 +778,19 @@ if (!$rows && !$wantYoutubeCaptions) {
                 }
                 $methodFailures[] = "$providerFamily: $reason$hint — " . $tail;
             } else {
-                // Estimate Whisper turnaround from audio file size. Whisper-1
-                // typically processes ~10-15× real-time; 64 kbps mp3 ≈ 8 KB/s,
-                // so ~6-8 seconds of API time per MB of audio. We round up and
-                // floor at 15s so very small files still show movement.
+                // Estimate transcription turnaround. Learns each engine's real
+                // throughput from the begin→end times of past completed jobs
+                // (see estimateTranscriptionEtaSecs); until history exists it
+                // uses per-engine constants. The old single "8 s per MB" factor
+                // was calibrated for the OpenAI Whisper API and over-stated the
+                // self-hosted GPU box (~30-50× real-time) by ~3-5× — a 90 s job
+                // advertising a 5 min ETA.
                 $audioSizeMB = filesize($audioPath) / 1024 / 1024;
-                $etaSeconds = max(15, (int)ceil($audioSizeMB * 8));
+                $audioDurSec = (int)($job['feed_item_duration_seconds'] ?? 0);
+                $etaSeconds = estimateTranscriptionEtaSecs($db, $providerFamily, $jobModel, $audioDurSec, $audioSizeMB);
                 updateJob($db, $jobKey, [
                     'job_progress' => 70,
-                    'job_message' => 'Transcribing via Whisper API… (ETA ~' . $etaSeconds . 's)',
+                    'job_message' => 'Transcribing… (ETA ~' . $etaSeconds . 's)',
                 ]);
                 $glossaryPrompt = buildGlossaryPrompt($db);
                 $whisperErr = '';
@@ -849,7 +917,11 @@ if (!$rows && !$wantYoutubeCaptions) {
 // This ensures uploaded VTT/SRT captions and yt-dlp captions both get the
 // same Yahowah/Towrah-style normalization that Whisper output gets.
 if ($rows) {
-    updateJob($db, $jobKey, ['job_progress' => 85, 'job_message' => 'Applying corrections...']);
+    // Surface the segment count the instant transcription returns (it's a
+    // single blocking provider call — no count is knowable before this), so
+    // the queue's running row shows "N segments" through correction + save
+    // instead of an opaque "Transcribing…".
+    updateJob($db, $jobKey, ['job_progress' => 85, 'job_message' => 'Transcribed ' . count($rows) . ' segments — applying corrections...']);
     $rows = applyCorrectionsToRows($db, $rows);
 }
 
@@ -914,10 +986,10 @@ try {
             ? (string)$r['speaker'] : null;
         $insAuto->execute([$itemKey, $r['segment'], mb_substr($r['text'], 0, 2000), $sort, $jobModel, $speaker]);
         $sort++;
-        // Live "K / N segments" tick (every 50 rows) on the side connection so
-        // the admin watches the count climb next to the ETA during long GIN-index
-        // saves. Best-effort; never disturbs the insert transaction.
-        if ($progressUpd && ($sort % 50) === 0) {
+        // Live "K / N segments" tick (every 20 rows + the final row) on the side
+        // connection so the admin watches the count climb next to the ETA during
+        // long GIN-index saves. Best-effort; never disturbs the insert transaction.
+        if ($progressUpd && (($sort % 20) === 0 || $sort === $total)) {
             try {
                 $pct = 90 + (int)floor(9 * $sort / max(1, $total));
                 $progressUpd->execute([$pct, 'Saving ' . $sort . ' / ' . $total . ' segments (model=' . $jobModel . ')...', $jobKey]);
@@ -976,9 +1048,71 @@ updateJob($db, $jobKey, [
 wphase('complete');
 wlog('DONE — ' . count($rows) . ' segments saved for item ' . $itemKey . ' model ' . $jobModel);
 
+// Auto-build the editable (consensus) transcript once this item's baselines are
+// all done — but only when the operator opted the item in, and never over an
+// existing transcript. Best-effort: any failure here is logged, never fatal
+// (the baseline is already marked complete above).
+maybeAutoBuildEditable($db, $itemKey, $jobKey);
+
 // ─────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────
+
+// Auto-enqueue a consensus editable-transcript build for $itemKey when, and
+// only when, ALL of these hold:
+//   • this was the last baseline still in flight for the item,
+//   • the operator opted the item in (yy_feed_item_editable_optin.optin=true),
+//   • the item has NO live transcript yet (never clobber human edits),
+//   • no editable build is already pending/running/done for the item.
+// The consensus uses every baseline model that landed in _auto; the worker
+// picks the spine by its preference list. Detached + staggered (baselines run
+// one-at-a-time), so no worker stampede. Wrapped so a failure can't break the
+// just-completed baseline job.
+function maybeAutoBuildEditable(PDO $db, int $itemKey, int $completedJobKey): void {
+    try {
+        $st = $db->prepare("SELECT COUNT(*) FROM yy_feed_item_transcript_job
+                             WHERE feed_item_key = ? AND job_status IN ('pending','running')
+                               AND feed_item_transcript_job_key <> ?");
+        $st->execute([$itemKey, $completedJobKey]);
+        if ((int)$st->fetchColumn() > 0) return;                 // more baselines still queued
+
+        $st = $db->prepare("SELECT optin::int FROM yy_feed_item_editable_optin WHERE feed_item_key = ?");
+        $st->execute([$itemKey]);
+        if ((int)$st->fetchColumn() !== 1) return;               // not opted in (absent row → off)
+
+        // Overwrite is allowed only when there's no transcript yet, or it's
+        // 'Pending' (consensus-built, not human-edited). 'Editing' is protected.
+        $st = $db->prepare("SELECT (SELECT COUNT(*) FROM yy_feed_item_transcript WHERE feed_item_key = ?) AS rown,
+                                   (SELECT edit_status FROM yy_feed_item_transcript_status WHERE feed_item_key = ?) AS st");
+        $st->execute([$itemKey, $itemKey]);
+        $pr = $st->fetch(PDO::FETCH_ASSOC);
+        if ((int)$pr['rown'] > 0 && (string)($pr['st'] ?? '') !== 'Pending') return;   // protected (Editing) — never overwrite
+
+        $st = $db->prepare("SELECT 1 FROM yy_feed_item_transcript_init_job
+                             WHERE job_item_key = ? AND job_status IN ('pending','running') LIMIT 1");
+        $st->execute([$itemKey]);
+        if ($st->fetchColumn()) return;                          // a build is already pending/running
+
+        $st = $db->prepare("SELECT DISTINCT feed_item_transcript_auto_model
+                              FROM yy_feed_item_transcript_auto WHERE feed_item_key = ?");
+        $st->execute([$itemKey]);
+        $baselines = array_values(array_filter($st->fetchAll(PDO::FETCH_COLUMN)));
+        if (!$baselines) return;                                 // nothing to build from
+
+        $params = ['max_chars' => 42, 'max_lines' => 2, 'max_secs' => 7.0, 'min_secs' => 1.2,
+                   'break_punct' => true, 'break_gap' => 0, 'dedup' => true];
+        $jobParams = json_encode(['baselines' => $baselines, 'primary' => '', 'params' => $params, 'wait_for' => []]);
+        $ins = $db->prepare("INSERT INTO yy_feed_item_transcript_init_job (job_item_key, job_model, job_user_key, job_params)
+                              VALUES (?, 'consensus', NULL, ?) RETURNING job_key");
+        $ins->execute([$itemKey, $jobParams]);
+        $initKey = (int)$ins->fetchColumn();
+        spawnNextInitWorker($db);   // single-worker editable-build queue (one at a time, in order)
+        wlog('auto-build editable: enqueued init job ' . $initKey . ' for item ' . $itemKey
+             . ' (baselines: ' . implode(',', $baselines) . ')');
+    } catch (\Throwable $e) {
+        wlog('auto-build editable: skipped item ' . $itemKey . ' (' . $e->getMessage() . ')');
+    }
+}
 
 function parseVtt(string $content): array {
     $rows = [];

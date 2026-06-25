@@ -7,7 +7,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 
 $pdo = getDb();
 $stmt = $pdo->query("
-    SELECT cite_book_key, cite_book_hebrew, cite_book_common, cite_book_sort, yah_scroll_key
+    SELECT cite_book_key, cite_book_hebrew, cite_book_common, cite_book_sort
     FROM yy_cite_book
     ORDER BY cite_book_sort ASC, cite_book_hebrew ASC
 ");

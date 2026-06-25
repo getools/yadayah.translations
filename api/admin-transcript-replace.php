@@ -173,6 +173,15 @@ if ($action === 'apply') {
         jsonResponse(['changed' => 0, 'message' => 'No rows selected.']);
     }
 
+    // Attribution: only the transcript the admin is actively editing
+    // (current_item_key) is credited to them. Every OTHER transcript swept up
+    // by a global replace is an automated/ancillary edit → user_key 0, so it is
+    // not mistaken for a hand-edit (and never wrongly marked 'Editing').
+    $currentKey = (isset($data['current_item_key']) && is_numeric($data['current_item_key'])) ? (int)$data['current_item_key'] : 0;
+    $logUserFor = function ($fik) use ($user, $currentKey) {
+        return ((int)$fik === $currentKey && $currentKey > 0) ? (int)$user['user_key'] : 0;
+    };
+
     // Decide which apply strategy to use. A pattern is "cross-row capable"
     // when matches could legitimately span row boundaries — any regex, or a
     // literal find string containing whitespace. For those we rewrite the
@@ -238,7 +247,7 @@ if ($action === 'apply') {
                 $newClipped = mb_substr($r['new_text'], 0, 2000);
                 $logStmt->execute([
                     $r['feed_item_key'], $r['segment'], $r['old_text'], $newClipped,
-                    $user['user_key'], $batchKey
+                    $logUserFor($r['feed_item_key']), $batchKey
                 ]);
                 $updStmt->execute([$newClipped, $r['feed_item_transcript_key']]);
                 $changed++;
@@ -312,14 +321,14 @@ if ($action === 'apply') {
                         $keptKeys[$nk] = true;
                         if ($origByKey[$nk] !== $rowText) {
                             // text changed → UPDATE this row only (minimal GIN churn)
-                            $logStmt->execute([$ik, $nr['segment'], $origByKey[$nk], $rowText, $user['user_key'], $batchKey]);
+                            $logStmt->execute([$ik, $nr['segment'], $origByKey[$nk], $rowText, $logUserFor($ik), $batchKey]);
                             $rowsForAutoLearn[] = ['old_text' => $origByKey[$nk], 'new_text' => $rowText];
                             $updRowStmt->execute([$rowText, $sort, $user['user_key'], $nk, $ik]);
                             $changed++;
                         }
                     } else {
                         // merged/new row → INSERT
-                        $logStmt->execute([$ik, $nr['segment'], null, $rowText, $user['user_key'], $batchKey]);
+                        $logStmt->execute([$ik, $nr['segment'], null, $rowText, $logUserFor($ik), $batchKey]);
                         $insStmt->execute([$ik, $nr['segment'], $rowText, $sort, $user['user_key']]);
                         $changed++;
                     }
@@ -329,7 +338,7 @@ if ($action === 'apply') {
                 foreach ($origRows as $or) {
                     $ok = (int)$or['key'];
                     if (!isset($keptKeys[$ok])) {
-                        $logStmt->execute([$ik, $or['segment'], $or['text'], '', $user['user_key'], $batchKey]);
+                        $logStmt->execute([$ik, $or['segment'], $or['text'], '', $logUserFor($ik), $batchKey]);
                         $delRowStmt->execute([$ok, $ik]);
                         $changed++;
                     }

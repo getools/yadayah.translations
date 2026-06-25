@@ -10,6 +10,7 @@ if (session_status() === PHP_SESSION_NONE) session_start();
 $userKey = $_SESSION['user_key'] ?? null;
 if (!$userKey) errorResponse('Login required', 401);
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') errorResponse('Method not allowed', 405);
+denyIfBanned('Chat'); // banned users stay logged in, but can't upload to Chat
 
 if (empty($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
     errorResponse('No file uploaded or upload error');

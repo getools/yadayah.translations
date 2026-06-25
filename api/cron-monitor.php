@@ -296,9 +296,11 @@ try {
     }
 
     // Check disk usage (table bloat indicator)
+    // Threshold 50000 + skip tables autovacuum handled in last 2h (those are fine)
     $deadRows = $db->query("
         SELECT relname, n_dead_tup FROM pg_stat_user_tables
-        WHERE n_dead_tup > 10000
+        WHERE n_dead_tup > 50000
+          AND (last_autovacuum IS NULL OR last_autovacuum < NOW() - interval '2 hours')
         ORDER BY n_dead_tup DESC LIMIT 5
     ")->fetchAll();
     foreach ($deadRows as $t) {

@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782136811">
+    <meta name="page-version" content="1782367203">
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Record — Yada Yah</title>
@@ -580,7 +580,7 @@
         var st = e && e.data;
         var rec = !!(recorder && recorder.state === 'recording');
         if (st === 1) {
-            if (rec) { setStatus('🔴 Recording — capturing tab audio…'); updateControls(); return; }
+            if (rec) { setStatus('🔴 Recording'); updateControls(); return; }
             // Stream cached and live? Begin recording NOW — at the exact
             // moment YT reports the video is actually playing. No buffer or
             // seek silence gets captured because the recorder didn't exist
@@ -726,7 +726,7 @@
         // Authoritative status update so any stale prompt-related text
         // ("Requesting tab share permission…", "Loading video…", etc.) is
         // replaced once the recorder is actually running.
-        setStatus('🔴 Recording — capturing tab audio…');
+        setStatus('🔴 Recording');
         $('audio-warn').style.display = 'none';
         updateControls();
     }

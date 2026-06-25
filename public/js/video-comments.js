@@ -17,6 +17,17 @@ var _configPromise = null;
 var _sessionUser = null;
 var _sessionChecked = false;
 
+// Current user (prefer the community singleton, fall back to our own fetch).
+function _vcUser() {
+    try { if (typeof Community !== 'undefined' && Community.currentUser) return Community.currentUser; } catch (e) {}
+    return _sessionUser;
+}
+// A banned user stays logged in but gets NO interface to leave comments. Silent.
+function _vcBanned() {
+    var u = _vcUser();
+    return !!(u && u.banned);
+}
+
 function _loadConfig() {
     // Fetch config and session in parallel
     var p1 = fetch('/api/site-config.php').then(function(r) { return r.json(); }).then(function(cfg) {
@@ -160,7 +171,7 @@ VideoComments._doLoad = function() {
                 if (!isRemoved) {
                     html += '<div class="vc-comment-meta">';
                     html += '<button id="vc-like-' + c.comment_key + '" class="' + (liked ? 'liked' : '') + '" onclick="VideoComments.like(' + c.comment_key + ')"><span class="vc-heart">' + (liked ? '&#9829;' : '&#9825;') + '</span> <span class="vc-like-count">' + (c.comment_like_count || 0) + '</span></button>';
-                    if (isAuthor) html += '<button onclick="VideoComments.edit(' + c.comment_key + ')">Edit</button>';
+                    if (isAuthor && !_vcBanned()) html += '<button onclick="VideoComments.edit(' + c.comment_key + ')">Edit</button>';
                     if (isAuthor || isMod) html += '<button onclick="VideoComments.remove(' + c.comment_key + ')">Remove</button>';
                     if (isMod && !isAuthor) html += '<button onclick="VideoComments.ban(' + c.user_key + ',\'' + esc(c.user_display_name || '') + '\')" style="color:#c0392b;">Ban</button>';
                     html += '</div>';
@@ -172,7 +183,7 @@ VideoComments._doLoad = function() {
 
         var composeArea = _inlineTarget ? body : document.getElementById('vc-compose-area');
         var composeHtml = '';
-        if (user) {
+        if (user && !user.banned) {
             // The compose box carries its own thread context in data-*
             // attributes and uses a CLASS (not a shared id) for the textarea.
             // The blog renders one inline thread per post, so a fixed
@@ -189,9 +200,10 @@ VideoComments._doLoad = function() {
                 + ' data-target="'    + (_inlineTarget ? escAttr(_inlineTarget.id) : '') + '">'
                 + '<textarea class="vc-input" placeholder="Add a comment..." rows="2"></textarea>'
                 + '<button class="vc-submit-btn" onclick="VideoComments.submit(this)">' + esc(_saveText) + '</button></div>';
-        } else {
+        } else if (!user) {
             composeHtml = '<div class="vc-signin"><a href="javascript:void(0)" onclick="if(typeof CommunityAuth!==\'undefined\')CommunityAuth.openLoginModal(\'login\')">Sign in</a> to comment</div>';
         }
+        // Banned (logged in): no compose box, no sign-in prompt — silent.
         if (_inlineTarget) {
             body.innerHTML += composeHtml;
         } else {
@@ -239,6 +251,7 @@ function _resetComposeUI(box, clearInput) {
 // so multiple open threads on the blog don't collide on a shared id.
 VideoComments.submit = function(btn) {
     if (_submitting) return;
+    if (_vcBanned()) return; // banned: silent
     var box = (btn && btn.closest) ? btn.closest('.vc-compose') : document.querySelector('.vc-compose');
     var input = box ? box.querySelector('.vc-input') : null;
     if (!input) return;
@@ -299,6 +312,7 @@ VideoComments.remove = function(ck) {
 };
 
 VideoComments.edit = function(ck) {
+    if (_vcBanned()) return; // banned: silent
     var bodyEl = document.getElementById('vc-body-' + ck);
     if (!bodyEl) return;
     var current = bodyEl.textContent || bodyEl.innerText;
@@ -311,6 +325,7 @@ VideoComments.edit = function(ck) {
 };
 
 VideoComments.saveEdit = function(ck) {
+    if (_vcBanned()) return; // banned: silent
     var input = document.getElementById('vc-edit-' + ck);
     if (!input) return;
     var body = input.value.trim();

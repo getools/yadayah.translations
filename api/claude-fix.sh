@@ -51,8 +51,10 @@ if [ -z "${HOME:-}" ] || [ ! -d "${HOME}/.claude" ]; then
 fi
 mkdir -p "$HOME/.claude"
 
-# Resource & safety limits
-TIMEOUT_SECS=1500
+# Resource & safety limits. The host runner (claude-fix-runner.sh) exports
+# TIMEOUT_SECS from the admin Settings value; honor it when present, else the
+# default below. Runner also wraps us in its own `timeout` as a backstop.
+TIMEOUT_SECS="${TIMEOUT_SECS:-1500}"
 
 # Fetch error details. Use direct psql if available (when running inside the
 # web container); fall back to `docker exec` against the postgres container
@@ -135,9 +137,24 @@ echo "[$(date -u +%FT%TZ)] claude-fix starting event $EVENT_KEY (CODE_ROOT=$CODE
 # Ask Yada). Strip any inherited ANTHROPIC_API_KEY so a stray env var can't
 # silently re-enable the API path.
 unset ANTHROPIC_API_KEY CLAUDE_USE_API_KEY
-if [ ! -s "$HOME/.claude/.credentials.json" ]; then
-    echo "[$(date -u +%FT%TZ)] OAuth credentials missing at $HOME/.claude/.credentials.json — refusing to run." >> "$LOG_FILE"
-    echo "[$(date -u +%FT%TZ)] Refresh via: sudo -u claudefix HOME=$HOME claude login" >> "$LOG_FILE"
+# Two OAuth (subscription) mechanisms are accepted, in priority order:
+#   1. A long-lived token from `claude setup-token`, stored at
+#      $HOME/.claude/oauth_token and exported as CLAUDE_CODE_OAUTH_TOKEN.
+#      This is OAuth, NOT the Anthropic API key, so it honors the rule above.
+#      Preferred for unattended runs: it does not expire for ~1 year, sidestep-
+#      ping the stored-session refresh that broke when refreshToken went empty.
+#   2. The interactive session file $HOME/.claude/.credentials.json (from
+#      `claude login`).
+# Both are installed from the admin Settings → Auto-Fix → Authentication panel
+# (api/admin-autofix-auth.php → host claude-auth-helper.sh). The env-var token
+# takes precedence over the stored session when present.
+TOKEN_FILE="$HOME/.claude/oauth_token"
+if [ -s "$TOKEN_FILE" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$TOKEN_FILE")"
+fi
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ ! -s "$HOME/.claude/.credentials.json" ]; then
+    echo "[$(date -u +%FT%TZ)] No OAuth auth: neither $TOKEN_FILE nor $HOME/.claude/.credentials.json present — refusing to run." >> "$LOG_FILE"
+    echo "[$(date -u +%FT%TZ)] Fix from admin Settings → Auto-Fix → Authentication, or: sudo -u claudefix HOME=$HOME claude login" >> "$LOG_FILE"
     exit 2
 fi
 
@@ -160,9 +177,12 @@ fi
 
 # Timeout-wrapped claude invocation. NO --bare flag — that would force the
 # API-key auth path; we want OAuth/subscription auth only.
+# --dangerously-skip-permissions ACTUALLY bypasses permission checks. The
+# --allow- variant only makes bypass *available*, so in -p mode Edit/Bash were
+# auto-denied ("sandbox-denied") and the agent could diagnose but never fix.
 timeout "$TIMEOUT_SECS" claude \
     "${CLAUDE_ADD_DIRS[@]}" \
-    --allow-dangerously-skip-permissions \
+    --dangerously-skip-permissions \
     -p "$PROMPT" \
     >> "$LOG_FILE" 2>&1
 RC=$?

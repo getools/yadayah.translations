@@ -254,6 +254,7 @@ if ($method === 'POST') {
     }
 
     if ($action === 'edit') {
+        checkBanned($db, $userKey); // banned users can't edit comments either
         $commentKey = (int)($data['comment_key'] ?? 0);
         $body = trim($data['body'] ?? '');
         $bodyHtml = isset($data['body_html']) ? sanitizeHtml($data['body_html']) : null;

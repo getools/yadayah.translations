@@ -24,7 +24,11 @@
     /The operation was aborted\./i,
     // bg-video.js calls videos[i].load() during a <source> swap which
     // aborts the previous in-flight fetch — expected browser behavior.
-    /The fetching process for the media resource was aborted/i
+    /The fetching process for the media resource was aborted/i,
+    // Admin session expiry — api() helper in admin pages rethrows 401 as
+    // unhandled rejection; expired session is expected, not a code bug.
+    /Authentication required/i,
+    /^401:/i
   ];
 
   // Files whose errors we should not report (third-party bundles)

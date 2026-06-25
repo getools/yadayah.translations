@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782136813">
+    <meta name="page-version" content="1782367203">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Ask Yada</title>
@@ -236,7 +236,7 @@
         }
 
     </style>
-<script src="/js/site-nav.js?v=53"></script>
+<script src="/js/site-nav.js?v=54"></script>
 </head>
 <body>
 
@@ -314,6 +314,20 @@ Promise.all([
     if (isOffline) {
         chatInput.style.display = 'none';
         signinBar.style.display = 'none';
+    } else if (session.user && session.user.banned) {
+        // Banned user stays logged in, but Ask Yada is closed to them: hide the
+        // input/sign-in and show the existing configurable ban message in place
+        // of the welcome. Copy is NOT explicit about a ban. The flag is honored
+        // by the page-ask-config script below so it can't overwrite this copy.
+        window.__askBanned = true;
+        chatInput.style.display = 'none';
+        signinBar.style.display = 'none';
+        var topicsEl = document.getElementById('topics');
+        if (topicsEl) topicsEl.style.display = 'none';
+        var titleEl = document.getElementById('ask-title');
+        var sumEl = document.getElementById('ask-summary');
+        if (titleEl) titleEl.textContent = cfg['ban-title'] || 'Access Denied';
+        if (sumEl) sumEl.innerHTML = cfg['ban-message'] || 'You are not permitted to use this service.';
     } else if (session.user) {
         chatInput.style.display = '';
         signinBar.style.display = 'none';
@@ -614,6 +628,13 @@ function sendMessage() {
     document.querySelectorAll('[data-config]').forEach(function(el){var k=el.getAttribute('data-config');if(cfg[k]!=null)el.textContent=cfg[k];});
 });})();
 (function(){fetch('/api/page-ask-config.php').then(function(r){return r.json();}).then(function(cfg){
+    // Banned users: show the configurable ban copy and never the normal title/
+    // summary (this fetch races the session check above; the flag wins).
+    if(window.__askBanned){
+        var bt=document.getElementById('ask-title');if(bt)bt.textContent=cfg['ban-title']||'Access Denied';
+        var bs=document.getElementById('ask-summary');if(bs)bs.innerHTML=cfg['ban-message']||'You are not permitted to use this service.';
+        return;
+    }
     if(cfg.title){var t=document.getElementById('ask-title');if(t)t.textContent=cfg.title;}
     var s=document.getElementById('ask-summary');
     if(s){

@@ -6,7 +6,7 @@
 if (!document.getElementById('error-reporter-js')) {
     var s = document.createElement('script');
     s.id = 'error-reporter-js';
-    s.src = '/js/error-reporter.js?v=1';
+    s.src = '/js/error-reporter.js?v=5';
     document.head.appendChild(s);
 }
 
@@ -61,6 +61,7 @@ var tabs = [
     ['admin-test.html', 'Tests'],
     ['admin-monitoring.html', 'Monitor'],
     ['admin-perf.html', 'Reports', 'Performance + future reports (response times, host CPU steal, DB load).'],
+    ['admin-settings.html', 'Settings', 'System settings — Auto-Fix cadence, resource caps, run timeout, and pause.'],
     ['admin-search.html', 'Search'],
     ['admin-misc.html', 'Misc']
 ];

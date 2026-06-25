@@ -112,7 +112,8 @@ if ($action === 'section_categories' && $method === 'GET') {
     $sectionKey = (int)($_GET['section_key'] ?? 0);
     if (!$sectionKey) errorResponse('section_key required');
     $st = $db->prepare("
-        SELECT yc.category_key, yc.category_title, yc.category_subtitle, yc.category_slug, yc.category_sort,
+        SELECT yc.category_key, yc.category_title, yc.category_subtitle, yc.category_slug,
+               yc.category_description, yc.category_sort,
                COALESCE((
                    SELECT COUNT(*) FROM yy_feed_item_category fic
                      JOIN yy_feed_item fi ON fi.feed_item_key = fic.feed_item_key
@@ -135,9 +136,13 @@ if ($action === 'section_category' && $method === 'POST') {
     $title = trim($d['category_title'] ?? '');
     if ($title === '') errorResponse('Category title is required');
     $sub  = trim($d['category_subtitle'] ?? '');
+    $desc = trim($d['category_description'] ?? '');
     $sort = (int)($d['category_sort'] ?? 0);
-    $st = $db->prepare("INSERT INTO yy_category (section_key, category_title, category_subtitle, category_slug, category_sort) VALUES (?, ?, ?, ?, ?) RETURNING category_key");
-    $st->execute([$sectionKey, $title, $sub ?: null, tslug($title), $sort]);
+    // Slug defaults to a slugified title but may be supplied explicitly.
+    $slug = isset($d['category_slug']) && trim($d['category_slug']) !== ''
+        ? tslug($d['category_slug']) : tslug($title);
+    $st = $db->prepare("INSERT INTO yy_category (section_key, category_title, category_subtitle, category_slug, category_description, category_sort) VALUES (?, ?, ?, ?, ?, ?) RETURNING category_key");
+    $st->execute([$sectionKey, $title, $sub ?: null, $slug, $desc ?: null, $sort]);
     jsonResponse(['saved' => true, 'category_key' => (int)$st->fetchColumn()]);
 }
 
@@ -145,12 +150,22 @@ if ($action === 'section_category' && $method === 'PUT') {
     if (!$key) errorResponse('category key required');
     $d = json_decode(file_get_contents('php://input'), true) ?: [];
     $f = []; $p = [];
+    // Title and slug are now independently editable. Updating the title no
+    // longer rewrites the slug; the slug is only changed when sent explicitly.
     if (isset($d['category_title'])) {
         $f[] = 'category_title = ?'; $p[] = trim($d['category_title']);
-        $f[] = 'category_slug = ?';  $p[] = tslug($d['category_title']);
+    }
+    if (array_key_exists('category_slug', $d)) {
+        // Normalise to a valid slug; fall back to the title's slug if cleared.
+        $slug = tslug($d['category_slug']);
+        if ($slug === '' && isset($d['category_title'])) $slug = tslug($d['category_title']);
+        $f[] = 'category_slug = ?'; $p[] = $slug;
     }
     if (array_key_exists('category_subtitle', $d)) {
         $f[] = 'category_subtitle = ?'; $p[] = trim($d['category_subtitle']) ?: null;
+    }
+    if (array_key_exists('category_description', $d)) {
+        $f[] = 'category_description = ?'; $p[] = trim($d['category_description']) ?: null;
     }
     if (isset($d['category_sort'])) {
         $f[] = 'category_sort = ?'; $p[] = (int)$d['category_sort'];

@@ -11,6 +11,7 @@ if (session_status() === PHP_SESSION_NONE) session_start();
 $userKey = $_SESSION['user_key'] ?? null;
 if (!$userKey) errorResponse('Login required', 401);
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') errorResponse('Method not allowed', 405);
+denyIfBanned('Chat'); // banned users stay logged in, but can't upload to Chat
 
 $db = getDb();
 $destDir = __DIR__ . '/../u/community';

@@ -49,7 +49,7 @@ if ($method === 'GET' && $action === 'catalog') {
           FROM yy_provider
          WHERE provider_active_flag = TRUE
            AND (provider_settings->>'engine' IS NOT NULL OR provider_key = 1)
-         ORDER BY provider_key
+         ORDER BY provider_sort, provider_label
     ")->fetchAll(PDO::FETCH_ASSOC);
     jsonResponse([
         'voices'     => azureVoiceCatalog(),
@@ -60,7 +60,7 @@ if ($method === 'GET' && $action === 'catalog') {
 }
 
 if ($method === 'GET' && $action === 'overview') {
-    $systems = $db->query("SELECT * FROM yy_tts WHERE tts_active_flag = TRUE ORDER BY tts_sort, tts_key")->fetchAll();
+    $systems = $db->query("SELECT * FROM yy_tts WHERE tts_active_flag = TRUE ORDER BY tts_sort, tts_name")->fetchAll();
     $ttsKey = (int)($_GET['tts_key'] ?? ($systems[0]['tts_key'] ?? 0));
     // Optional profile selection — UI passes the profile_key the user is
     // viewing/editing. Omitted = default profile for this tts_key.
@@ -193,8 +193,9 @@ if ($action === 'delete_profile') {
 if ($method === 'GET' && $action === 'tunes') {
     $ttsKey = (int)($_GET['tts_key'] ?? 0);
     if (!$ttsKey) errorResponse('tts_key required');
-    $stmt = $db->prepare("SELECT * FROM yy_tts_tune WHERE tts_key = ? ORDER BY tts_tune_sort, tts_tune_print");
-    $stmt->execute([$ttsKey]);
+    // Show ALL pronunciation records — the lexicon is shared across engines,
+    // so the list isn't filtered by the selected engine (no per-tab filters).
+    $stmt = $db->query("SELECT * FROM yy_tts_tune ORDER BY tts_tune_sort, tts_tune_print");
     jsonResponse(['rows' => $stmt->fetchAll()]);
 }
 
@@ -285,6 +286,7 @@ if ($method === 'GET' && $action === 'list_providers') {
         SELECT p.provider_key, p.provider_label, p.provider_main,
                p.provider_phonetic_type, p.provider_active_flag,
                p.provider_custom_voice_flag,
+               p.provider_phonetic_capable, p.provider_ipa_capable,
                p.provider_settings ->> 'engine' AS provider_engine_code,
                p.provider_settings -> 'chunk'   AS provider_chunk,
                (p.provider_settings ->> 'always_async') AS provider_always_async,
@@ -484,6 +486,17 @@ if ($action === 'save_tune') {
         $tuneKey = (int)$ins->fetchColumn();
         $cloned  = true;
     } elseif ($tuneKey > 0) {
+        // If renaming print or changing voice_code would land on a tuple already
+        // held by another row, delete that row first (mirrors ON CONFLICT DO UPDATE).
+        $clearColliding = $db->prepare("
+            DELETE FROM yy_tts_tune
+             WHERE tts_key = ?
+               AND tts_tune_print = ?
+               AND COALESCE(tts_tune_voice_code, '') = COALESCE(?, '')
+               AND tts_tune_key != ?
+        ");
+        $clearColliding->execute([$ttsKey, $print, $voiceCode, $tuneKey]);
+
         $stmt = $db->prepare("
             UPDATE yy_tts_tune
                SET tts_tune_print = ?, tts_tune_phonetic = ?,
@@ -644,6 +657,12 @@ if ($action === 'save_provider') {
         'provider_active_flag' => $boolToInt,
         // Whether custom voices can be trained/cloned for this provider.
         'provider_custom_voice_flag' => $boolToInt,
+        // Pronunciation CAPABILITY flags (distinct from the phonetic_type
+        // preference above): does this engine actually consume the SUB
+        // respelling / IPA at synth time. The Pronunciations tab gates its
+        // IPA<->Phonetic column toggle on these.
+        'provider_phonetic_capable' => $boolToInt,
+        'provider_ipa_capable' => $boolToInt,
     ];
     $sets = [];
     $params = [];

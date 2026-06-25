@@ -37,6 +37,31 @@ try {
     $cfg = loadTtsConfig($db, (int)$job['job_tts_key']);
     if (empty($cfg['system'])) throw new Exception('unknown tts_key ' . $job['job_tts_key']);
 
+    // Per-row ▶ override: replace the loaded tunes with the single synthetic
+    // rule the operator was auditioning, so the worker speaks exactly what's
+    // typed (matches admin-tts-preview.php's synchronous tune_override path).
+    // Without this, long / always-async previews silently re-derive tunes from
+    // the DB and ignore the on-screen edits.
+    if (!empty($job['job_tune_override'])) {
+        $to = json_decode((string)$job['job_tune_override'], true);
+        if (is_array($to)) {
+            $cfg['tunes'] = [[
+                'tts_tune_key'           => 999999,
+                'tts_tune_print'         => (string)($to['print'] ?? ''),
+                'tts_tune_phonetic'      => '',
+                'tts_tune_phonetic_sub'  => (string)($to['sub']  ?? ''),
+                'tts_tune_phonetic_ipa'  => (string)($to['ipa']  ?? ''),
+                'tts_tune_phonetic_sapi' => '',
+                'tts_tune_phonetic_type' => in_array(($to['type'] ?? 'sub'), ['sub','ipa','sapi'], true) ? $to['type'] : 'sub',
+                'tts_tune_active_flag'   => true,
+                'tts_tune_match_bold'    => false,
+                'tts_tune_match_italic'  => false,
+                'tts_tune_seed_min'      => isset($to['seed']) && $to['seed'] !== '' ? (int)$to['seed'] : 0,
+                'tts_tune_seed_max'      => isset($to['seed']) && $to['seed'] !== '' ? (int)$to['seed'] : 0,
+            ]];
+        }
+    }
+
     $category = (string)($job['job_category'] ?: 'main');
     // Splice the chosen voice into every category so the whole utterance reads
     // in that one voice — same as the synchronous endpoint's override path.

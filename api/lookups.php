@@ -21,26 +21,26 @@ $TABLES = [
         ],
         'display' => "yah_scroll_label_yy || ' / ' || yah_scroll_label_common",
     ],
-    'yah_chapter' => [
-        'pk' => 'yah_chapter_key',
-        'order' => '(SELECT s.yah_scroll_sort FROM yah_scroll s WHERE s.yah_scroll_key = yah_chapter.yah_scroll_key) ASC, (SELECT s.yah_scroll_label_yy FROM yah_scroll s WHERE s.yah_scroll_key = yah_chapter.yah_scroll_key) ASC, yah_chapter_sort ASC, yah_chapter_number ASC',
+    'yy_cite_chapter' => [
+        'pk' => 'cite_chapter_key',
+        'order' => '(SELECT cb.cite_book_sort FROM yy_cite_book cb WHERE cb.cite_book_key = yy_cite_chapter.cite_book_key) ASC, (SELECT cb.cite_book_hebrew FROM yy_cite_book cb WHERE cb.cite_book_key = yy_cite_chapter.cite_book_key) ASC, cite_chapter_sort ASC, cite_chapter_number ASC',
         'columns' => [
-            ['name' => 'yah_chapter_key',    'label' => 'Key',     'type' => 'pk'],
-            ['name' => 'yah_scroll_key',     'label' => 'Scroll',  'type' => 'fk', 'fk_table' => 'yah_scroll'],
-            ['name' => 'yah_chapter_number',  'label' => 'Number',  'type' => 'int'],
-            ['name' => 'yah_chapter_sort',   'label' => 'Sort',    'type' => 'int'],
+            ['name' => 'cite_chapter_key',    'label' => 'Key',     'type' => 'pk'],
+            ['name' => 'cite_book_key',      'label' => 'Book',    'type' => 'fk', 'fk_table' => 'yy_cite_book'],
+            ['name' => 'cite_chapter_number',  'label' => 'Number',  'type' => 'int'],
+            ['name' => 'cite_chapter_sort',   'label' => 'Sort',    'type' => 'int'],
         ],
     ],
-    'yah_verse' => [
-        'pk' => 'yah_verse_key',
-        'select' => "yah_verse.*, (SELECT s.yah_scroll_label_yy || ' / ' || s.yah_scroll_label_common FROM yah_scroll s JOIN yah_chapter c ON c.yah_scroll_key = s.yah_scroll_key WHERE c.yah_chapter_key = yah_verse.yah_chapter_key) AS scroll_label, (SELECT c.yah_chapter_number FROM yah_chapter c WHERE c.yah_chapter_key = yah_verse.yah_chapter_key) AS chapter_number",
-        'order' => '(SELECT s.yah_scroll_sort FROM yah_scroll s JOIN yah_chapter c ON c.yah_scroll_key = s.yah_scroll_key WHERE c.yah_chapter_key = yah_verse.yah_chapter_key) ASC, (SELECT s.yah_scroll_label_yy FROM yah_scroll s JOIN yah_chapter c ON c.yah_scroll_key = s.yah_scroll_key WHERE c.yah_chapter_key = yah_verse.yah_chapter_key) ASC, (SELECT c.yah_chapter_sort FROM yah_chapter c WHERE c.yah_chapter_key = yah_verse.yah_chapter_key) ASC, (SELECT c.yah_chapter_number FROM yah_chapter c WHERE c.yah_chapter_key = yah_verse.yah_chapter_key) ASC, yah_verse_sort ASC, yah_verse_number ASC',
+    'yy_cite_verse' => [
+        'pk' => 'cite_verse_key',
+        'select' => "yy_cite_verse.*, (SELECT cb.cite_book_hebrew || ' / ' || cb.cite_book_common FROM yy_cite_book cb JOIN yy_cite_chapter c ON c.cite_book_key = cb.cite_book_key WHERE c.cite_chapter_key = yy_cite_verse.cite_chapter_key) AS scroll_label, (SELECT c.cite_chapter_number FROM yy_cite_chapter c WHERE c.cite_chapter_key = yy_cite_verse.cite_chapter_key) AS chapter_number",
+        'order' => '(SELECT cb.cite_book_sort FROM yy_cite_book cb JOIN yy_cite_chapter c ON c.cite_book_key = cb.cite_book_key WHERE c.cite_chapter_key = yy_cite_verse.cite_chapter_key) ASC, (SELECT cb.cite_book_hebrew FROM yy_cite_book cb JOIN yy_cite_chapter c ON c.cite_book_key = cb.cite_book_key WHERE c.cite_chapter_key = yy_cite_verse.cite_chapter_key) ASC, (SELECT c.cite_chapter_sort FROM yy_cite_chapter c WHERE c.cite_chapter_key = yy_cite_verse.cite_chapter_key) ASC, (SELECT c.cite_chapter_number FROM yy_cite_chapter c WHERE c.cite_chapter_key = yy_cite_verse.cite_chapter_key) ASC, cite_verse_sort ASC, cite_verse_number ASC',
         'columns' => [
-            ['name' => 'yah_verse_key',     'label' => 'Key',     'type' => 'pk'],
+            ['name' => 'cite_verse_key',     'label' => 'Key',     'type' => 'pk'],
             ['name' => 'scroll_label',      'label' => 'Scroll',  'type' => 'readonly'],
             ['name' => 'chapter_number',    'label' => 'Chapter', 'type' => 'readonly'],
-            ['name' => 'yah_verse_number',  'label' => 'Verse',   'type' => 'int'],
-            ['name' => 'yah_verse_sort',    'label' => 'Sort',    'type' => 'int'],
+            ['name' => 'cite_verse_number',  'label' => 'Verse',   'type' => 'int'],
+            ['name' => 'cite_verse_sort',    'label' => 'Sort',    'type' => 'int'],
         ],
     ],
     'yy_chapter' => [
@@ -91,7 +91,6 @@ $TABLES = [
         'order' => 'cite_book_sort ASC, cite_book_key ASC',
         'columns' => [
             ['name' => 'cite_book_key',            'label' => 'ID',             'type' => 'pk'],
-            ['name' => 'yah_scroll_key',          'label' => 'Scroll',         'type' => 'fk', 'fk_table' => 'yah_scroll'],
             ['name' => 'cite_book_hebrew',        'label' => 'Hebrew Name',    'type' => 'hebrew'],
             ['name' => 'cite_book_common',        'label' => 'Common Name',    'type' => 'text'],
             ['name' => 'cite_book_definition',    'label' => 'Definition',     'type' => 'textarea'],

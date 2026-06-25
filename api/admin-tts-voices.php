@@ -218,7 +218,7 @@ if ($action === 'refresh') {
         $sysStmt = $db->prepare("SELECT * FROM yy_tts WHERE tts_key = ?");
         $sysStmt->execute([$ttsKey]);
     } else {
-        $sysStmt = $db->query("SELECT * FROM yy_tts WHERE tts_active_flag = TRUE ORDER BY tts_sort, tts_key");
+        $sysStmt = $db->query("SELECT * FROM yy_tts WHERE tts_active_flag = TRUE ORDER BY tts_sort, tts_name");
     }
     $systems = $sysStmt->fetchAll();
     if (!$systems) errorResponse('no providers to refresh');

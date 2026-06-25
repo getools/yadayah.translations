@@ -28,24 +28,24 @@ function handleGet(PDO $db, array $user): void {
         $stmt = $db->query("
             SELECT
                 t.translation_key,
-                t.yah_scroll_key, t.yah_chapter_key, t.yah_verse_key,
+                t.cite_book_key, t.cite_chapter_key, t.cite_verse_key,
                 t.series_key, t.volume_key, t.chapter_key,
-                s.yah_scroll_label_yy, s.yah_scroll_label_common,
-                c.yah_chapter_number, v.yah_verse_number,
+                cb.cite_book_hebrew, cb.cite_book_common,
+                c.cite_chapter_number, v.cite_verse_number,
                 COALESCE(ser.series_label, ser.series_name) AS series_display,
                 vol.volume_label AS volume_display,
                 t.translation_page,
                 t.translation_paragraph,
                 ych.chapter_number AS yy_ch_number,
-                s.yah_scroll_sort, ser.series_sort, vol.volume_number, ych.chapter_sort
+                cb.cite_book_sort, ser.series_sort, vol.volume_number, ych.chapter_sort
             FROM yy_translation t
-            JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
-            JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
-            JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
+            JOIN yy_cite_book cb ON cb.cite_book_key = t.cite_book_key
+            JOIN yy_cite_chapter c ON c.cite_chapter_key = t.cite_chapter_key
+            JOIN yy_cite_verse v ON v.cite_verse_key = t.cite_verse_key
             JOIN yy_series ser ON ser.series_key = t.series_key
             JOIN yy_volume vol ON vol.volume_key = t.volume_key
             LEFT JOIN yy_chapter ych ON ych.chapter_key = t.chapter_key
-            ORDER BY s.yah_scroll_sort, c.yah_chapter_number, v.yah_verse_number,
+            ORDER BY cb.cite_book_sort, c.cite_chapter_number, v.cite_verse_number,
                      ser.series_sort, vol.volume_number, ych.chapter_sort, t.translation_page
         ");
         jsonResponse($stmt->fetchAll());
@@ -55,14 +55,14 @@ function handleGet(PDO $db, array $user): void {
     if (isset($_GET['translation_key']) && ctype_digit($_GET['translation_key'])) {
         $stmt = $db->prepare("
             SELECT t.*,
-                s.yah_scroll_label_yy, s.yah_scroll_label_common,
-                c.yah_chapter_number, v.yah_verse_number,
+                cb.cite_book_hebrew, cb.cite_book_common,
+                c.cite_chapter_number, v.cite_verse_number,
                 ser.series_name, vol.volume_label, vol.volume_number,
                 ych.chapter_number AS yy_ch_number, ych.chapter_name AS yy_ch_name
             FROM yy_translation t
-            JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
-            JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
-            JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
+            JOIN yy_cite_book cb ON cb.cite_book_key = t.cite_book_key
+            JOIN yy_cite_chapter c ON c.cite_chapter_key = t.cite_chapter_key
+            JOIN yy_cite_verse v ON v.cite_verse_key = t.cite_verse_key
             JOIN yy_series ser ON ser.series_key = t.series_key
             JOIN yy_volume vol ON vol.volume_key = t.volume_key
             LEFT JOIN yy_chapter ych ON ych.chapter_key = t.chapter_key
@@ -76,33 +76,33 @@ function handleGet(PDO $db, array $user): void {
         jsonResponse($row);
     }
 
-    // Translations with flexible filtering: scroll_key, chapter_key, verse_key
-    $scrollKey = $_GET['scroll_key'] ?? null;
+    // Translations with flexible filtering: cite_book_key, chapter_key, verse_key
+    $citeBookKey = $_GET['cite_book_key'] ?? null;
     $chapterKey = $_GET['chapter_key'] ?? null;
     $verseKey = $_GET['verse_key'] ?? null;
 
     // Must have at least one filter (or use list=all above)
-    if (!$verseKey && !$chapterKey && !$scrollKey) {
+    if (!$verseKey && !$chapterKey && !$citeBookKey) {
         // Show all translations if 'all_translations' flag is set
         if (isset($_GET['all_translations'])) {
-            $scrollKey = null; // no filter
+            $citeBookKey = null; // no filter
         } else {
-            errorResponse('verse_key, chapter_key, scroll_key, all_translations, translation_key, or list=all is required');
+            errorResponse('verse_key, chapter_key, cite_book_key, all_translations, translation_key, or list=all is required');
         }
     }
 
     $where = [];
     $params = [];
-    if ($scrollKey && ctype_digit($scrollKey)) {
-        $where[] = 't.yah_scroll_key = ?';
-        $params[] = (int)$scrollKey;
+    if ($citeBookKey && ctype_digit($citeBookKey)) {
+        $where[] = 't.cite_book_key = ?';
+        $params[] = (int)$citeBookKey;
     }
     if ($chapterKey && ctype_digit($chapterKey)) {
-        $where[] = 't.yah_chapter_key = ?';
+        $where[] = 't.cite_chapter_key = ?';
         $params[] = (int)$chapterKey;
     }
     if ($verseKey && ctype_digit($verseKey)) {
-        $where[] = 't.yah_verse_key = ?';
+        $where[] = 't.cite_verse_key = ?';
         $params[] = (int)$verseKey;
     }
 
@@ -111,9 +111,9 @@ function handleGet(PDO $db, array $user): void {
     $stmt = $db->prepare("
         SELECT
             t.translation_key,
-            t.yah_scroll_key,
-            t.yah_chapter_key,
-            t.yah_verse_key,
+            t.cite_book_key,
+            t.cite_chapter_key,
+            t.cite_verse_key,
             t.series_key,
             t.volume_key,
             t.chapter_key,
@@ -123,24 +123,24 @@ function handleGet(PDO $db, array $user): void {
             t.translation_date,
             t.translation_sort,
             t.translation_dtime,
-            s.yah_scroll_label_yy,
-            s.yah_scroll_label_common,
-            c.yah_chapter_number,
-            v.yah_verse_number,
+            cb.cite_book_hebrew,
+            cb.cite_book_common,
+            c.cite_chapter_number,
+            v.cite_verse_number,
             ser.series_name,
             vol.volume_label,
             vol.volume_number,
             ych.chapter_number AS yy_ch_number,
             ych.chapter_name AS yy_ch_name
         FROM yy_translation t
-        JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
-        JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
-        JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
+        JOIN yy_cite_book cb ON cb.cite_book_key = t.cite_book_key
+        JOIN yy_cite_chapter c ON c.cite_chapter_key = t.cite_chapter_key
+        JOIN yy_cite_verse v ON v.cite_verse_key = t.cite_verse_key
         JOIN yy_series ser ON ser.series_key = t.series_key
         JOIN yy_volume vol ON vol.volume_key = t.volume_key
         LEFT JOIN yy_chapter ych ON ych.chapter_key = t.chapter_key
         $whereClause
-        ORDER BY s.yah_scroll_sort, c.yah_chapter_number, v.yah_verse_number,
+        ORDER BY cb.cite_book_sort, c.cite_chapter_number, v.cite_verse_number,
                  t.translation_sort DESC, t.translation_dtime DESC
     ");
     $stmt->execute($params);
@@ -162,14 +162,14 @@ function handlePost(PDO $db, array $user): void {
 
     $stmt = $db->prepare("
         INSERT INTO yy_translation
-            (yah_scroll_key, yah_chapter_key, yah_verse_key, series_key, volume_key, chapter_key,
+            (cite_book_key, cite_chapter_key, cite_verse_key, series_key, volume_key, chapter_key,
              translation_page, translation_paragraph, translation_copy, translation_date, translation_sort)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ");
     $stmt->execute([
-        (int)$data['yah_scroll_key'],
-        (int)$data['yah_chapter_key'],
-        (int)$data['yah_verse_key'],
+        (int)$data['cite_book_key'],
+        (int)$data['cite_chapter_key'],
+        (int)$data['cite_verse_key'],
         (int)$data['series_key'],
         (int)$data['volume_key'],
         (int)$data['chapter_key'],
@@ -183,14 +183,14 @@ function handlePost(PDO $db, array $user): void {
     $newKey = $db->lastInsertId('yy_translation_translation_key_seq');
 
     $stmt = $db->prepare("
-        SELECT t.*, s.yah_scroll_label_yy, s.yah_scroll_label_common,
-               c.yah_chapter_number, v.yah_verse_number,
+        SELECT t.*, cb.cite_book_hebrew, cb.cite_book_common,
+               c.cite_chapter_number, v.cite_verse_number,
                ser.series_name, vol.volume_name, vol.volume_number,
                ych.chapter_number AS yy_ch_number, ych.chapter_name AS yy_ch_name
         FROM yy_translation t
-        JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
-        JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
-        JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
+        JOIN yy_cite_book cb ON cb.cite_book_key = t.cite_book_key
+        JOIN yy_cite_chapter c ON c.cite_chapter_key = t.cite_chapter_key
+        JOIN yy_cite_verse v ON v.cite_verse_key = t.cite_verse_key
         JOIN yy_series ser ON ser.series_key = t.series_key
         JOIN yy_volume vol ON vol.volume_key = t.volume_key
         LEFT JOIN yy_chapter ych ON ych.chapter_key = t.chapter_key
@@ -226,9 +226,9 @@ function handlePut(PDO $db, array $user): void {
 
     $stmt = $db->prepare("
         UPDATE yy_translation SET
-            yah_scroll_key = ?,
-            yah_chapter_key = ?,
-            yah_verse_key = ?,
+            cite_book_key = ?,
+            cite_chapter_key = ?,
+            cite_verse_key = ?,
             series_key = ?,
             volume_key = ?,
             chapter_key = ?,
@@ -240,9 +240,9 @@ function handlePut(PDO $db, array $user): void {
         WHERE translation_key = ?
     ");
     $stmt->execute([
-        (int)$data['yah_scroll_key'],
-        (int)$data['yah_chapter_key'],
-        (int)$data['yah_verse_key'],
+        (int)$data['cite_book_key'],
+        (int)$data['cite_chapter_key'],
+        (int)$data['cite_verse_key'],
         (int)$data['series_key'],
         (int)$data['volume_key'],
         (int)$data['chapter_key'],
@@ -255,14 +255,14 @@ function handlePut(PDO $db, array $user): void {
     ]);
 
     $stmt = $db->prepare("
-        SELECT t.*, s.yah_scroll_label_yy, s.yah_scroll_label_common,
-               c.yah_chapter_number, v.yah_verse_number,
+        SELECT t.*, cb.cite_book_hebrew, cb.cite_book_common,
+               c.cite_chapter_number, v.cite_verse_number,
                ser.series_name, vol.volume_name, vol.volume_number,
                ych.chapter_number AS yy_ch_number, ych.chapter_name AS yy_ch_name
         FROM yy_translation t
-        JOIN yah_scroll s ON s.yah_scroll_key = t.yah_scroll_key
-        JOIN yah_chapter c ON c.yah_chapter_key = t.yah_chapter_key
-        JOIN yah_verse v ON v.yah_verse_key = t.yah_verse_key
+        JOIN yy_cite_book cb ON cb.cite_book_key = t.cite_book_key
+        JOIN yy_cite_chapter c ON c.cite_chapter_key = t.cite_chapter_key
+        JOIN yy_cite_verse v ON v.cite_verse_key = t.cite_verse_key
         JOIN yy_series ser ON ser.series_key = t.series_key
         JOIN yy_volume vol ON vol.volume_key = t.volume_key
         LEFT JOIN yy_chapter ych ON ych.chapter_key = t.chapter_key
@@ -295,9 +295,9 @@ function validateTranslation(array $data, PDO $db): array {
     $errors = [];
 
     $fkFields = [
-        'yah_scroll_key' => ['table' => 'yah_scroll', 'pk' => 'yah_scroll_key', 'label' => 'Scroll'],
-        'yah_chapter_key' => ['table' => 'yah_chapter', 'pk' => 'yah_chapter_key', 'label' => 'Chapter'],
-        'yah_verse_key' => ['table' => 'yah_verse', 'pk' => 'yah_verse_key', 'label' => 'Verse'],
+        'cite_book_key' => ['table' => 'yy_cite_book', 'pk' => 'cite_book_key', 'label' => 'Book'],
+        'cite_chapter_key' => ['table' => 'yy_cite_chapter', 'pk' => 'cite_chapter_key', 'label' => 'Chapter'],
+        'cite_verse_key' => ['table' => 'yy_cite_verse', 'pk' => 'cite_verse_key', 'label' => 'Verse'],
         'series_key' => ['table' => 'yy_series', 'pk' => 'series_key', 'label' => 'Series'],
         'volume_key' => ['table' => 'yy_volume', 'pk' => 'volume_key', 'label' => 'Volume'],
         'chapter_key' => ['table' => 'yy_chapter', 'pk' => 'chapter_key', 'label' => 'YY Chapter'],

@@ -30,12 +30,14 @@ if ($_SESSION['ask_daily_count'] >= 10) {
 }
 $_SESSION['ask_daily_count']++;
 
-// --- IP ban check ---
+// --- Ban check (IP ban OR a banned logged-in user) ---
+// A banned user stays logged in/tracked, but Ask Yada is closed to them. Both
+// cases reuse the same configurable ban message + the existing frontend handling.
 $ipAddr = $_SERVER['HTTP_CF_CONNECTING_IP'] ?? trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '')[0]) ?: ($_SERVER['HTTP_X_REAL_IP'] ?? $_SERVER['REMOTE_ADDR'] ?? '');
 $pdo = getDb();
 $banStmt = $pdo->prepare("SELECT 1 FROM yy_ask_ip_ban WHERE ip_address = ?");
 $banStmt->execute([$ipAddr]);
-if ($banStmt->fetchColumn()) {
+if ($banStmt->fetchColumn() || currentUserBanned()) {
     // Fetch configurable ban message
     $banMsgStmt = $pdo->prepare("SELECT setting_code, setting_value FROM yy_setting WHERE setting_scope_code = 'page' AND setting_group_code = 'ask' AND setting_code IN ('ban-title', 'ban-message')");
     $banMsgStmt->execute();
