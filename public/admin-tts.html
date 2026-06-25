@@ -103,6 +103,7 @@
         #ipa-helper-popover { display:none; position:fixed; background:#fff; border:1px solid #ccc; border-radius:6px; box-shadow:0 6px 20px rgba(0,0,0,.22); padding:8px 10px; min-width:520px; max-width:640px; max-height:70vh; overflow-y:auto; z-index:10006; font-size:0.82rem; }
         #ipa-helper-popover h4 { margin:6px 0 4px; font-size:0.78rem; font-weight:700; color:#31345A; text-transform:uppercase; letter-spacing:.5px; }
         #ipa-helper-popover .row { display:grid; grid-template-columns: repeat(3, 1fr); gap:4px 6px; }
+        #ipa-helper-popover .row.wide { grid-template-columns: repeat(2, 1fr); }
         #ipa-helper-popover .chip { cursor:pointer; padding:5px 7px; border:1px solid #ddd; border-radius:4px; background:#fafafa; display:flex; align-items:baseline; gap:6px; line-height:1.2; }
         #ipa-helper-popover .chip:hover { background:#e8eaf6; border-color:#31345A; }
         #ipa-helper-popover .chip .ipa { font-size:1rem; font-family:Consolas,Monaco,monospace; color:#31345A; min-width:22px; text-align:center; }
@@ -4687,6 +4688,15 @@ function validateSapi(s) {
 // each labeled with an English example word and a short description.
 // Clicking a symbol inserts it at the IPA input's current cursor.
 var IPA_HELPER_GROUPS = [
+    { title: 'Hebrew word patterns — click to insert full IPA, then edit to taste', wide:true, chars: [
+        { ipa:'bɛˈɹɪθ',     ex:'beryth (covenant)', desc:'stress 2nd syllable (be-RYTH)' },
+        { ipa:'jɑˈhoʊwɑ',    ex:'Yahowah',           desc:'stress 2nd (yah-HOE-wah)' },
+        { ipa:'toʊˈɹɑ',      ex:'Torah',             desc:'final stress (toh-RAH)' },
+        { ipa:'jɪsɹɑˈɛl',    ex:'Yisrael',           desc:'final stress (yis-ra-EL)' },
+        { ipa:'moʊˈʃɛ',      ex:'Mosheh',            desc:'stress 2nd (mo-SHEH)' },
+        { ipa:'ʃɑˈloʊm',     ex:'shalom',            desc:'stress 2nd (sha-LOHM)' },
+        { ipa:'ɛloʊˈhiːm',   ex:'Elohim',            desc:'final stress (el-o-HEEM)' },
+    ]},
     { title: 'Stress & Length', chars: [
         { ipa:'ˈ', ex:'before stressed syllable', desc:'primary stress' },
         { ipa:'ˌ', ex:'before lightly stressed',  desc:'secondary stress' },
@@ -4726,8 +4736,8 @@ var IPA_HELPER_GROUPS = [
     ]},
     { title: 'Hebrew-specific', chars: [
         { ipa:'ʔ', ex:'uh-**oh** gap',     desc:'aleph / glottal stop' },
-        { ipa:'ʕ', ex:'(no English)',      desc:'ayin / pharyngeal' },
-        { ipa:'χ', ex:'Ba**ch** (Ger.)',   desc:'chet / vl. velar fric.' },
+        { ipa:'ʕ', ex:'(no English)',      desc:'ayin / pharyngeal — Azure only; drop for Kokoro' },
+        { ipa:'χ', ex:'Ba**ch** (Ger.)',   desc:'chet — Azure only; use h for Kokoro' },
     ]},
 ];
 
@@ -4753,9 +4763,10 @@ function getIpaHelperPopover() {
     var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'
              + '<span style="font-weight:600;color:#31345A;">IPA helper — click to insert at cursor</span>'
              + '<button type="button" onclick="closeIpaHelper()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:#888;line-height:1;">&times;</button>'
-             + '</div>';
+             + '</div>'
+             + '<div style="font-size:0.72rem;color:#777;margin:-2px 0 6px;line-height:1.3;">Tip: Hebrew usually stresses the <b>final</b> syllable — put <b>ˈ</b> right before it. For Kokoro / local engines avoid <b>ʕ</b> and <b>χ</b> (use <b>h</b> or omit).</div>';
     IPA_HELPER_GROUPS.forEach(function(g) {
-        html += '<h4>' + g.title + '</h4><div class="row">';
+        html += '<h4>' + g.title + '</h4><div class="row' + (g.wide ? ' wide' : '') + '">';
         g.chars.forEach(function(c) {
             // Bold the example letters that correspond to the sound.
             var ex = c.ex.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');

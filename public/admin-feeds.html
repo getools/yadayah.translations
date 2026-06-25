@@ -4226,6 +4226,30 @@ function _gsMonitorTick() {
                 if (d.items_done != null && d.items_queued != null) bits.push('Items: ' + d.items_done + ' done / ' + d.items_queued + ' queued');
                 c.innerHTML = '&mdash; ' + bits.join(' &nbsp;·&nbsp; ') + (act > 400 ? ' (first 400 shown)' : '');
             }
+            // The multi-item Generate path polls via THIS monitor (not _gsPollTick),
+            // so the Generate→"Working…" button is only swapped to "Done" here. When
+            // every selected item has no active baseline job and no active editable
+            // build left, stop polling and turn the button green → click closes the
+            // popover. (The standalone Transcription Queue has no gs-go-btn, and a
+            // not-yet-generated batch shows 'queued' rows, so this is inert there.)
+            var goB = document.getElementById('gs-go-btn');
+            if (goB && goB.disabled && !_gsPaused) {
+                var sel = _gsSelItems || [];
+                var batchDone = sel.length > 0 && sel.every(function(k){
+                    var st = _gsState[k]; if (!st) return false;          // selected item not loaded yet → not done
+                    var jobsActive = (st.jobs || []).some(function(j){ return j.state === 'queued' || j.state === 'running' || j.state === 'paused'; });
+                    var ej = st.editJob;
+                    var editActive = ej && (ej.job_status === 'pending' || ej.job_status === 'running');
+                    return !jobsActive && !editActive;
+                });
+                if (batchDone) {
+                    if (_gsPollTimer) { clearInterval(_gsPollTimer); _gsPollTimer = null; }
+                    goB.disabled = false; goB.style.opacity = '1'; goB.style.cursor = 'pointer';
+                    goB.textContent = 'Done'; goB.style.background = '#27ae60'; goB.onclick = closeGenerateStudio;
+                    var pb = document.getElementById('gs-pause-btn'); if (pb) pb.style.display = 'none';
+                    var cb = document.getElementById('gs-clear-btn'); if (cb) cb.style.display = 'none';
+                }
+            }
         })
         .catch(function(){ /* keep last render on a blip */ });
 }
