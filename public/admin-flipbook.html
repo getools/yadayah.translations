@@ -18,7 +18,16 @@
         .fb-field textarea { min-height: 60px; resize: vertical; }
         .fb-field input[type=color] { width: 50px; height: 32px; padding: 0; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; }
         .save-row { position: sticky; bottom: 0; background: #fafafa; border-top: 1px solid #e0e0e0; padding: 12px 16px; margin: 16px -16px -16px; display: flex; justify-content: space-between; align-items: center; border-radius: 0 0 8px 8px; }
-    </style>
+        /* Multi-column row: a left-hand row label, then a strip of columns each
+           with a header above its field (used by the Audio Player "Buttons" row). */
+        .fb-row { display: flex; align-items: flex-start; gap: 20px; margin-bottom: 14px; }
+        .fb-row-label { flex: 0 0 190px; font-size: 0.85rem; font-weight: 600; color: #444; padding-top: 20px; }
+        .fb-cols { display: flex; flex-wrap: wrap; gap: 20px; }
+        .fb-col { display: flex; flex-direction: column; gap: 5px; }
+        .fb-col > .h { font-size: 0.78rem; font-weight: 600; color: #444; }
+        .fb-inline { display: inline-flex; align-items: center; gap: 6px; }
+        .fb-suffix { font-size: 0.82rem; color: #666; }
+</style>
 </head>
 <body>
 
@@ -124,14 +133,16 @@ var SECTIONS = [
         ]
     },
     {
-        title: 'Audio Player Colors',
+        title: 'Audio Player',
         desc: 'Colors and sizing for the TTS audio player that appears at the bottom of every flipbook page — the round speaker & play buttons, their icons, the progress/volume bars, and the read-along text highlights. Changes apply on the next flipbook pageview.',
         fields: [
-            { code: 'player-btn-size',         label: 'Button diameter (px)',    type: 'number', default: '43', min: 20, max: 120 },
-            { code: 'player-btn-border-width', label: 'Circle border width (px)',type: 'number', default: '1',  min: 0,  max: 20 },
-            { code: 'player-btn-bg',         label: 'Circle background',        type: 'color', default: '#1f3550' },
-            { code: 'player-btn-bg-hover',   label: 'Circle hover background',  type: 'color', default: '#28456a' },
-            { code: 'player-btn-border',     label: 'Circle border',            type: 'color', default: '#2a4d70' },
+            { type: 'row', label: 'Buttons', cols: [
+                { header: 'Diameter',   field: { code: 'player-btn-size',         type: 'number', default: '43', min: 20, max: 120, suffix: 'px', width: '72px' } },
+                { header: 'Background',  field: { code: 'player-btn-bg',          type: 'color',  default: '#1f3550' } },
+                { header: 'Hover',       field: { code: 'player-btn-bg-hover',     type: 'color',  default: '#28456a' } },
+                { header: 'Border',      field: { code: 'player-btn-border',       type: 'color',  default: '#2a4d70' } },
+                { header: 'Size',        field: { code: 'player-btn-border-width', type: 'number', default: '1',  min: 0, max: 20, suffix: 'px', width: '72px' } }
+            ] },
             { code: 'player-icon-color',     label: 'Icon color (speaker/play)',type: 'color', default: '#cfe1ff' },
             { code: 'player-track-bg',       label: 'Progress & volume track',  type: 'color', default: '#c8c8c8' },
             { code: 'player-fill-bg',        label: 'Progress indicator (fill)',type: 'color', default: '#1f3550' },
@@ -146,26 +157,43 @@ var SECTIONS = [
     }
 ];
 
+// Build the input control for one field def. Shared by the standard
+// label/field rows and the multi-column "row" layout. Supports an optional
+// `suffix` (e.g. "px" printed to the right of the field) and `width`.
+function fieldInput(f, values) {
+    var v = (values[f.code] != null) ? values[f.code] : f.default;
+    var input;
+    if (f.type === 'color') {
+        var col = /^#[0-9a-f]{6}$/i.test(v) ? v : f.default;
+        input = '<input type="color" data-code="' + esc(f.code) + '" value="' + esc(col) + '">';
+    } else if (f.type === 'textarea') {
+        input = '<textarea data-code="' + esc(f.code) + '" rows="3">' + esc(v) + '</textarea>';
+    } else if (f.type === 'number') {
+        var mn = (f.min != null) ? f.min : 6, mx = (f.max != null) ? f.max : 200;
+        var w = f.width || '120px';
+        input = '<input type="number" data-code="' + esc(f.code) + '" value="' + esc(v) + '" min="' + esc(mn) + '" max="' + esc(mx) + '" style="width:' + esc(w) + ';">';
+    } else {
+        input = '<input type="text" data-code="' + esc(f.code) + '" value="' + esc(v) + '">';
+    }
+    if (f.suffix) input = '<span class="fb-inline">' + input + '<span class="fb-suffix">' + esc(f.suffix) + '</span></span>';
+    return input;
+}
+
 function render(values) {
     var c = document.getElementById('form-container');
     var html = '';
     SECTIONS.forEach(function(sec) {
         html += '<div class="fb-section"><h3>' + esc(sec.title) + '</h3><p class="desc">' + esc(sec.desc) + '</p>';
         sec.fields.forEach(function(f) {
-            var v = (values[f.code] != null) ? values[f.code] : f.default;
-            var input;
-            if (f.type === 'color') {
-                var col = /^#[0-9a-f]{6}$/i.test(v) ? v : f.default;
-                input = '<input type="color" data-code="' + esc(f.code) + '" value="' + esc(col) + '">';
-            } else if (f.type === 'textarea') {
-                input = '<textarea data-code="' + esc(f.code) + '" rows="3">' + esc(v) + '</textarea>';
-            } else if (f.type === 'number') {
-                var mn = (f.min != null) ? f.min : 6, mx = (f.max != null) ? f.max : 200;
-                input = '<input type="number" data-code="' + esc(f.code) + '" value="' + esc(v) + '" min="' + esc(mn) + '" max="' + esc(mx) + '" style="width:120px;">';
-            } else {
-                input = '<input type="text" data-code="' + esc(f.code) + '" value="' + esc(v) + '">';
+            if (f.type === 'row') {
+                html += '<div class="fb-row"><div class="fb-row-label">' + esc(f.label) + '</div><div class="fb-cols">';
+                f.cols.forEach(function(col) {
+                    html += '<div class="fb-col"><span class="h">' + esc(col.header) + '</span>' + fieldInput(col.field, values) + '</div>';
+                });
+                html += '</div></div>';
+                return;
             }
-            html += '<div class="fb-field"><label>' + esc(f.label) + '</label>' + input + '</div>';
+            html += '<div class="fb-field"><label>' + esc(f.label) + '</label>' + fieldInput(f, values) + '</div>';
         });
         html += '</div>';
     });
