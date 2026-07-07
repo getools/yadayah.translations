@@ -227,6 +227,10 @@ try {
             // (one fluent translation read, not 6 chopped fragments).
             $segs = ttsCollapseSkippedSegments($cfg, $segs);
             if (!$segs) errorResponse('every segment was marked skip; nothing to synthesise');
+            // Mirror the build worker: drop unspeakable orphan fragments so the
+            // audition matches what a real book build will synthesise.
+            $segs = ttsDropUnspeakableSegments($segs);
+            if (!$segs) errorResponse('no speakable content after segmentation');
             $voiceBlock = '';
             foreach ($segs as $seg) {
                 $voiceBlock .= buildVoiceBlock($seg['text'], $cfg, $seg['category']);
@@ -268,11 +272,15 @@ try {
 }
 if ($mp3 === '') {
     error_log('admin-tts-preview empty audio: provider_key=' . $providerKey . ' usesSsml=' . ($usesSsml ? '1' : '0') . ' voice=' . ($overrideVoice ?? '(category default)') . ' err=' . $err);
-    // 500, not 502: Cloudflare intercepts 5xx >= 502 from the origin and
-    // replaces the response body with its own branded "Bad gateway" page,
-    // hiding our actual error message ("ELEVENLABS_API_KEY not set" etc.)
-    // from the operator. 500 passes through with the JSON intact.
-    errorResponse('TTS failed: ' . ($err ?: 'engine returned no audio'), 500);
+    // 424 (Failed Dependency) for upstream engine failures — HTTP errors or
+    // connection failures from the GPU server or cloud TTS provider. These are
+    // dependency outages, not Yada application bugs; 424 keeps them out of
+    // yy_monitor_event (logMonitorEvent fires on 5xx only). 4xx also bypasses
+    // Cloudflare's body-replacing behaviour for 5xx >= 502, so the JSON error
+    // still reaches the operator. Use 500 only for genuine application errors
+    // (missing config keys, unknown provider, etc.).
+    $errStatus = preg_match('/HTTP [45]\d\d\b|connection failed/i', (string)$err) ? 424 : 500;
+    errorResponse('TTS failed: ' . ($err ?: 'engine returned no audio'), $errStatus);
 }
 
 header('Content-Type: audio/mpeg');

@@ -9,6 +9,15 @@ yadayah.com, www.yadayah.com {
     header @fonts Access-Control-Allow-Origin *
     header @fonts Cache-Control "public, max-age=31536000"
 
+    # Admin app shells are plain .html (served extensionless) from the web
+    # container, which sends Last-Modified but no Cache-Control. Browsers then
+    # heuristic-cache them for hours/days and keep running stale admin JS after
+    # a deploy — e.g. the transcript editor showing an already-fixed "Generate
+    # Baseline" popup on open. Force revalidation so a deploy is picked up on
+    # the next load (If-Modified-Since → cheap 304 when unchanged).
+    @adminpages path /admin-* /test/admin-*
+    header @adminpages Cache-Control "no-cache, must-revalidate"
+
     @sse path /api/ask.php /api/community-sse.php /api/admin-tts-sse.php
     reverse_proxy @sse web:80 {
         flush_interval -1

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782367202">
+    <meta name="page-version" content="1783346404">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Books Admin - Yada Yah</title>
@@ -83,7 +83,7 @@
 <div id="app" class="container" style="display:none">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=17"></script>
+<script src="/js/admin-nav.js?v=20"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -274,6 +274,39 @@ function doLogout() { fetch(API + '/auth.php', {method:'DELETE', credentials:'in
 function togglePassword() { var i = document.getElementById('login-pass'); i.type = i.type === 'password' ? 'text' : 'password'; }
 
 var _pipelineRefreshTimer = null;
+// ── Live-refresh safety nets ───────────────────────────────────────────
+// loadBooks() re-arms itself only while some volume is genuinely in flight
+// (see PROC_STATES). These guards stop it from (a) polling forever if a
+// volume wedges in an in-flight state, (b) tight-looping on a network error,
+// or (c) hammering the server while the tab is backgrounded.
+var POLL_INTERVAL_MS = 6000;            // cadence while work is in flight
+var POLL_MAX_MS      = 20 * 60 * 1000;  // hard cap on one continuous in-flight run (longest real run ~5 min)
+var POLL_MAX_ERRORS  = 5;               // consecutive fetch failures before giving up
+var _pollStartTs     = 0;               // ms timestamp the current in-flight run began (0 = idle/settled)
+var _pollErrCount    = 0;               // consecutive fetch/JSON failures
+var _bookCountBase   = '';              // book-count text without the live-status suffix
+// Small live-status suffix on the book-count line so the admin can see at a
+// glance whether auto-refresh is running, and click to resume if a safety
+// net stopped it.
+function _setLiveIndicator(state) {
+    var el = document.getElementById('book-count');
+    if (!el) return;
+    if (state === 'live') {
+        el.innerHTML = esc(_bookCountBase) + ' <span style="color:#2980b9;">&middot; &#x21bb; live</span>';
+    } else if (state === 'paused') {
+        el.innerHTML = esc(_bookCountBase) + ' <span style="color:#a33;cursor:pointer;text-decoration:underline;" title="Auto-refresh stopped — click to resume live updates" onclick="_resumeLive()">&middot; live paused (resume)</span>';
+    } else {
+        el.textContent = _bookCountBase;
+    }
+}
+function _resumeLive() { _pollErrCount = 0; _pollStartTs = 0; loadBooks(); }
+// Resume the live poll when the tab returns to the foreground, but only if we
+// were mid in-flight run (paused by the hidden-tab guard or the max-run cap —
+// refocusing then re-checks and clears the indicator if work has since
+// finished).
+document.addEventListener('visibilitychange', function() {
+    if (!document.hidden && _pollStartTs && !_pipelineRefreshTimer) loadBooks();
+});
 // Last-known nonzero paragraph + translation counts per volume_key,
 // remembered across polls. The parser path (parse_volume_from_bundle.py)
 // DELETEs all rows for the volume from yy_paragraph and yy_translation
@@ -311,19 +344,49 @@ function loadBooks() {
                 _lastVolumeCounts[__k] = { pc: __newPc, tc: __newTc };
             }
         }
-        document.getElementById('book-count').textContent = allSeries.length + ' series, ' + allVolumes.length + ' volumes';
+        _bookCountBase = allSeries.length + ' series, ' + allVolumes.length + ' volumes';
+        document.getElementById('book-count').textContent = _bookCountBase;
         renderBooks();
-        // Auto-refresh every 6 seconds while any volume's pipeline is queued
-        // or running, so the admin watches PDF/FLIP statuses flip live as the
-        // host worker picks up jobs. Stops itself once everything is settled.
+        _pollErrCount = 0;   // a successful load clears the error backoff
+        // Auto-refresh while any volume is genuinely in flight, so the admin
+        // watches PDF / FLIP / parse statuses flip live as the host worker and
+        // retry crons pick up jobs. PROC_STATES includes the hand-off states
+        // the worker parks volumes in mid-pipeline (warning, stale,
+        // download-pending) — previously the poll stopped the moment a volume
+        // left 'queued'/'running', freezing the bars while background crons
+        // were still working. Stops itself once everything settles.
         var inFlight = allVolumes.some(function(v) {
             var s = (v.volume_pipeline_status || '').toLowerCase();
             var p = (v.volume_parse_status    || '').toLowerCase();
             return PROC_STATES.indexOf(s) >= 0 || PROC_STATES.indexOf(p) >= 0;
         });
         if (_pipelineRefreshTimer) { clearTimeout(_pipelineRefreshTimer); _pipelineRefreshTimer = null; }
-        if (inFlight) {
-            _pipelineRefreshTimer = setTimeout(loadBooks, 6000);
+        if (!inFlight) {
+            _pollStartTs = 0;                 // settled — reset the run clock + indicator
+            _setLiveIndicator('');
+            return;
+        }
+        if (!_pollStartTs) _pollStartTs = Date.now();
+        // Safety net: a volume wedged in-flight far longer than any real
+        // pipeline run. Stop auto-refresh so we don't poll indefinitely; the
+        // admin can click the indicator (or reload) to resume.
+        if (Date.now() - _pollStartTs > POLL_MAX_MS) {
+            _setLiveIndicator('paused');
+            return;
+        }
+        _setLiveIndicator('live');
+        // Don't queue another fetch while the tab is backgrounded; the
+        // visibilitychange handler resumes the poll on refocus.
+        if (document.hidden) return;
+        _pipelineRefreshTimer = setTimeout(loadBooks, POLL_INTERVAL_MS);
+    }).catch(function() {
+        // Network/JSON failure: back off (don't tight-loop) and give up after
+        // a few consecutive misses rather than dying silently on the first.
+        if (_pipelineRefreshTimer) { clearTimeout(_pipelineRefreshTimer); _pipelineRefreshTimer = null; }
+        if (_pollStartTs && ++_pollErrCount <= POLL_MAX_ERRORS) {
+            _pipelineRefreshTimer = setTimeout(loadBooks, POLL_INTERVAL_MS * 2);
+        } else if (_pollStartTs) {
+            _setLiveIndicator('paused');
         }
     });
 }
@@ -335,7 +398,14 @@ function loadBooks() {
 //   - Is it stale relative to its source? (mtime < sourceMtime)
 //
 // Result is a stacked icon + small age line. Tooltip shows full timestamp.
-var PROC_STATES = ['queued', 'processing', 'running', 'pending'];
+// In-flight states the poll watches. Beyond the obvious queued/running, this
+// includes the hand-off states the host worker + retry crons park volumes in
+// while work continues in the background: 'warning' / 'download-pending' (PDF
+// done, FlipHTML5 upload / offline package still being retried by
+// cron-flipbook-retry.sh) and 'stale' (parse out of date; the worker re-parses
+// on its next tick). 'waiting-docx' is deliberately excluded — it blocks on a
+// human re-upload, so polling it would just spin with nothing to observe.
+var PROC_STATES = ['queued', 'processing', 'running', 'pending', 'warning', 'download-pending', 'stale'];
 // Stacked local-time stamp: YYMMDD on one line, HH:MM on the next.
 // Returns RAW HTML (with <br>) — callers must NOT pass through esc(). Output
 // is purely numeric so no escaping concerns.

@@ -371,15 +371,17 @@ if ($action === 'apply') {
             }
             $autoLearned = true;
         } else {
+            // Human-initiated "apply to all transcripts" → authoritative global.
             $db->prepare("
                 INSERT INTO yy_transcript_correction
                     (correction_wrong, correction_right, correction_count,
                      correction_active_flag, correction_case_sensitive, correction_word_boundary,
-                     correction_first_seen_dtime, correction_last_seen_dtime)
-                VALUES (?, ?, ?, TRUE, ?, ?, NOW(), NOW())
+                     correction_origin, correction_first_seen_dtime, correction_last_seen_dtime)
+                VALUES (?, ?, ?, TRUE, ?, ?, 'human', NOW(), NOW())
                 ON CONFLICT (correction_wrong, correction_right) DO UPDATE
                     SET correction_count = yy_transcript_correction.correction_count + EXCLUDED.correction_count,
                         correction_last_seen_dtime = NOW(),
+                        correction_origin = 'human',
                         correction_active_flag = TRUE
             ")->execute([$find, $replace, $changed, $caseSensitive ? 't' : 'f', $wordBoundary ? 't' : 'f']);
             $autoLearned = true;

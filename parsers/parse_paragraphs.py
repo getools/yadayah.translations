@@ -323,6 +323,44 @@ def build_paragraph_html(paragraph, css_collector):
     return f'<p{class_attr}>{inner_html}</p>'
 
 
+# Paragraph styles that mark the start of a chapter or titled section.
+#   yy_chapter_#       — numbered chapters AND named front matter (Prelude…)
+#   yy_heading_section — named back matter (Afterword, Bibliography, Resources…)
+#   Heading 1          — legacy fallback
+CHAPTER_HEADING_STYLES = ('yy_chapter_#', 'yy_heading_section', 'Heading 1')
+
+
+def parse_chapter_heading(text):
+    """Split a chapter-heading paragraph into (number, name).
+
+    Numbered chapter headings carry the number on the first line and the
+    title on a later line, e.g. "12\\n\\nBara' ~ Creation" -> (12, "Bara' ~ Creation").
+    Unnumbered section headings (Prelude, AFTERWORD, BIBLIOGRAPHY…) return
+    (None, <title>). ALL-CAPS section banners are converted to title case so
+    "BIBLIOGRAPHY" -> "Bibliography".
+    """
+    if not text:
+        return None, ''
+    lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+    if not lines:
+        return None, ''
+    number = None
+    if lines[0].isdigit():
+        number = int(lines[0])
+        lines = lines[1:]
+    name = ' '.join(lines).strip()
+    letters = [c for c in name if c.isalpha()]
+    # Some source headings expose only a separator ("6\n\n ~ ") because the
+    # title was added later in the admin tool — treat a letter-less name as
+    # absent so a freshly-created chapter gets a clean NULL name (shown by
+    # number) rather than a stray "~".
+    if not letters:
+        name = ''
+    elif all(c.isupper() for c in letters):
+        name = name.title()
+    return number, name
+
+
 def extract_paragraphs_from_doc(doc_path, css_collector, content_start_idx=0, last_page=None, page_map=None):
     """
     Extract paragraphs from a Word document, filtering by footer page range.
@@ -340,7 +378,8 @@ def extract_paragraphs_from_doc(doc_path, css_collector, content_start_idx=0, la
     Returns:
         (paragraphs_list, chapter_boundaries)
         paragraphs_list: list of dicts with paragraph_number, text_raw, text_html, page
-        chapter_boundaries: list of (para_idx, chapter_number) tuples
+        chapter_boundaries: list of (para_idx, number_or_None, name) tuples — one
+            per heading, INCLUDING unnumbered front/back-matter sections.
     """
     doc = Document(str(doc_path))
     paragraphs = []
@@ -356,14 +395,18 @@ def extract_paragraphs_from_doc(doc_path, css_collector, content_start_idx=0, la
         if last_page is not None and page is not None and page >= last_page:
             continue
 
-        # Detect chapter boundaries
+        # Detect chapter boundaries. Headings carry one of the chapter
+        # heading styles; numbered chapters store the number on the first
+        # line ("12\n\nName"), while named front/back-matter sections
+        # (Prelude, Afterword, Bibliography…) carry the same styles with no
+        # leading number. Emit (idx, number_or_None, name) for every heading
+        # so the volume parser can create a yy_chapter row for each one —
+        # including the unnumbered sections the old code silently dropped.
         style_name = paragraph.style.name if paragraph.style else ''
-        if style_name in ('yy_chapter_#', 'Heading 1'):
-            text = paragraph.text.strip()
-            if text:
-                first_line = text.split('\n')[0].strip()
-                if first_line.isdigit():
-                    chapter_boundaries.append((para_idx, int(first_line)))
+        if style_name in CHAPTER_HEADING_STYLES:
+            number, name = parse_chapter_heading(paragraph.text)
+            if number is not None or name:
+                chapter_boundaries.append((para_idx, number, name))
 
         # Build raw JSON
         raw_data = build_paragraph_raw(paragraph)
@@ -384,9 +427,16 @@ def extract_paragraphs_from_doc(doc_path, css_collector, content_start_idx=0, la
 # ── Chapter assignment ───────────────────────────────────────────────
 
 def get_chapter_for_paragraph(para_idx, chapter_boundaries):
-    """Return chapter number for a paragraph based on boundary list, or None."""
+    """Return chapter NUMBER for a paragraph based on boundary list, or None.
+
+    Boundaries are (idx, number_or_None, name) tuples. Unnumbered section
+    headings contribute no number, so this legacy helper returns None for
+    paragraphs that fall under them — callers that need to handle unnumbered
+    sections should map by boundary identity instead (see parse_volume.py).
+    """
     current_chapter = None
-    for boundary_idx, chapter_num in chapter_boundaries:
+    for boundary in chapter_boundaries:
+        boundary_idx, chapter_num = boundary[0], boundary[1]
         if para_idx >= boundary_idx:
             current_chapter = chapter_num
         else:

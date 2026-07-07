@@ -113,10 +113,14 @@ register_shutdown_function(function () use ($jobKey) {
             $stmt->execute([(int)$jobKey]);
             $running = (int)$stmt->fetchColumn();
             if ($running >= $MAX_CONCURRENT_WORKERS) return;
+            // Priority-aware FIFO: single-item interactive generates set
+            // job_priority=1 so they jump ahead of a large bulk batch
+            // (job_priority=0) without breaking the strict one-worker rule.
+            // Ties fall back to creation order (job_key).
             $nextKey = $db->query("SELECT feed_item_transcript_job_key
                                       FROM yy_feed_item_transcript_job
                                      WHERE job_status = 'pending'
-                                     ORDER BY feed_item_transcript_job_key
+                                     ORDER BY job_priority DESC, feed_item_transcript_job_key
                                      LIMIT 1")->fetchColumn();
             if (!$nextKey) return;
             $workerScript = __DIR__ . '/transcript-worker.php';
@@ -128,8 +132,11 @@ register_shutdown_function(function () use ($jobKey) {
                 // Claim the slot now (status='running'), not just the pid, so a
                 // run-POST waiting on the lock counts it before the new worker
                 // reaches its own 'running' update ~1s into boot.
+                // job_running_since marks when the job entered 'running' (not job_dtime
+                // which is when it was created as 'pending') so orphan detection can
+                // accurately measure how long the job has been in running state.
                 $db->prepare("UPDATE yy_feed_item_transcript_job
-                                 SET job_status = 'running', job_worker_pid = ?
+                                 SET job_status = 'running', job_worker_pid = ?, job_running_since = NOW()
                                WHERE feed_item_transcript_job_key = ? AND job_status = 'pending'")
                    ->execute([$pid, $nextKey]);
             }
@@ -823,6 +830,7 @@ if (!$rows && !$wantYoutubeCaptions) {
                 wlog('calling provider=' . $providerFamily . ' audioMB=' . round($audioSizeMB, 1)
                     . ' chunked=' . ($whisperChunked ? 'y' : 'n') . ' eta~' . $etaSeconds . 's — this is where the 2026-06-21 orphan died');
                 $__engineT0 = microtime(true);
+                $speakerEmb = null;   // per-speaker voice embeddings (whisperx diarize) → stored post-insert
                 switch ($providerFamily) {
                     case 'openai':
                         if ($whisperChunked) {
@@ -867,7 +875,7 @@ if (!$rows && !$wantYoutubeCaptions) {
                         // can chunk via whisperApiTranscribeChunked when the
                         // audio exceeds the 25 MB OpenAI upload limit. Without
                         // these the unchunked fallback hits HTTP 413.
-                        $rows = gpuWhisperTranscribe($audioPath, $glossaryPrompt, 0, $whisperErr, $jobModel, $db, $jobKey);
+                        $rows = gpuWhisperTranscribe($audioPath, $glossaryPrompt, 0, $whisperErr, $jobModel, $db, $jobKey, $speakerEmb);
                         break;
                     default:
                         $whisperErr = "unknown provider family: $providerFamily";
@@ -994,6 +1002,17 @@ try {
                 $pct = 90 + (int)floor(9 * $sort / max(1, $total));
                 $progressUpd->execute([$pct, 'Saving ' . $sort . ' / ' . $total . ' segments (model=' . $jobModel . ')...', $jobKey]);
             } catch (Exception $e) { /* best-effort progress */ }
+        }
+    }
+    // Store per-speaker voice embeddings (whisperx diarize) for speaker
+    // recognition. Keyed by (item, model, engine label SPEAKER_xx); replaced
+    // wholesale for this model so a re-run refreshes them.
+    if (!empty($speakerEmb) && is_array($speakerEmb)) {
+        $db->prepare("DELETE FROM yy_feed_item_speaker_embedding WHERE feed_item_key = ? AND model = ?")->execute([$itemKey, $jobModel]);
+        $insEmb = $db->prepare("INSERT INTO yy_feed_item_speaker_embedding (feed_item_key, model, label, embedding) VALUES (?, ?, ?, ?::vector) ON CONFLICT (feed_item_key, model, label) DO UPDATE SET embedding = EXCLUDED.embedding, captured_dtime = now()");
+        foreach ($speakerEmb as $label => $vec) {
+            if (!is_array($vec) || !$vec) continue;
+            $insEmb->execute([$itemKey, $jobModel, (string)$label, '[' . implode(',', array_map('floatval', $vec)) . ']']);
         }
     }
     $db->commit();

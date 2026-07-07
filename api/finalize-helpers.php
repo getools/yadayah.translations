@@ -123,9 +123,11 @@ if (!function_exists('partialState')) {
 // The "Transcribe Audio" button on admin-feeds still works for on-demand
 // runs; only the implicit MP3-finalized / MP3-uploaded trigger is paused.
 //
-// Disabled on 2026-05-11 at user's request while OpenAI quota / cost
-// strategy is being reviewed. Flip back to false when ready to re-enable.
-if (!defined('AUTO_TRANSCRIBE_DISABLED')) define('AUTO_TRANSCRIBE_DISABLED', true);
+// Disabled 2026-05-11 while the OpenAI quota/cost strategy was reviewed — back
+// then this fired the PAID whisper-1 engine. Re-enabled 2026-07-04: new items
+// now generate the FREE self-hosted GPU baseline suite and auto-build an
+// AMALGAMATED (consensus L1-L4) transcript. Flip to true to kill-switch it.
+if (!defined('AUTO_TRANSCRIBE_DISABLED')) define('AUTO_TRANSCRIBE_DISABLED', false);
 
 if (!function_exists('spawnTranscribeJob')) {
     function spawnTranscribeJob(PDO $db, int $itemKey, int $userKey): ?int {
@@ -139,21 +141,34 @@ if (!function_exists('spawnTranscribeJob')) {
             }
             return null;
         }
-        $db->prepare("UPDATE yy_feed_item_transcript_job SET job_status = 'cancelled', job_completed_dtime = NOW() WHERE feed_item_key = ? AND job_status IN ('pending', 'running')")
-           ->execute([$itemKey]);
-        $jobStmt = $db->prepare("INSERT INTO yy_feed_item_transcript_job (feed_item_key, job_status, job_message, user_key) VALUES (?, 'pending', 'Auto-triggered after upload', ?) RETURNING feed_item_transcript_job_key");
-        $jobStmt->execute([$itemKey, $userKey]);
-        $jobKey = (int)$jobStmt->fetchColumn();
+        // New item → full self-hosted baseline suite + opt-in. The consensus
+        // (L1-L4 amalgamation) auto-builds once the last baseline lands
+        // (maybeAutoBuildEditable in transcript-worker.php). Supersede handled
+        // per-model inside the helper.
+        require_once __DIR__ . '/transcript-helpers.php';   // autoEnqueueBaselineSuite()
+        $jobKey = autoEnqueueBaselineSuite($db, $itemKey, $userKey);
+        if (!$jobKey) return null;
+        // Kick the single STT worker on the first baseline (it chains the rest
+        // via its priority-aware shutdown-dequeue). Guarded by the same advisory
+        // lock (742001) the worker/dispatch use, so we can never start a second.
         $workerScript = __DIR__ . '/transcript-worker.php';
         if (file_exists($workerScript)) {
             require_once __DIR__ . '/spawn-helpers.php';
-            $logFile = sys_get_temp_dir() . '/transcript_' . $jobKey . '.log';
-            $pid = spawnCappedWorker($workerScript, [(string)$jobKey], $logFile, [
-                'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
-            ]);
-            if ($pid > 0) {
-                $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
-                   ->execute([$pid, $jobKey]);
+            $db->query('SELECT pg_advisory_lock(742001)');
+            try {
+                $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
+                if ($running === 0) {
+                    $logFile = sys_get_temp_dir() . '/transcript_' . $jobKey . '.log';
+                    $pid = spawnCappedWorker($workerScript, [(string)$jobKey], $logFile, [
+                        'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
+                    ]);
+                    if ($pid > 0) {
+                        $db->prepare("UPDATE yy_feed_item_transcript_job SET job_status = 'running', job_worker_pid = ? WHERE feed_item_transcript_job_key = ? AND job_status = 'pending'")
+                           ->execute([$pid, $jobKey]);
+                    }
+                }
+            } finally {
+                $db->query('SELECT pg_advisory_unlock(742001)');
             }
         }
         return $jobKey;

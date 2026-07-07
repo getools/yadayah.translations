@@ -16,9 +16,17 @@
 #      .progress / .duration sidecars older than 1 hour. The worker writes
 #      its terminal status and exits; nothing else cleans these up.
 #
-#   3. Transcript jobs (yy_feed_item_transcript_job) stuck in pending or
-#      running for >2 hours with no PID alive. These would otherwise hold
-#      an item's in_progress lock forever once the worker crashed.
+#   3. Transcript jobs (yy_feed_item_transcript_job) stuck in *running*
+#      for >2 hours with no PID alive — genuine orphans whose worker
+#      crashed. These would otherwise hold an item's in_progress lock
+#      forever. NOTE: 'pending' jobs are DELIBERATELY excluded. The STT
+#      queue is a single-worker FIFO; a pending job has never been claimed,
+#      so it has no worker PID and is not orphaned — it is simply waiting
+#      its turn. Large batches (240 items x 8 models) take days to drain,
+#      far exceeding 2h, so cancelling aged pending rows here wrongly
+#      guillotined the tail of every big batch (15.7k rows killed in the
+#      wild before this was fixed 2026-07-04). A stalled pending queue is
+#      recovered by re-poking the worker, never by cancelling the work.
 #
 # All operations are idempotent; safe to run as often as desired.
 
@@ -68,7 +76,8 @@ for sidecar in /tmp/finalize_*.progress /tmp/finalize_*.duration; do
 done
 
 # --- 3. orphaned transcript jobs ---
-# Cancel pending/running rows older than 2h whose worker pid is dead.
+# Cancel *running* rows older than 2h whose worker pid is dead (true
+# orphans). Pending rows are left alone — they are queued, not orphaned.
 PSQL="docker exec -i yada-postgres-prod psql -U postgres -d yada -t -A"
 cancelled=0
 while IFS='|' read -r jkey pid; do
@@ -94,14 +103,14 @@ while IFS='|' read -r jkey pid; do
                   job_message=COALESCE(job_message,'') || ' [auto-cancelled by lock-cleanup: stale]',
                   job_completed_dtime=NOW()
               WHERE feed_item_transcript_job_key=$jkey
-                AND job_status IN ('pending','running')" </dev/null >/dev/null 2>&1
+                AND job_status = 'running'" </dev/null >/dev/null 2>&1
     cancelled=$((cancelled + 1))
 done < <($PSQL -c "
     SELECT feed_item_transcript_job_key, COALESCE(job_worker_pid, 0)
     FROM yy_feed_item_transcript_job
-    WHERE job_status IN ('pending','running')
-      AND job_dtime < NOW() - INTERVAL '2 hours'
-    ORDER BY job_dtime
+    WHERE job_status = 'running'
+      AND COALESCE(job_running_since, job_dtime) < NOW() - INTERVAL '2 hours'
+    ORDER BY COALESCE(job_running_since, job_dtime)
 " 2>/dev/null)
 
 # Only log when we actually did something — avoids growing the log on idle

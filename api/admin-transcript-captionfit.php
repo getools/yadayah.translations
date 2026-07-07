@@ -54,9 +54,10 @@ if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
             ['secs' => 0.0,  'text' => 'so the teacher began to explain the concept of teshuvah which is repentance and the deep importance of doing mitzvot every single day of our lives without exception'],
             ['secs' => 11.0, 'text' => 'and he said that the path the path the path of righteousness begins with a single honest step'],
         ];
-        $words = cfRowsToWords($rows);
-        $cues = cfReflow($words, ['max_chars' => 42, 'max_lines' => 2, 'max_secs' => 7.0,
-                                  'min_secs' => 1.2, 'cps' => 17.0, 'break_punct' => true, 'dedup' => true]);
+        $opts = cfDefaults();
+        // pause-aware spread so break_gap can fire on the edited multi-word rows
+        $words = cfRowsToWords($rows, ['cps' => (float)$opts['cps']]);
+        $cues = cfReflow($words, $opts);
         foreach ($cues as $i => $c) {
             fwrite(STDOUT, sprintf("[%2d] %s  (%dc/%dL)\n     %s\n",
                 $i, cfSecsToInterval($c['start']), $c['chars'], $c['lines'],
@@ -82,145 +83,9 @@ $itemKey = (int)($data['item_key'] ?? $_GET['item_key'] ?? 0);
 
 // ── DB helpers ───────────────────────────────────────────────────────────────
 
-function cfLoadLive(PDO $db, int $itemKey): array {
-    $st = $db->prepare("
-        SELECT feed_item_transcript_key AS k,
-               to_char(feed_item_transcript_segment, 'HH24:MI:SS.MS') AS segment,
-               feed_item_transcript_text AS text,
-               feed_item_transcript_sort AS sort,
-               feed_item_transcript_speaker AS speaker
-          FROM yy_feed_item_transcript
-         WHERE feed_item_key = ?
-         ORDER BY feed_item_transcript_sort, feed_item_transcript_segment");
-    $st->execute([$itemKey]);
-    $rows = [];
-    foreach ($st->fetchAll() as $r) {
-        $rows[] = ['key' => (int)$r['k'], 'segment' => (string)$r['segment'],
-                   'secs' => cfIntervalToSecs((string)$r['segment']),
-                   'text' => (string)$r['text'], 'sort' => (int)$r['sort'],
-                   'speaker' => $r['speaker']];
-    }
-    return $rows;
-}
-
-function cfLoadAuto(PDO $db, int $itemKey, string $model): array {
-    $st = $db->prepare("
-        SELECT to_char(feed_item_transcript_segment, 'HH24:MI:SS.MS') AS segment,
-               feed_item_transcript_text AS text
-          FROM yy_feed_item_transcript_auto
-         WHERE feed_item_key = ? AND feed_item_transcript_auto_model = ?
-         ORDER BY feed_item_transcript_sort, feed_item_transcript_segment");
-    $st->execute([$itemKey, $model]);
-    $rows = [];
-    foreach ($st->fetchAll() as $r) {
-        $rows[] = ['secs' => cfIntervalToSecs((string)$r['segment']), 'text' => (string)$r['text']];
-    }
-    return $rows;
-}
-
-function cfAutoModels(PDO $db, int $itemKey): array {
-    $st = $db->prepare("
-        SELECT feed_item_transcript_auto_model AS m, COUNT(*) AS n
-          FROM yy_feed_item_transcript_auto
-         WHERE feed_item_key = ?
-         GROUP BY feed_item_transcript_auto_model ORDER BY m");
-    $st->execute([$itemKey]);
-    $out = [];
-    foreach ($st->fetchAll() as $r) {
-        $code = (string)$r['m'];
-        $out[] = ['code' => $code, 'rows' => (int)$r['n'],
-                  'word_level' => (strpos($code, 'word') !== false)];
-    }
-    return $out;
-}
-
-/** Capture the full live transcript before a destructive transform. */
-function cfSnapshot(PDO $db, int $itemKey, ?int $userKey, string $reason): int {
-    $rows = cfLoadLive($db, $itemKey);
-    $payload = array_map(fn($r) => ['segment' => $r['segment'], 'text' => $r['text'],
-                                    'sort' => $r['sort'], 'speaker' => $r['speaker']], $rows);
-    $st = $db->prepare("
-        INSERT INTO yy_transcript_snapshot
-            (feed_item_key, snapshot_user_key, snapshot_reason, snapshot_rows, snapshot_json)
-        VALUES (?, ?, ?, ?, ?::jsonb)
-        RETURNING snapshot_key");
-    $st->execute([$itemKey, $userKey, $reason, count($payload),
-                  json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)]);
-    return (int)$st->fetchColumn();
-}
-
-/** Replace every live row for $itemKey with $cues ([['segment','text','speaker'?], ...]). */
-function cfReplaceLive(PDO $db, int $itemKey, array $cues): int {
-    $db->beginTransaction();
-    try {
-        $db->prepare("DELETE FROM yy_feed_item_transcript WHERE feed_item_key = ?")->execute([$itemKey]);
-        $ins = $db->prepare("
-            INSERT INTO yy_feed_item_transcript
-                (feed_item_key, feed_item_transcript_segment, feed_item_transcript_text,
-                 feed_item_transcript_sort, feed_item_transcript_speaker)
-            VALUES (?, ?::interval, ?, ?, ?)
-            ON CONFLICT (feed_item_key, feed_item_transcript_segment, md5(feed_item_transcript_text)) DO NOTHING");
-        $sort = 0;
-        foreach ($cues as $c) {
-            $seg = (string)$c['segment'];
-            $txt = mb_substr((string)$c['text'], 0, 2000);
-            if (trim($txt) === '') continue;
-            $ins->execute([$itemKey, $seg, $txt, $sort++, $c['speaker'] ?? null]);
-        }
-        $db->commit();
-        return $sort;
-    } catch (Throwable $e) {
-        $db->rollBack();
-        throw $e;
-    }
-}
-
-/** Build the in-context priming block from the admins' learned corrections. */
-function cfCorrectionContext(PDO $db, int $maxCorr = 60, int $maxGloss = 60): array {
-    $corr = [];
-    try {
-        $st = $db->query("SELECT correction_wrong, correction_right FROM yy_transcript_correction
-                          WHERE correction_active_flag = TRUE
-                          ORDER BY correction_count DESC, length(correction_wrong) DESC LIMIT $maxCorr");
-        foreach ($st->fetchAll() as $r) $corr[] = $r['correction_wrong'] . ' => ' . $r['correction_right'];
-    } catch (Throwable $e) { /* table optional */ }
-    $gloss = [];
-    try {
-        $st = $db->query("SELECT glossary_term FROM yy_transcript_glossary
-                          WHERE glossary_active_flag = TRUE
-                          ORDER BY glossary_priority DESC, glossary_term LIMIT $maxGloss");
-        foreach ($st->fetchAll() as $r) $gloss[] = $r['glossary_term'];
-    } catch (Throwable $e) { /* table optional */ }
-    return ['corrections' => $corr, 'glossary' => $gloss];
-}
-
-function cfBuildMessages(array $ctx, array $lines): array {
-    $sys = "You proofread automatic speech-to-text transcripts of Hebrew/English religious lectures.\n"
-         . "Fix ONLY transcription errors: misheard words, wrong Hebrew transliterations, proper nouns, "
-         . "obvious typos, and missing or wrong punctuation.\n"
-         . "STRICT RULES:\n"
-         . "- Do NOT paraphrase, translate, summarize, reorder, merge, or split lines.\n"
-         . "- Return EXACTLY one entry per input line, with the SAME index, in the SAME order.\n"
-         . "- If a line is already correct, return it unchanged.\n"
-         . "- Keep the speaker's wording; only repair errors.\n";
-    if ($ctx['corrections']) {
-        $sys .= "\nKnown corrections the editors have made before (wrong => right) — apply the same fixes when you see them:\n"
-              . implode("\n", array_slice($ctx['corrections'], 0, 60)) . "\n";
-    }
-    if ($ctx['glossary']) {
-        $sys .= "\nCanonical spellings of names/terms used in this material:\n"
-              . implode(', ', array_slice($ctx['glossary'], 0, 60)) . "\n";
-    }
-    $sys .= "\nReturn ONLY a JSON object of the form: {\"lines\":[{\"i\":<index>,\"text\":\"<corrected line>\"}, ...]}";
-
-    $payloadLines = array_map(fn($l) => ['i' => $l['i'], 'text' => $l['text']], $lines);
-    $user = "Correct these lines. Return the JSON object described.\n"
-          . json_encode(['lines' => $payloadLines], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    return [
-        ['role' => 'system', 'content' => $sys],
-        ['role' => 'user',   'content' => $user],
-    ];
-}
+// DB + alignment + prompt helpers (cfLoadLive … cfBuildMessages) now live in
+// transcript-caption-lib.php (required above) so the consensus init worker can
+// reuse the exact same multi-baseline reconciliation logic (Layer 3).
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 
@@ -238,6 +103,10 @@ if ($action === 'config') {
             array_map(fn($m) => $m + ['label' => $m['code'] . ($m['word_level'] ? ' (word-level)' : '')],
                       cfAutoModels($db, $itemKey))
         ),
+        // Per-engine STT baselines the AI cleanup can cross-reference for
+        // consensus (word-level ones align tightest). Same list the view
+        // selector shows, minus the live/current transcript.
+        'baselines'       => cfAutoModels($db, $itemKey),
     ]);
 }
 
@@ -246,24 +115,60 @@ if ($action === 'fit_preview') {
     global $CAPTION_DEFAULTS;
     $source = (string)($data['source'] ?? 'current');
     $opts = [];
-    foreach (['max_chars', 'max_lines', 'max_secs', 'min_secs', 'cps'] as $k) {
+    foreach (['max_chars', 'max_lines', 'preferred_lines', 'max_secs', 'min_secs', 'cps', 'soft_overflow'] as $k) {
         $opts[$k] = array_key_exists($k, $data) ? $data[$k] : $CAPTION_DEFAULTS[$k];
     }
     $opts['break_punct'] = array_key_exists('break_punct', $data) ? (bool)$data['break_punct'] : $CAPTION_DEFAULTS['break_punct'];
     $opts['dedup']       = array_key_exists('dedup', $data) ? (bool)$data['dedup'] : $CAPTION_DEFAULTS['dedup'];
+    // Pause break (soft, like punctuation): flush a cue when the silence before
+    // the next word is >= break_gap secs. 0 = off. cfReflow keeps it from making
+    // tiny fragments (it only breaks once the cue has dwelt >= 0.4s).
+    $opts['break_gap']   = array_key_exists('break_gap', $data) ? max(0.0, (float)$data['break_gap']) : $CAPTION_DEFAULTS['break_gap'];
+    // Break on speaker change (soft, like punctuation/pause): fold diarised
+    // speaker-turn onsets into cfReflow's boundary set. Opt-in, default off.
+    $breakSpeaker = array_key_exists('break_speaker', $data) ? (bool)$data['break_speaker'] : false;
 
     $rows = ($source === 'current') ? cfLoadLive($db, $itemKey) : cfLoadAuto($db, $itemKey, $source);
     if (!$rows) errorResponse('no rows for source: ' . $source);
-    $words = cfRowsToWords($rows);
+    // Speaker labels always live on the editable rows, so build the timeline
+    // from the live transcript regardless of which timing source feeds re-flow.
+    $liveRows = ($source === 'current') ? $rows : cfLoadLive($db, $itemKey);
+    $spkTl    = cfSpeakerTimeline($liveRows);
+    if ($breakSpeaker && $spkTl) {
+        $bset = []; $prev = null;
+        foreach ($spkTl as $e) {
+            if ($e[1] !== $prev) { $bset[] = round((float)$e[0], 2); $prev = $e[1]; }
+        }
+        $bset = array_values(array_unique($bset)); sort($bset);
+        $opts['boundary_set'] = $bset;
+    }
+    // When pause-breaking is on, make the word spread pause-aware (chars/cps) so
+    // genuine silences in the *edited* transcript become detectable gaps rather
+    // than being absorbed by the fill-the-gap default.
+    $w2wOpts = ($opts['break_gap'] > 0) ? ['cps' => (float)$opts['cps']] : [];
+    $words = cfRowsToWords($rows, $w2wOpts);
     $cues = cfReflow($words, $opts);
+    // Stamp each cue with the speaker active at its start so the 👤 column
+    // survives re-sizing (NULL when the transcript has no speaker labels).
     $out = array_map(fn($c) => [
         'segment' => cfSecsToInterval($c['start']),
+        'secs'    => round((float)$c['start'], 3),
         'text'    => $c['text'],
         'chars'   => $c['chars'],
         'lines'   => $c['lines'],
+        'speaker' => $spkTl ? cfSpeakerAt($spkTl, (float)$c['start']) : null,
     ], $cues);
+    // The "Current" column of the side-by-side preview is always the LIVE
+    // editable segmentation (what the transcript is now), regardless of which
+    // timing source feeds the re-flow — so reuse the live rows loaded above.
+    $beforeRows = $liveRows;
+    $before = array_map(fn($r) => [
+        'segment' => $r['segment'],
+        'secs'    => round((float)$r['secs'], 3),
+        'text'    => $r['text'],
+    ], $beforeRows);
     jsonResponse(['source' => $source, 'in_rows' => count($rows), 'in_words' => count($words),
-                  'cues' => $out, 'count' => count($out)]);
+                  'cues' => $out, 'count' => count($out), 'before' => $before]);
 }
 
 if ($action === 'fit_apply') {
@@ -275,10 +180,71 @@ if ($action === 'fit_apply') {
     $clean = [];
     foreach ($cues as $c) {
         if (!isset($c['segment'], $c['text'])) continue;
-        $clean[] = ['segment' => (string)$c['segment'], 'text' => (string)$c['text']];
+        $spk = (array_key_exists('speaker', $c) && $c['speaker'] !== '' && $c['speaker'] !== null)
+             ? (string)$c['speaker'] : null;
+        $clean[] = ['segment' => (string)$c['segment'], 'text' => (string)$c['text'], 'speaker' => $spk];
     }
     $inserted = cfReplaceLive($db, $itemKey, $clean);
     jsonResponse(['inserted' => $inserted, 'snapshot_key' => $snap]);
+}
+
+// ── LLM warm-up handshake (prevents Cloudflare 524 on cold model load) ───────
+// A cold 70B model can take >100s to load into memory on the box — longer than
+// Cloudflare's proxy timeout — so the very first ai_chunk used to return a 524
+// HTML page to the browser even though the load eventually succeeded. Instead
+// the UI calls `warm` (fire-and-forget, returns instantly) then polls
+// `llm_status` (fast) until the model is resident, so no single browser request
+// ever blocks on the load.
+if ($action === 'llm_status') {
+    global $LLM_CODES;
+    $model = (string)($data['model'] ?? $_GET['model'] ?? '');
+    $r = gpuOllamaRequest('GET', '/api/ps', null, 8);   // resident models — fast
+    $loaded = [];
+    if (!empty($r['ok'])) {
+        foreach (($r['data']['models'] ?? []) as $m) {
+            $n = $m['name'] ?? ($m['model'] ?? '');
+            if ($n !== '') $loaded[] = $n;
+        }
+    }
+    // Ollama reports an untagged pull as "<name>:latest" in /api/ps, but the
+    // whitelist codes are bare (e.g. "mistral-nemo"). Compare with the ":latest"
+    // suffix normalized off so a resident model is correctly seen as ready.
+    $normTag = fn($s) => preg_replace('/:latest$/', '', (string)$s);
+    $ready = false;
+    if ($model !== '') {
+        foreach ($loaded as $ln) { if ($normTag($ln) === $normTag($model)) { $ready = true; break; } }
+    }
+    jsonResponse([
+        'ok'     => !empty($r['ok']),
+        'ready'  => $ready,
+        'loaded' => $loaded,
+        'error'  => empty($r['ok']) ? ($r['error'] ?? 'status check failed') : null,
+    ]);
+}
+
+if ($action === 'warm') {
+    if ($method !== 'POST') errorResponse('POST only', 405);
+    global $LLM_CODES;
+    $model = (string)($data['model'] ?? '');
+    if (!in_array($model, $LLM_CODES, true)) errorResponse('unknown model: ' . $model);
+    // Detached preload: Ollama loads the model on an empty /api/generate and
+    // holds it warm via keep_alive. The nohup + </dev/null detach (same idiom
+    // as the STT queue's spawnCappedWorker) lets this HTTP response return at
+    // once while the box loads in the background — a follow-up llm_status poll
+    // reports when it is resident.
+    // ⚠ MUST pass the same num_ctx ai_chunk will use: without it Ollama reserves
+    // the model's full default KV cache (~50 GiB) and OOMs on the RAM-full box
+    // (never loading); and a mismatched ctx would force ai_chunk to reload cold.
+    $baselines = $data['baselines'] ?? [];
+    $numCtx = (is_array($baselines) && count($baselines)) ? 16384 : 8192;
+    $url     = gpuOllamaUrl() . '/api/generate';
+    $payload = json_encode(['model' => $model, 'keep_alive' => '20m',
+                            'options' => ['num_ctx' => $numCtx]], JSON_UNESCAPED_SLASHES);
+    $inner   = 'curl -s --max-time 600 -X POST ' . escapeshellarg($url)
+             . ' -H ' . escapeshellarg('Content-Type: application/json')
+             . ' -d ' . escapeshellarg($payload);
+    @exec('nohup bash -c ' . escapeshellarg($inner) . ' > /dev/null 2>&1 < /dev/null &');
+    jsonResponse(['ok' => true, 'warming' => true, 'model' => $model]);
 }
 
 if ($action === 'ai_chunk') {
@@ -290,19 +256,62 @@ if ($action === 'ai_chunk') {
     $offset = max(0, (int)($data['offset'] ?? 0));
     $limit  = min(60, max(1, (int)($data['limit'] ?? 40)));
 
+    // Optional cross-reference baselines: other STT engines' runs of the same
+    // audio, time-aligned per live line so the LLM can reconcile disagreements
+    // (consensus decoding) rather than proofread one noisy hypothesis blind.
+    $baselineCodes = $data['baselines'] ?? [];
+    if (!is_array($baselineCodes)) $baselineCodes = [];
+    $availCodes = array_column(cfAutoModels($db, $itemKey), 'code');
+    $baselineCodes = array_values(array_filter(
+        array_map('strval', $baselineCodes),
+        fn($c) => in_array($c, $availCodes, true)
+    ));
+
     $live = cfLoadLive($db, $itemKey);
     $total = count($live);
     $slice = array_slice($live, $offset, $limit);
     if (!$slice) jsonResponse(['results' => [], 'total' => $total, 'next' => null, 'done' => true]);
 
+    // Align each selected baseline to the full live row set (indexed globally),
+    // then read off the slice's global indices below. Each baseline gets a
+    // per-item global time-shift correction first so a constantly lead/lagged
+    // live clock still lines up.
+    $alignByModel = [];
+    foreach ($baselineCodes as $code) {
+        $brows = cfLoadAuto($db, $itemKey, $code);
+        $alignByModel[$code] = cfAlignBaselineToLive($live, $brows, cfEstimateShift($live, $brows));
+    }
+
     $lines = [];
-    foreach ($slice as $idx => $r) $lines[] = ['i' => $idx, 'text' => $r['text'], 'key' => $r['key'], 'old' => $r['text']];
+    foreach ($slice as $idx => $r) {
+        $globalIdx = $offset + $idx;
+        $alts = [];
+        foreach ($baselineCodes as $code) {
+            $t = $alignByModel[$code][$globalIdx] ?? '';
+            // Surface an alternate only when it exists, differs from the current
+            // line (identical = no signal, just bulk), and looks like the same
+            // span (guards against live-transcript timestamp drift).
+            if ($t !== '' && $t !== $r['text'] && cfAltLooksAligned($r['text'], $t)) {
+                $alts[] = ['engine' => $code, 'text' => mb_substr($t, 0, 400)];
+            }
+        }
+        $lines[] = ['i' => $idx, 'text' => $r['text'], 'key' => $r['key'], 'old' => $r['text'], 'alts' => $alts];
+    }
     $ctx = cfCorrectionContext($db);
     $messages = cfBuildMessages($ctx, $lines);
+    // Widen context when alternates are attached — each line carries 1-N extra
+    // readings, so the default 8k can clip a 40-line chunk.
+    $numCtx = $baselineCodes ? 16384 : 8192;
 
     $resp = gpuLlmChat($model, $messages, ['json' => true, 'temperature' => 0.1,
-                                           'timeout' => 280, 'keep_alive' => '20m']);
-    if (!$resp['ok']) errorResponse('LLM unavailable: ' . ($resp['error'] ?? 'unknown'), 502);
+                                           'timeout' => 280, 'keep_alive' => '20m', 'num_ctx' => $numCtx]);
+    if (!$resp['ok']) {
+        $llmErr = $resp['error'] ?? 'unknown';
+        // 424 for upstream GPU/LLM outages (timeouts, connection failures) — keeps them out of
+        // yy_monitor_event (logMonitorEvent only fires on 5xx). 502 for unexpected non-connection errors.
+        $llmStatus = preg_match('/connection failed|timed out|HTTP [45]\d\d\b/i', $llmErr) ? 424 : 502;
+        errorResponse('LLM unavailable: ' . $llmErr, $llmStatus);
+    }
 
     $parsed = json_decode($resp['content'], true);
     $byIdx = [];
@@ -320,7 +329,8 @@ if ($action === 'ai_chunk') {
     }
     $next = ($offset + $limit < $total) ? $offset + $limit : null;
     jsonResponse(['results' => $results, 'total' => $total, 'next' => $next,
-                  'done' => $next === null, 'model' => $model]);
+                  'done' => $next === null, 'model' => $model,
+                  'used_baselines' => $baselineCodes]);
 }
 
 if ($action === 'ai_apply') {

@@ -27,6 +27,8 @@
     var audio = null;
     var progressEl = null;       // wrapper around the seek track + fill
     var progressFill = null;     // inner bar that grows with currentTime
+    var timeCurEl = null;        // "0:00" elapsed readout (left, under track)
+    var timeDurEl = null;        // "4:56" total-length readout (right)
     var playerEl    = null;      // outer flex row: [volume] [progress] [play]
     var volSlider   = null;      // user-adjustable audio volume (0–1)
     var volBtnEl    = null;      // speaker button — mirrors play-button disabled state
@@ -34,6 +36,7 @@
     var fetchSeq = 0;       // monotonic — only latest fetch's response wins
     var loadedChapterKey = null;
     var isPlaying = false;
+    var pendingSeekMs = null;      // seek requested before chapter metadata loaded
     var chapterPauseTimer = null;
     var suppressPageSync = false;  // set true when WE drive a goto from a marker
     var lastPage = 0;
@@ -61,16 +64,16 @@
             '.fb-tts-vol-wrap { position: relative; flex: 0 0 43px;',
             '                   display: flex; align-items: center; justify-content: center; }',
             '.fb-tts-vol-btn { width: 43px; height: 43px; border-radius: 50%;',
-            '                  background: #1f3550; color: #cfe1ff; border: 1px solid #2a4d70;',
+            '                  background: var(--fb-tts-btn-bg, #1f3550); color: var(--fb-tts-icon-color, #cfe1ff); border: 1px solid var(--fb-tts-btn-border, #2a4d70);',
             '                  display: flex; align-items: center; justify-content: center;',
             '                  cursor: pointer; padding: 0;',
             '                  transition: background 0.15s, transform 0.1s; }',
-            '.fb-tts-vol-btn:hover { background: #28456a; }',
+            '.fb-tts-vol-btn:hover { background: var(--fb-tts-btn-bg-hover, #28456a); }',
             '.fb-tts-vol-btn:active { transform: scale(0.95); }',
             '.fb-tts-vol-btn svg { width: 22px; height: 22px; }',
             '.fb-tts-vol-popup { position: absolute; bottom: calc(100% + 8px);',
             '                    left: 50%; transform: translateX(-50%);',
-            '                    background: #1f3550; border: 1px solid #2a4d70; border-radius: 8px;',
+            '                    background: var(--fb-tts-btn-bg, #1f3550); border: 1px solid var(--fb-tts-btn-border, #2a4d70); border-radius: 8px;',
             '                    padding: 14px 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.45);',
             '                    display: none; z-index: 14; }',
             '.fb-tts-vol-popup.is-open { display: flex; align-items: center; justify-content: center; }',
@@ -86,25 +89,25 @@
             '              width: 24px; height: 110px; padding: 0; margin: 0 0 0 6px;',
             '              cursor: pointer; background: transparent; outline: none; }',
             '.fb-tts-vol::-webkit-slider-runnable-track {',
-            '              width: 6px; background: rgba(200,200,200,0.85);',
+            '              width: 6px; background: var(--fb-tts-track-bg, rgba(200,200,200,0.85));',
             '              border-radius: 3px; }',
             '.fb-tts-vol::-moz-range-track {',
-            '              width: 6px; background: rgba(200,200,200,0.85);',
+            '              width: 6px; background: var(--fb-tts-track-bg, rgba(200,200,200,0.85));',
             '              border-radius: 3px; }',
             '.fb-tts-vol::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;',
             '              width: 16px; height: 16px; border-radius: 50%;',
-            '              background: #cfe1ff; border: 1px solid #2a4d70; cursor: pointer;',
+            '              background: var(--fb-tts-thumb-bg, #cfe1ff); border: 1px solid var(--fb-tts-btn-border, #2a4d70); cursor: pointer;',
             '              box-shadow: 0 1px 3px rgba(0,0,0,0.4); }',
             '.fb-tts-vol::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%;',
-            '              background: #cfe1ff; border: 1px solid #2a4d70; cursor: pointer;',
+            '              background: var(--fb-tts-thumb-bg, #cfe1ff); border: 1px solid var(--fb-tts-btn-border, #2a4d70); cursor: pointer;',
             '              box-shadow: 0 1px 3px rgba(0,0,0,0.4); }',
             // Play/Pause button — flex item, fixed circle on the right.
             '.fb-tts-btn { flex: 0 0 43px; height: 43px; border-radius: 50%;',
-            '              background: #1f3550; color: #cfe1ff; border: 1px solid #2a4d70;',
+            '              background: var(--fb-tts-btn-bg, #1f3550); color: var(--fb-tts-icon-color, #cfe1ff); border: 1px solid var(--fb-tts-btn-border, #2a4d70);',
             '              display: flex; align-items: center; justify-content: center;',
             '              cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.35);',
             '              transition: opacity 0.2s, transform 0.1s, background 0.15s; }',
-            '.fb-tts-btn:hover:not(.is-disabled) { background: #28456a; }',
+            '.fb-tts-btn:hover:not(.is-disabled) { background: var(--fb-tts-btn-bg-hover, #28456a); }',
             '.fb-tts-btn:active:not(.is-disabled) { transform: scale(0.95); }',
             '.fb-tts-btn.is-disabled { opacity: 0.25; cursor: not-allowed; }',
             // Speaker button mirrors the play button's disabled visual when
@@ -113,27 +116,40 @@
             '.fb-tts-vol-btn.is-disabled { opacity: 0.25; cursor: not-allowed; }',
             '.fb-tts-btn svg { width: 20px; height: 20px; }',
             // Brief amber tint when waiting between chapters.
-            '.fb-tts-btn.is-pausing { background: #4d3a1f; border-color: #6d5a3a; color: #f7d77a; }',
+            '.fb-tts-btn.is-pausing { background: var(--fb-tts-pausing-bg, #4d3a1f); border-color: var(--fb-tts-pausing-border, #6d5a3a); color: var(--fb-tts-pausing-color, #f7d77a); }',
             // MP3 seek bar — middle flex item, takes remaining width.
             // Hidden (visually) while no chapter audio is available.
-            '.fb-tts-progress { flex: 1; height: 12px; transition: opacity 0.2s; }',
+            // Column layout: scrub track on top, elapsed/total times below.
+            '.fb-tts-progress { flex: 1; display: flex; flex-direction: column;',
+            '                   justify-content: center; transition: opacity 0.2s; }',
             '.fb-tts-progress.is-hidden { opacity: 0; pointer-events: none; }',
             '.fb-tts-progress-track { position: relative; width: 100%; height: 6px;',
-            '                         margin-top: 3px; background: rgba(200,200,200,0.85);',
+            '                         background: var(--fb-tts-track-bg, rgba(200,200,200,0.85));',
             '                         border-radius: 3px; cursor: pointer; overflow: hidden; }',
             '.fb-tts-progress-fill  { position: absolute; top: 0; left: 0; height: 100%;',
-            '                         background: #1f3550; width: 0%; }',
+            '                         background: var(--fb-tts-fill-bg, #1f3550); width: 0%; }',
+            // Time readout row under the scrubber: elapsed on the left,
+            // total duration on the right.
+            '.fb-tts-times { display: flex; justify-content: space-between;',
+            '                margin-top: 3px; font-size: 11px; line-height: 1;',
+            '                color: var(--fb-tts-time-color, #cfe1ff); font-variant-numeric: tabular-nums;',
+            '                font-feature-settings: "tnum"; user-select: none; }',
             // Subtle read-along highlight — applied to text-layer spans
             // that belong to the paragraph currently being narrated. We
             // only mark spans on the visible page, so a paragraph
             // straddling a page break highlights its portion of each
             // page as the flipbook turns. !important wins against the
             // page-specific styles already injected on each span.
+            // The narration tint is intentionally translucent (low alpha) so
+            // the underlying text stays legible. The admin color picker yields
+            // an opaque hex, so we re-derive the translucent fill from it with
+            // color-mix — keeping the same 14% strength while letting the hue
+            // be configured. Fallback #ffe696 == the old rgba(255,230,150).
             '.text-layer span.tts-current,',
             '.pg .text-layer span.tts-current,',
             '.cpg .text-layer span.tts-current {',
-            '    background: rgba(255,230,150,0.14) !important;',
-            '    box-shadow: 0 0 0 2px rgba(255,230,150,0.14);',
+            '    background: color-mix(in srgb, var(--fb-tts-highlight, #ffe696) 14%, transparent) !important;',
+            '    box-shadow: 0 0 0 2px color-mix(in srgb, var(--fb-tts-highlight, #ffe696) 14%, transparent);',
             '    border-radius: 2px;',
             '}',
             // URL-driven paragraph highlight uses continuous line-band
@@ -153,9 +169,12 @@
             '    box-shadow: none !important;',
             '    border-radius: 0 !important;',
             '}',
+            // Search / deep-link paragraph band — same translucency trick as
+            // the narration tint (40% here). Fallback #ffc83c == the old
+            // rgba(255,200,60).
             '.text-layer .url-highlight-band {',
             '    position: absolute;',
-            '    background: rgba(255,200,60,0.40);',
+            '    background: color-mix(in srgb, var(--fb-tts-url-highlight, #ffc83c) 40%, transparent);',
             '    pointer-events: none;',
             '    z-index: 0;',
             '}',
@@ -262,6 +281,20 @@
         track.appendChild(progressFill);
         progressEl.appendChild(track);
         track.addEventListener('click', onProgressClick);
+
+        // Elapsed / total time readout under the scrubber.
+        var times = document.createElement('div');
+        times.className = 'fb-tts-times';
+        timeCurEl = document.createElement('span');
+        timeCurEl.className = 'fb-tts-time-cur';
+        timeCurEl.textContent = '0:00';
+        timeDurEl = document.createElement('span');
+        timeDurEl.className = 'fb-tts-time-dur';
+        timeDurEl.textContent = '0:00';
+        times.appendChild(timeCurEl);
+        times.appendChild(timeDurEl);
+        progressEl.appendChild(times);
+
         playerEl.appendChild(progressEl);
 
         // Play/Pause button on the far right.
@@ -300,9 +333,10 @@
         if (r.width <= 0) return;
         playerEl.style.left   = Math.round(r.left)  + 'px';
         playerEl.style.width  = Math.round(r.width) + 'px';
-        // Same anchor as the old standalone button — bottom edge sits
-        // just above the nav so it visually attaches to it.
-        playerEl.style.bottom = 'calc(var(--nav, 56px) - 2px)';
+        // Sit just above the nav, nudged down ~18px from the old anchor so
+        // the elapsed/total time readout clears the white page bottom and
+        // reads against the black background below the page.
+        playerEl.style.bottom = 'calc(var(--nav, 56px) - 20px)';
     }
 
     function ensureAudio() {
@@ -312,7 +346,16 @@
         // Restore the user's persisted volume so the first play() honors it.
         audio.volume = initialVolume();
         audio.addEventListener('timeupdate',     function () { onTimeUpdate(); renderProgress(); });
-        audio.addEventListener('loadedmetadata', renderProgress);
+        audio.addEventListener('loadedmetadata', function () {
+            // A page-driven seek may have been requested before the MP3's
+            // metadata was ready (e.g. the reader paged forward before ever
+            // pressing play). Apply it now that we can position the playhead.
+            if (pendingSeekMs != null) {
+                try { audio.currentTime = pendingSeekMs / 1000; } catch (e) {}
+                pendingSeekMs = null;
+            }
+            renderProgress();
+        });
         audio.addEventListener('durationchange', renderProgress);
         audio.addEventListener('seeked',         renderProgress);
         audio.addEventListener('ended', onEnded);
@@ -332,18 +375,34 @@
         try { audio.currentTime = ratio * audio.duration; } catch (err) {}
     }
 
+    // Seconds → "M:SS" (or "H:MM:SS" past an hour). Non-finite/NaN → "0:00".
+    function formatTime(secs) {
+        secs = Math.floor(secs);
+        if (!isFinite(secs) || secs < 0) secs = 0;
+        var h = Math.floor(secs / 3600);
+        var m = Math.floor((secs % 3600) / 60);
+        var s = secs % 60;
+        var ss = (s < 10 ? '0' : '') + s;
+        if (h > 0) return h + ':' + (m < 10 ? '0' : '') + m + ':' + ss;
+        return m + ':' + ss;
+    }
+
     function renderProgress() {
         if (!progressEl) return;
         var show = !!(current && current.available);
         progressEl.classList.toggle('is-hidden', !show);
         if (!show || !audio || !audio.duration || !isFinite(audio.duration)) {
             if (progressFill) progressFill.style.width = '0%';
+            if (timeCurEl) timeCurEl.textContent = '0:00';
+            if (timeDurEl) timeDurEl.textContent = '0:00';
             return;
         }
         if (progressFill) {
             var pct = (audio.currentTime / audio.duration) * 100;
             progressFill.style.width = pct.toFixed(2) + '%';
         }
+        if (timeCurEl) timeCurEl.textContent = formatTime(audio.currentTime);
+        if (timeDurEl) timeDurEl.textContent = formatTime(audio.duration);
         syncPlayerGeometry();
     }
 
@@ -682,18 +741,38 @@
         startPlayback();
     }
 
+    // Position the audio playhead at a given offset in the current chapter,
+    // loading the chapter's MP3 first if it isn't already sourced. Works
+    // whether or not we're playing — so paging through the book moves the
+    // player (and the seek bar) to match the visible page even when paused.
+    // If the metadata hasn't loaded yet the seek is deferred until it has
+    // (see the loadedmetadata handler in ensureAudio).
+    function seekChapterToMs(ms) {
+        ensureAudio();
+        if (!current || !current.available || !current.audio_url) return;
+        if (loadedChapterKey !== current.chapter_key) {
+            audio.src = current.audio_url;
+            loadedChapterKey = current.chapter_key;
+        }
+        if (audio.readyState >= 1 && isFinite(audio.duration)) {
+            pendingSeekMs = null;
+            try { audio.currentTime = ms / 1000; } catch (e) {}
+        } else {
+            // Metadata not ready — record the target and nudge a load so the
+            // loadedmetadata handler can apply it.
+            pendingSeekMs = ms;
+            try { audio.load(); } catch (e) {}
+        }
+        renderProgress();
+    }
+
     function startPlayback() {
         ensureAudio();
         if (!current || !current.available) return;
         var page = cfg.getCurrentPage ? cfg.getCurrentPage() : 1;
         var marker = markerForPage(current.markers, page);
         var startMs = marker ? marker.offset_ms : 0;
-        // Re-source the audio if we just switched chapters.
-        if (loadedChapterKey !== current.chapter_key) {
-            audio.src = current.audio_url;
-            loadedChapterKey = current.chapter_key;
-        }
-        try { audio.currentTime = startMs / 1000; } catch (e) {}
+        seekChapterToMs(startMs);
         var p = audio.play();
         if (p && p.catch) p.catch(function () {});
     }
@@ -999,13 +1078,16 @@
             var minP = current.markers[0].paragraph_page;
             var maxP = current.markers[current.markers.length - 1].paragraph_page;
             if (page1 >= minP && page1 <= maxP) {
-                // Same chapter — no fetch needed; just update button title
-                // metadata stays the same. If the user manually turned the
-                // page while audio was playing, jump the audio to track.
-                if (isPlaying) {
-                    var m = markerForPage(current.markers, page1);
-                    if (m) { try { audio.currentTime = m.offset_ms / 1000; } catch (e) {} }
-                }
+                // Same chapter — no fetch needed. Move the audio playhead to
+                // where this page begins so the player tracks the book. This
+                // runs whether we're playing OR paused: previously the seek
+                // was gated on isPlaying, so turning the page while paused
+                // (or before ever pressing play) left the playhead — and the
+                // seek bar — parked at the old offset, making the audio seem
+                // to "restart from the beginning" when play was pressed after
+                // paging forward.
+                var m = markerForPage(current.markers, page1);
+                if (m) seekChapterToMs(m.offset_ms);
                 // Re-apply the highlight against whatever's now visible.
                 // If the paragraph being narrated spans the page we just
                 // left and the one we just landed on, paragraph_number
@@ -1018,18 +1100,82 @@
                 return;
             }
         }
-        // Different chapter — pause audio (we don't auto-cross chapters on
-        // manual page turn; only on natural end-of-audio) and refetch. Clear
-        // `current` synchronously so any racing timeupdate (between pause()
-        // and the audio element actually stopping) doesn't snap the page
-        // back via cfg.gotoPage. Also cancel any pending inter-chapter
-        // pause timer so audio doesn't resume after the user has left.
+        // Different chapter. Remember whether we were playing: if so, the
+        // user expects the narration to carry on into the new chapter rather
+        // than stop. We still pause the OLD chapter's element immediately
+        // (its audio_url is about to change) and clear `current` synchronously
+        // so any racing timeupdate (between pause() and the element actually
+        // stopping) doesn't snap the page back via cfg.gotoPage. Cancel any
+        // pending inter-chapter pause timer too.
+        var wasPlaying = isPlaying || (audio && !audio.paused);
         if (audio && !audio.paused) try { audio.pause(); } catch (e) {}
         if (chapterPauseTimer) { clearTimeout(chapterPauseTimer); chapterPauseTimer = null; }
         current = null;
         currentParagraphNumber = -1;
         clearHighlight();
         renderButton();
-        fetchForPage(page1);
+        // force:true because we nulled `current`; afterLoad resumes playback
+        // from the landed page's offset in the NEW chapter when we were
+        // already playing — so crossing a chapter boundary keeps the audio
+        // going (loading the new MP3 + seeking to this page) instead of
+        // halting at the seam.
+        fetchForPage(page1, { force: true, afterLoad: function () {
+            if (wasPlaying && current && current.available) startPlayback();
+        }});
+    };
+
+    // Explicit chapter selection — call this when the reader picks a chapter
+    // from the TOC (or a #c=… deep-link) rather than paging through the book.
+    //
+    // The page a chapter's TOC entry points at is its *heading* page, which
+    // in paragraph terms is usually still owned by the PREVIOUS chapter: the
+    // prior chapter's last paragraph spills onto the new chapter's heading
+    // page (e.g. chapter 1 runs to paragraph-page 207 while chapter 2's TOC
+    // page is 206 and its first paragraph isn't until 208). Resolving the
+    // audio by that heading page — which is what notifyPageChange() does, and
+    // what /api/tts-audio.php's `paragraph_page <= page` lookup does — binds
+    // the player to the wrong (previous) chapter. While PLAYING this was
+    // masked: the seek landed near the old chapter's end, `ended` fired, and
+    // onEnded auto-advanced into the right chapter. While PAUSED there's no
+    // `ended`, so the controls stayed stuck on the previous chapter.
+    //
+    // Here the caller passes the chapter's TOC slot [headingPage, nextHeading)
+    // so we can resolve the audio using a page guaranteed to sit inside THIS
+    // chapter's body, then position the playhead at the chapter's first
+    // paragraph (its heading page precedes the first marker, so markerForPage
+    // returns marker[0]).
+    BM.selectChapterByTocSlot = function (headingPage, nextHeadingPage) {
+        if (!cfg) return;
+        headingPage    = parseInt(headingPage, 10) || 0;
+        nextHeadingPage = parseInt(nextHeadingPage, 10) || 0;
+        if (!headingPage) return;
+        syncPlayerGeometry();
+        // A page strictly inside the chapter body: the page just before the
+        // next chapter's heading. For the final chapter (no next heading, or
+        // an adjacent one) the heading page is already inside its own body.
+        var resolvePage = (nextHeadingPage && nextHeadingPage > headingPage + 1)
+            ? (nextHeadingPage - 1)
+            : headingPage;
+        lastPage = headingPage;
+        // Stop the old chapter's element immediately (its audio_url is about
+        // to change) and clear `current` synchronously so any racing
+        // timeupdate doesn't snap the page back. Mirror notifyPageChange's
+        // different-chapter teardown.
+        var wasPlaying = isPlaying || (audio && !audio.paused);
+        if (audio && !audio.paused) try { audio.pause(); } catch (e) {}
+        if (chapterPauseTimer) { clearTimeout(chapterPauseTimer); chapterPauseTimer = null; }
+        current = null;
+        currentParagraphNumber = -1;
+        clearHighlight();
+        renderButton();
+        fetchForPage(resolvePage, { force: true, afterLoad: function () {
+            if (!current || !current.available) return;
+            // Park the playhead (and seek bar) at the chapter's opening
+            // paragraph so a paused reader sees 0:00 of the new chapter, and
+            // resume playback there if we were playing when they jumped.
+            var marker = markerForPage(current.markers, headingPage);
+            seekChapterToMs(marker ? marker.offset_ms : 0);
+            if (wasPlaying) startPlayback();
+        }});
     };
 })();

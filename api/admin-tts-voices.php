@@ -351,6 +351,101 @@ if ($action === 'refresh') {
             continue;
         }
 
+        // ── Kokoro adapter (Puget box, /catalog endpoint) ─────────────────
+        // Kokoro-82M ships ~54 fixed style-vector voice packs (NOT clonable);
+        // the box's /catalog?provider=kokoro now enumerates the full HF repo
+        // voice list (code/label/locale/locale_name/language/gender/type/note).
+        // Upserted with active_flag left at its column default (false) so the
+        // admin flips on only the wanted ones. ON CONFLICT deliberately does
+        // NOT touch tts_voice_active_flag (admin picks stick across refreshes)
+        // nor tts_voice_status (the seeded ko-af-sky/bella stay 'GA'). The box
+        // keeps voice_id/lang_code in voices.json, so synth routing needs no
+        // extra column here — the tts_voice_code ('ko-...') is the only key.
+        if ($provCode === 'kokoro') {
+            require_once __DIR__ . '/gpu-client.php';
+            if (!gpuConfigured()) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'GPU_BASE_URL / GPU_API_TOKEN not set in .env'];
+                continue;
+            }
+            $kokoroProvKey = (int)$db->query(
+                "SELECT provider_key FROM yy_provider
+                  WHERE provider_settings->>'engine'='kokoro'
+                  ORDER BY provider_key LIMIT 1"
+            )->fetchColumn();
+            if ($kokoroProvKey <= 0) {
+                $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                                  'skipped' => 'no Kokoro yy_provider row'];
+                continue;
+            }
+            try {
+                $resp = gpuProviderCatalog($provCode);
+            } catch (Throwable $e) {
+                errorResponse("Puget /catalog failed for $provCode: " . $e->getMessage());
+            }
+            $voices = is_array($resp['data']['voices'] ?? null) ? $resp['data']['voices'] : [];
+
+            $upsert = $db->prepare("
+                INSERT INTO yy_tts_voice
+                    (tts_key, tts_voice_code, tts_voice_label, tts_voice_locale, tts_voice_locale_name,
+                     tts_voice_language, tts_voice_region, tts_voice_gender, tts_voice_type,
+                     tts_voice_styles, tts_voice_status, provider_key, tts_voice_note,
+                     tts_voice_download_dtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]'::jsonb, ?, ?, ?, NOW())
+                ON CONFLICT (tts_key, tts_voice_code) DO UPDATE SET
+                    tts_voice_label             = EXCLUDED.tts_voice_label,
+                    tts_voice_locale            = EXCLUDED.tts_voice_locale,
+                    tts_voice_locale_name       = EXCLUDED.tts_voice_locale_name,
+                    tts_voice_language          = EXCLUDED.tts_voice_language,
+                    tts_voice_region            = EXCLUDED.tts_voice_region,
+                    tts_voice_gender            = EXCLUDED.tts_voice_gender,
+                    tts_voice_type              = EXCLUDED.tts_voice_type,
+                    provider_key                = EXCLUDED.provider_key,
+                    tts_voice_note              = EXCLUDED.tts_voice_note,
+                    tts_voice_download_dtime    = NOW()
+                RETURNING (xmax = 0) AS is_insert
+            ");
+            $added = 0; $updated = 0;
+            $db->beginTransaction();
+            try {
+                foreach ($voices as $v) {
+                    $code = (string)($v['code'] ?? '');
+                    if ($code === '') continue;
+                    $locale = (string)($v['locale'] ?? '');
+                    $region = (strpos($locale, '-') !== false)
+                            ? substr($locale, strpos($locale, '-') + 1) : null;
+                    $gender = (string)($v['gender'] ?? '');
+                    $gender = ($gender === '' || strtolower($gender) === 'unknown')
+                            ? null : ucfirst(strtolower($gender));
+                    $upsert->execute([
+                        $provKey,
+                        $code,
+                        substr((string)($v['label'] ?? $code), 0, 250),
+                        $locale !== '' ? substr($locale, 0, 20) : null,
+                        isset($v['locale_name']) ? substr((string)$v['locale_name'], 0, 120) : null,
+                        isset($v['language'])    ? substr((string)$v['language'],    0, 8)   : null,
+                        $region !== null ? substr($region, 0, 8) : null,
+                        $gender !== null ? substr($gender, 0, 20) : null,
+                        isset($v['type']) ? substr((string)$v['type'], 0, 60) : 'Builtin',
+                        'active',
+                        $kokoroProvKey,
+                        (string)($v['note'] ?? ''),
+                    ]);
+                    $row = $upsert->fetch(PDO::FETCH_ASSOC);
+                    if ($row && $row['is_insert']) $added++; else $updated++;
+                }
+                $db->commit();
+            } catch (Throwable $e) {
+                if ($db->inTransaction()) $db->rollBack();
+                errorResponse("yy_tts_voice upsert failed for $provCode: " . $e->getMessage());
+            }
+            $totalAdded   += $added;
+            $totalUpdated += $updated;
+            $perProvider[] = ['tts_key' => $provKey, 'tts_code' => $provCode,
+                              'added' => $added, 'updated' => $updated, 'total' => count($voices)];
+            continue;
+        }
+
         // ── Coqui xtts + coqui adapters (Puget box, /catalog endpoint) ──
         // gpuProviderCatalog() returns the FULL voice/model pool the box
         // can serve (XTTS built-in speakers, or every Coqui TTS model);

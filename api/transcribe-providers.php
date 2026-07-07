@@ -538,7 +538,7 @@ function gpuParseWhisperRows(array $data, bool $wantWord, int $offsetSecs): arra
     return $rows;
 }
 
-function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offsetSecs = 0, ?string &$err = null, string $model = 'gpu-whisper-large-v3', ?PDO $db = null, int $jobKey = 0): array {
+function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offsetSecs = 0, ?string &$err = null, string $model = 'gpu-whisper-large-v3', ?PDO $db = null, int $jobKey = 0, ?array &$speakerEmb = null): array {
     require_once __DIR__ . '/gpu-client.php';
     $route    = gpuEngineRoute($model);
     $wantWord = $route['word'];
@@ -547,14 +547,15 @@ function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offse
     // below can re-issue it with identical params save the vad_filter flag.
     $callEngine = function (bool $vad) use ($audioPath, $wantWord, $prompt, $route): array {
         return gpuTranscribe($audioPath, [
-            'language'        => '',                   // auto-detect
-            'word_timestamps' => $wantWord ? true : false,
-            'vad_filter'      => $vad,
-            'initial_prompt'  => $prompt,
-            'model'           => $route['model'],      // engine picks this model ('' = default)
-            'path'            => $route['path'],       // engine's gateway route
-            'diarize'         => $route['diarize'] ?? false, // whisperx speaker labels
-            'timeout'         => 1800,                 // long audio fine on Blackwell
+            'language'          => '',                 // auto-detect
+            'word_timestamps'   => $wantWord ? true : false,
+            'vad_filter'        => $vad,
+            'initial_prompt'    => $prompt,
+            'model'             => $route['model'],    // engine picks this model ('' = default)
+            'path'              => $route['path'],     // engine's gateway route
+            'diarize'           => $route['diarize'] ?? false, // whisperx speaker labels
+            'return_embeddings' => $route['diarize'] ?? false, // per-speaker voice embeddings
+            'timeout'           => 1800,               // long audio fine on Blackwell
         ]);
     };
 
@@ -604,6 +605,11 @@ function gpuWhisperTranscribe(string $audioPath, string $prompt = '', int $offse
             }
         }
     }
+
+    // Per-speaker voice embeddings (whisperx diarize + return_embeddings):
+    // {SPEAKER_xx: [floats]}. Passed back for the caller to store against the
+    // item so speaker-recognition can match future transcripts. Null otherwise.
+    $speakerEmb = (isset($data['speakers']) && is_array($data['speakers'])) ? $data['speakers'] : null;
 
     $rows = gpuParseWhisperRows($data, $wantWord, $offsetSecs);
     if (!$rows && !empty($data['text'])) {

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782367203">
+    <meta name="page-version" content="1783346404">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Flipbook Admin - Yada Yah</title>
@@ -38,7 +38,7 @@
 <div id="app" class="container" style="display:none">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=17"></script>
+<script src="/js/admin-nav.js?v=20"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -121,6 +121,25 @@ var SECTIONS = [
             { code: 'icon-width',  label: 'Width (px)',  type: 'number', default: '24' },
             { code: 'icon-height', label: 'Height (px)', type: 'number', default: '28' },
             { code: 'icon-bg',     label: 'Background',  type: 'color',  default: '#ffffff' }
+        ]
+    },
+    {
+        title: 'Audio Player Colors',
+        desc: 'Colors for the TTS audio player that appears at the bottom of every flipbook page — the round speaker & play buttons, their icons, the progress/volume bars, and the read-along text highlights. Changes apply on the next flipbook pageview.',
+        fields: [
+            { code: 'player-btn-bg',         label: 'Circle background',        type: 'color', default: '#1f3550' },
+            { code: 'player-btn-bg-hover',   label: 'Circle hover background',  type: 'color', default: '#28456a' },
+            { code: 'player-btn-border',     label: 'Circle border',            type: 'color', default: '#2a4d70' },
+            { code: 'player-icon-color',     label: 'Icon color (speaker/play)',type: 'color', default: '#cfe1ff' },
+            { code: 'player-track-bg',       label: 'Progress & volume track',  type: 'color', default: '#c8c8c8' },
+            { code: 'player-fill-bg',        label: 'Progress indicator (fill)',type: 'color', default: '#1f3550' },
+            { code: 'player-thumb-bg',       label: 'Volume slider knob',       type: 'color', default: '#cfe1ff' },
+            { code: 'player-time-color',     label: 'Time readout text',        type: 'color', default: '#cfe1ff' },
+            { code: 'player-pausing-bg',     label: 'Between-chapters pause bg',    type: 'color', default: '#4d3a1f' },
+            { code: 'player-pausing-border', label: 'Between-chapters pause border',type: 'color', default: '#6d5a3a' },
+            { code: 'player-pausing-color',  label: 'Between-chapters pause icon',  type: 'color', default: '#f7d77a' },
+            { code: 'player-highlight',      label: 'Read-along highlight',     type: 'color', default: '#ffe696' },
+            { code: 'player-url-highlight',  label: 'Search / link highlight',  type: 'color', default: '#ffc83c' }
         ]
     }
 ];

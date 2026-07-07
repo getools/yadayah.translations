@@ -61,7 +61,7 @@ function reapOrphanedJobs($db) {
     $stale = $db->query("SELECT feed_item_transcript_job_key AS k, job_worker_pid AS pid
                            FROM yy_feed_item_transcript_job
                           WHERE job_status = 'running'
-                            AND job_dtime < NOW() - INTERVAL '90 seconds'")->fetchAll(PDO::FETCH_ASSOC);
+                            AND COALESCE(job_running_since, job_dtime) < NOW() - INTERVAL '90 seconds'")->fetchAll(PDO::FETCH_ASSOC);
     if (!$stale) return 0;
     $reap = $db->prepare("UPDATE yy_feed_item_transcript_job
                              SET job_status = 'failed',
@@ -123,7 +123,7 @@ function claimWorkerSlot($db, int $jobKey, bool &$spawned): int {
         ]);
         if ($pid <= 0) return $running;                // spawn failed — leave pending, caller reports queued
         $db->prepare("UPDATE yy_feed_item_transcript_job
-                         SET job_status = 'running', job_worker_pid = ?
+                         SET job_status = 'running', job_worker_pid = ?, job_running_since = NOW()
                        WHERE feed_item_transcript_job_key = ? AND job_status = 'pending'")
            ->execute([$pid, $jobKey]);
         $spawned = true;
@@ -455,6 +455,26 @@ if ($method === 'GET' && $action === 'running') {
             if (empty($haveE[$er['job_key']])) { $editJobs[] = $er; $haveE[$er['job_key']] = true; }
         }
     }
+    // Per-item LIVE editable-transcript row count (yy_feed_item_transcript) for
+    // the items on screen. This is the RELIABLE "the editable transcript is
+    // actually rendered" signal — the separate status table (yy_feed_item_
+    // transcript_status / $tstatus) isn't populated for every item, so the
+    // popover can't trust it to drop finished items. Scoped to the items being
+    // returned (selected ∪ items-with-jobs ∪ items-with-edit-jobs) so it stays
+    // a single cheap grouped count. Empty for the lightweight badge poll.
+    $live = [];
+    $liveItems = $existItems;   // selected ∪ items-with-jobs (already unique/int)
+    foreach ($editJobs as $er) { $liveItems[] = (int)$er['feed_item_key']; }
+    $liveItems = array_values(array_unique(array_filter($liveItems)));
+    if ($liveItems) {
+        $lPh = implode(',', array_fill(0, count($liveItems), '?'));
+        $lStmt = $db->prepare("SELECT feed_item_key, COUNT(*) AS n
+                                 FROM yy_feed_item_transcript
+                                WHERE feed_item_key IN ($lPh)
+                                GROUP BY feed_item_key");
+        $lStmt->execute($liveItems);
+        foreach ($lStmt->fetchAll(PDO::FETCH_ASSOC) as $lr) { $live[(int)$lr['feed_item_key']] = (int)$lr['n']; }
+    }
     jsonResponse([
         'jobs'           => $jobsArr,
         'existing'       => $existing,
@@ -463,6 +483,7 @@ if ($method === 'GET' && $action === 'running') {
         'edit_jobs'      => $editJobs,
         'optin'          => array_map('intval', $optin),
         'tstatus'        => $tstatus,
+        'live'           => $live,
         'baselines_done' => $baselinesDone,
         'items_done'     => $itemsDone,
         'items_queued'   => $itemsQueued,
@@ -551,7 +572,7 @@ if ($method === 'POST' && $action === 'poke') {
     $nextKey = (int)$db->query("SELECT feed_item_transcript_job_key
                                  FROM yy_feed_item_transcript_job
                                 WHERE job_status = 'pending'
-                                ORDER BY feed_item_transcript_job_key
+                                ORDER BY job_priority DESC, feed_item_transcript_job_key
                                 LIMIT 1")->fetchColumn();
     if (!$nextKey) {
         jsonResponse(['ok' => true, 'spawned' => false, 'reason' => 'no pending jobs']);
@@ -696,6 +717,116 @@ function maybeEnqueueEditableNow(PDO $db, int $itemKey): ?int {
     return $ik;
 }
 
+// ── Batch enqueue ────────────────────────────────────────────────────────
+// Create the WHOLE baseline queue (and the editable/consensus builds) for a
+// Generate run in ONE request, server-side, so the queue is created atomically
+// in the exact order the operator arranged it — and survives the operator
+// closing the popover/window (the old client-side per-job dispatch died mid-run
+// when the page went away). Baseline jobs are inserted in the given item×model
+// order → ascending job_key → the single worker (which dequeues FIFO by
+// job_key) runs them in that order. Editable builds mirror the consensus block
+// in admin-transcript-init.php.
+//
+//   POST { action:'enqueue_batch',
+//          items:[ {item_key:N, models:['gpu-...','...']}, ... ],   // page order
+//          edits:[ {item_key:N, baselines:[...], primary:'...', params:{...}, wait_for:[...] }, ... ] }
+//     → { ok:true, jobs:[{item_key,model,job_key}], edits:[{item_key,job_key}], running:N }
+if ($method === 'POST' && $action === 'enqueue_batch') {
+    $items = is_array($data['items'] ?? null) ? $data['items'] : [];
+    $edits = is_array($data['edits'] ?? null) ? $data['edits'] : [];
+    if (!$items && !$edits) errorResponse('Nothing to enqueue.');
+    $valid = array_merge(array_column($AVAILABLE_MODELS, 'code'), array_column($DERIVED_MODELS, 'code'));
+
+    // Supersede same-model in-flight, then INSERT — identical semantics to the
+    // single 'run' action, applied per (item, model) in the supplied order.
+    $supersede = $db->prepare("UPDATE yy_feed_item_transcript_job
+                                  SET job_status = 'cancelled', job_completed_dtime = NOW(),
+                                      job_message = 'superseded by newer run of same model'
+                                WHERE feed_item_key = ? AND job_model = ?
+                                  AND job_status IN ('pending', 'running')");
+    $insBaseline = $db->prepare("INSERT INTO yy_feed_item_transcript_job
+                                     (feed_item_key, job_status, job_message, user_key, job_model, job_priority)
+                                 VALUES (?, 'pending', ?, ?, ?, ?)
+                                 RETURNING feed_item_transcript_job_key");
+    // A single-item generate must not wait behind a large bulk batch: tag its
+    // jobs job_priority=1 so the one worker picks them next (see the
+    // priority-aware dequeue in transcript-worker.php / the poke handler).
+    // Multi-item batches stay at 0 and run in FIFO order among themselves.
+    $priority = (count($items) === 1) ? 1 : 0;
+    $createdJobs = [];
+    $firstJobKey = 0;
+    foreach ($items as $it) {
+        $itemKey = (int)($it['item_key'] ?? 0);
+        if (!$itemKey) continue;
+        foreach ((array)($it['models'] ?? []) as $model) {
+            $model = trim((string)$model);
+            if (!in_array($model, $valid, true)) continue;   // skip unknown model, don't abort the batch
+            $supersede->execute([$itemKey, $model]);
+            $insBaseline->execute([$itemKey, 'Queued for model: ' . $model, $user['user_key'], $model, $priority]);
+            $jobKey = (int)$insBaseline->fetchColumn();
+            if (!$firstJobKey) $firstJobKey = $jobKey;
+            $createdJobs[] = ['item_key' => $itemKey, 'model' => $model, 'job_key' => $jobKey];
+        }
+    }
+
+    // Editable/consensus init jobs (mirrors admin-transcript-init.php consensus).
+    $createdEdits = [];
+    foreach ($edits as $e) {
+        $itemKey = (int)($e['item_key'] ?? 0);
+        if (!$itemKey) continue;
+        $baselines = array_values(array_unique(array_filter(array_map('trim', (array)($e['baselines'] ?? [])))));
+        if (!$baselines) continue;
+        $waitFor = array_values(array_intersect(
+            array_values(array_unique(array_filter(array_map('trim', (array)($e['wait_for'] ?? []))))),
+            $baselines));
+        $place = implode(',', array_fill(0, count($baselines), '?'));
+        $chk = $db->prepare("SELECT DISTINCT feed_item_transcript_auto_model FROM yy_feed_item_transcript_auto
+                              WHERE feed_item_key = ? AND feed_item_transcript_auto_model IN ($place)");
+        $chk->execute(array_merge([$itemKey], $baselines));
+        $present = $chk->fetchAll(PDO::FETCH_COLUMN);
+        if (!$present && !$waitFor) continue;   // nothing to build from and nothing coming
+        $rawP = is_array($e['params'] ?? null) ? $e['params'] : [];
+        $params = [
+            'max_chars'      => max(10, (int)($rawP['max_chars'] ?? 42)),
+            'max_lines'      => max(1, (int)($rawP['max_lines'] ?? 2)),
+            'preferred_lines'=> max(1, (int)($rawP['preferred_lines'] ?? 1)),
+            'max_secs'       => (float)($rawP['max_secs'] ?? 7.0),
+            'min_secs'       => (float)($rawP['min_secs'] ?? 1.2),
+            'break_punct'    => array_key_exists('break_punct', $rawP) ? !empty($rawP['break_punct']) : true,
+            'break_gap'      => max(0.0, (float)($rawP['break_gap'] ?? 0)),
+            'use_boundaries' => !empty($rawP['use_boundaries']),
+            'prioritize_primary_breaks' => !empty($rawP['prioritize_primary_breaks']),
+            'dedup'          => array_key_exists('dedup', $rawP) ? !empty($rawP['dedup']) : true,
+        ];
+        $primary = trim((string)($e['primary'] ?? ''));
+        $primaryAllowed = $waitFor ? $baselines : $present;
+        if ($primary !== '' && !in_array($primary, $primaryAllowed, true)) $primary = '';
+        $storeBaselines = $waitFor ? $baselines : array_values($present);
+        $jobParams = json_encode(['baselines' => $storeBaselines, 'primary' => $primary, 'params' => $params, 'wait_for' => $waitFor]);
+        // Supersede a not-yet-built editable job for this item (pending, or
+        // running with no progress); real built transcripts (rows>0) untouched.
+        $db->prepare("UPDATE yy_feed_item_transcript_init_job
+                         SET job_status='cancelled', job_error='superseded by a newer generation', job_completed=now()
+                       WHERE job_item_key = ? AND job_status IN ('pending','running') AND COALESCE(job_rows_written,0) = 0")
+           ->execute([$itemKey]);
+        $ins = $db->prepare("INSERT INTO yy_feed_item_transcript_init_job (job_item_key, job_model, job_user_key, job_params, job_priority)
+                              VALUES (?, 'consensus', ?, ?, ?) RETURNING job_key");
+        $ins->execute([$itemKey, (int)$user['user_key'], $jobParams, $priority]);
+        $createdEdits[] = ['item_key' => $itemKey, 'job_key' => (int)$ins->fetchColumn()];
+    }
+
+    // Start the single STT worker once (if the slot is free); jobs over the cap
+    // stay 'pending' and the worker's shutdown-dequeue drains them FIFO. Then
+    // kick the editable single-worker queue.
+    $running = 0;
+    if ($firstJobKey) {
+        $spawned = false;
+        $running = claimWorkerSlot($db, $firstJobKey, $spawned);
+    }
+    if ($createdEdits) spawnNextInitWorker($db);
+    jsonResponse(['ok' => true, 'jobs' => $createdJobs, 'edits' => $createdEdits, 'running' => $running]);
+}
+
 if ($method === 'POST' && $action === 'run') {
     $itemKey = (int)($data['item_key'] ?? 0);
     $model   = trim($data['model'] ?? '');
@@ -720,10 +851,13 @@ if ($method === 'POST' && $action === 'run') {
                      AND job_status IN ('pending', 'running')")
        ->execute([$itemKey, $model]);
 
+    // The `run` action is always a single (item, model) interactive request,
+    // so it gets job_priority=1 to jump ahead of any bulk batch (matches the
+    // single-item path in enqueue_batch and the priority-aware dequeue).
     $insStmt = $db->prepare("
         INSERT INTO yy_feed_item_transcript_job
-            (feed_item_key, job_status, job_message, user_key, job_model)
-        VALUES (?, 'pending', ?, ?, ?)
+            (feed_item_key, job_status, job_message, user_key, job_model, job_priority)
+        VALUES (?, 'pending', ?, ?, ?, 1)
         RETURNING feed_item_transcript_job_key
     ");
     $insStmt->execute([$itemKey, 'Queued for model: ' . $model, $user['user_key'], $model]);

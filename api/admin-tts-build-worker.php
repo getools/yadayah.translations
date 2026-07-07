@@ -23,6 +23,12 @@ if (!$audioKey) {
     exit(2);
 }
 
+// This is a background BATCH job: tell the GPU engine (via gpu-client.php's
+// gpuSynthesize) to yield the single shared GPU to interactive auditions /
+// previews so they never queue behind a whole chapter build. The engine's
+// priority-aware synth lock lets an audition slip in between build paragraphs.
+putenv('TTS_GPU_PRIORITY=batch');
+
 $db = getDb();
 
 // ── Queue promotion ────────────────────────────────────────────────────
@@ -66,10 +72,12 @@ register_shutdown_function(function() use (&$db, $MAX_CONCURRENT_BUILDS, $audioK
                               ->fetchColumn();
             if ($active >= $MAX_CONCURRENT_BUILDS) return;
             // Promote by the row's LOCATION, not by when it was queued:
-            // group by book (tts_sort), then by volume → chapter position
-            // within that book. Paragraph order is handled inside the chapter
-            // build itself (the worker iterates paragraph_number and gap-fills),
-            // so book → chapter here completes book → chapter → paragraph.
+            // strict reading order series → volume → chapter. Paragraph order is
+            // handled inside the chapter build itself (the worker iterates
+            // paragraph_number and gap-fills), so this completes
+            // series → volume → chapter → paragraph. (Primary sort is
+            // series_number, NOT tts_sort — a build must follow the books' reading
+            // order regardless of which TTS voice system rendered it.)
             // A 'Redo' re-queues an already-built chapter; ordering by location
             // means it re-renders in reading order — typically jumping to the
             // front of the pending queue, ahead of later chapters still waiting
@@ -81,10 +89,11 @@ register_shutdown_function(function() use (&$db, $MAX_CONCURRENT_BUILDS, $audioK
                   FROM yy_tts_audio a
                   JOIN yy_tts     t ON t.tts_key     = a.tts_key
                   JOIN yy_volume  v ON v.volume_key  = a.volume_key
+                  JOIN yy_series  s ON s.series_key  = v.series_key
              LEFT JOIN yy_chapter c ON c.chapter_key = a.chapter_key
                  WHERE a.tts_audio_status = 'pending'
                    AND a.tts_audio_worker_pid IS NULL
-                 ORDER BY t.tts_sort, t.tts_name,
+                 ORDER BY s.series_number,
                           v.volume_sort, v.volume_number,
                           c.chapter_sort NULLS FIRST, c.chapter_number NULLS FIRST,
                           a.tts_audio_dtime ASC
@@ -128,6 +137,26 @@ function bail(PDO $db, int $audioKey, string $err): void {
     ]);
     fwrite(STDERR, "FAIL: $err\n");
     exit(1);
+}
+
+// A chapter with no narratable paragraphs (bibliography / back-matter /
+// all-table / all-skip-paged) is NOT a build failure — there is simply
+// nothing to synthesize. Marking it 'failed' left a red error in the
+// admin panel and made the shutdown promoter + build watchdog retry it
+// on every pass. Complete it benignly instead: 100%, zero audio, a
+// message that explains why, and NO audio path (so no broken player).
+function completeEmpty(PDO $db, int $audioKey, string $why): void {
+    updateAudio($db, $audioKey, [
+        'tts_audio_status'          => 'complete',
+        'tts_audio_progress'        => 100,
+        'tts_audio_message'         => $why,
+        'tts_audio_error'           => null,
+        'tts_audio_duration_secs'   => 0,
+        'tts_audio_paragraph_count' => 0,
+        'tts_audio_completed_dtime' => date('Y-m-d H:i:sO'),
+    ]);
+    fwrite(STDERR, "EMPTY-OK: $why\n");
+    exit(0);
 }
 
 // Mark running.
@@ -273,7 +302,29 @@ $pauseSubAfter    = $getNamedPauseMs('__subhead_after__',    500);
 $ext = (strpos($cfg['system']['tts_output_format'], 'mp3') !== false) ? 'mp3'
      : ((strpos($cfg['system']['tts_output_format'], 'opus') !== false) ? 'opus'
      : ((strpos($cfg['system']['tts_output_format'], 'pcm') !== false) ? 'wav' : 'mp3'));
-$baseName  = sprintf('%s-ch%02d.%s', $volumeSlug, $chNum, $ext);
+// Output filename keys on (volume, chapter POSITION, profile) so it is
+// unique across three collision sources: (1) named front/back-matter
+// chapters that all carry chapter_number 0, (2) duplicate chapter numbers,
+// and (3) the same chapter built under different voice profiles. We use
+// the chapter's 1-based offset in the volume's ordered chapter list — the
+// same ordering the TTS endpoints use — NOT chapter_number (which is
+// 0/duplicate for named chapters). Per-paragraph parts live under
+// u/tts-parts/<audioKey>/ keyed by the audio row, so they never collide
+// regardless of this name.
+$chapterIndex = 0;
+if ($chapterKey > 0) {
+    $ordStmt = $db->prepare("SELECT chapter_key FROM yy_chapter WHERE volume_key = ? ORDER BY chapter_sort NULLS FIRST, chapter_number NULLS FIRST, chapter_key");
+    $ordStmt->execute([$volumeKey]);
+    $pos = 0;
+    foreach ($ordStmt->fetchAll(PDO::FETCH_COLUMN) as $ck) {
+        $pos++;
+        if ((int)$ck === $chapterKey) { $chapterIndex = $pos; break; }
+    }
+}
+$profPart = 'p' . (int)$jobProfileKey;
+$baseName = ($chapterKey > 0 && $chapterIndex > 0)
+    ? sprintf('%s-c%02d-%s.%s', $volumeSlug, $chapterIndex, $profPart, $ext)
+    : sprintf('%s-cbook-%s.%s', $volumeSlug, $profPart, $ext);
 $finalPath = $outDir . '/' . $baseName;
 $relPath   = '/u/tts-audio/' . $baseName;
 
@@ -304,6 +355,12 @@ foreach ($paragraphs as $p) {
         $head =& $mergedList[$headIdx];
         $tailHtml  = (string)($p['paragraph_text_html']  ?? '');
         $tailPlain = (string)($p['paragraph_text_plain'] ?? '');
+        // Char offset where THIS tail begins within the combined plain text —
+        // captured BEFORE the append below. Used as the fallback page-break
+        // ratio (char_at / total) when the fuzzy text match can't pin the
+        // offset, so a failed match never drops the continuation marker.
+        $headCharAt = mb_strlen(rtrim((string)$head['paragraph_text_plain'])
+                                . ($tailPlain !== '' ? ' ' : ''));
         // Single-space separator preserves natural spacing without
         // letting two spaces double up.
         if ($tailHtml !== '') {
@@ -311,6 +368,20 @@ foreach ($paragraphs as $p) {
         }
         if ($tailPlain !== '') {
             $head['paragraph_text_plain'] = rtrim((string)$head['paragraph_text_plain']) . ' ' . ltrim($tailPlain);
+        }
+        // Remember which continuation paragraph BEGINS each page this
+        // logical paragraph wraps onto, keyed by that page. The page-break
+        // marker emitted further down references this tail (its
+        // paragraph_key/number) rather than the head, so the viewer joins
+        // the page's real text for read-along highlight and QA aligns the
+        // onset to the right paragraph. First tail to open a page wins.
+        $tailPage = $p['paragraph_page'] !== null ? (int)$p['paragraph_page'] : null;
+        if ($tailPage !== null && !isset($head['_cont_by_page'][$tailPage])) {
+            $head['_cont_by_page'][$tailPage] = [
+                'key'     => $p['paragraph_key'] !== null ? (int)$p['paragraph_key'] : null,
+                'number'  => (int)$p['paragraph_number'],
+                'char_at' => $headCharAt,
+            ];
         }
         unset($head);
         $coalesced++;
@@ -350,7 +421,7 @@ if ($skipped > 0) {
     fwrite(STDERR, "skipped $skipped paragraph(s): " . count(array_filter($paragraphs, fn($p) => !empty($p['paragraph_is_table']))) . " table-flagged, ranges=" . $skipPagesRaw . "\n");
 }
 $nPara = count($paragraphs);
-if (!$nPara) bail($db, $audioKey, "no paragraphs for chapter_key=$chapterKey (all $beforeCount filtered as table/skipped-pages)");
+if (!$nPara) completeEmpty($db, $audioKey, "No narratable content (bibliography / back-matter / table / skip pages) — nothing to synthesize; chapter_key=$chapterKey, $beforeCount paragraph(s) all filtered.");
 
 // ── Series 07: chapter-intro Islamic-source detection ──────────────────
 // Series 07 books ("God Damn Religion") open every chapter with a bold
@@ -472,9 +543,22 @@ for ($k = 0; $k < $nPara; $k++) {
     if (isset($introOverrides[(int)$p['paragraph_number']])) continue;
     $html = (string)$p['paragraph_text_html'];
     if (preg_match('/<b\b/i', $html)) continue;          // bold-led blocks belong to other classifiers
+    // Skip paragraphs the parser already colour-tagged (data-style="kampf"/
+    // "kjv"/"nt"/…). Those carry their own category voice through
+    // segmentParagraph's per-span classifier; this fallback exists only for
+    // quotes whose italic/colour styling was DROPPED in docx→pdf conversion.
+    // Firing here would flatten a styled quote (e.g. olive Mein-Kampf /
+    // citation text → Voice A) to the generic 'quote' voice AND swallow any
+    // plain narration that shares the paragraph. (s06 Twistianity ch.3 p44-45.)
+    if (stripos($html, 'data-style=') !== false) continue;
     $plain = trim((string)$p['paragraph_text_plain']);
     if ($plain === '' || mb_substr($plain, 0, 1) !== "\u{201C}") continue;
     if (mb_substr($plain, -1) === "\u{201D}") continue;  // self-contained quote — likely body prose
+    // Require a genuinely OPEN quote: more opening “ than closing ” in this
+    // paragraph. A paragraph that merely starts with a short quoted word
+    // (“Christ” is not a last name…) is fully balanced and must NOT be read
+    // as the head of a multi-paragraph block quote. (s06 Twistianity p56.)
+    if (substr_count($plain, "\u{201C}") <= substr_count($plain, "\u{201D}")) continue;
     // Walk forward up to 30 paragraphs looking for the closing quote.
     $end = -1;
     for ($j = $k + 1; $j < $nPara && $j < $k + 30; $j++) {
@@ -482,6 +566,7 @@ for ($k = 0; $k < $nPara; $k++) {
         if (isset($introOverrides[(int)$q['paragraph_number']])) break;
         $qHtml  = (string)$q['paragraph_text_html'];
         if (preg_match('/<b\b/i', $qHtml)) break;        // a bold paragraph ends the quote stream
+        if (stripos($qHtml, 'data-style=') !== false) break; // styled → segmentParagraph handles it
         $jPlain = trim((string)$q['paragraph_text_plain']);
         if ($jPlain === '') break;
         if (mb_substr($jPlain, -1) === "\u{201D}") { $end = $j; break; }
@@ -634,36 +719,26 @@ $partPath = function (int $i) use ($partsDir): string {
     return $partsDir . '/' . sprintf('p%05d.mp3', $i);
 };
 
-// Pre-loop resume scan. Re-probe each cached part's duration so the
-// cumulative offsets line up with what the build would have produced
-// in one go, and re-insert each cached paragraph's marker — the
-// DELETE-all just above is the worker's standard "clean slate" step,
-// so on resume we need to repopulate. Idempotent via ON CONFLICT.
+// Pre-loop resume scan — COUNT ONLY. Find the length of the contiguous run
+// of already-cached parts so we can show a meaningful "Resuming at N" message
+// and progress %. Do NOT accumulate cumulative offsets or insert markers here:
+// the main loop below reprocesses EVERY paragraph (cached parts via its
+// reuse branch, missing parts via synth) and is the single source of
+// cumulative byte/ms offsets and of all markers. Accumulating in both the
+// scan AND the loop double-counted the offsets — inflating every marker's
+// byte_offset past EOF, which made the post-loop byte→pts remap clamp most
+// offset_ms values to the chapter end (and the scan also skipped page-break
+// continuation markers for cached parts). See the loop's reuse branch.
 $startIdx        = 0;
 $cumulativeBytes = 0;
 $cumulativeMs    = 0;
 for ($i = 0; $i < $nPara; $i++) {
     $pp = $partPath($i);
     if (!is_file($pp) || filesize($pp) === 0) break;
-    $bytes = file_get_contents($pp);
-    if ($bytes === false || $bytes === '') break;
-    $p = $paragraphs[$i];
-    try {
-        $insertMarker->execute([
-            $audioKey,
-            $p['paragraph_key']  !== null ? (int)$p['paragraph_key']  : null,
-            $p['paragraph_page'] !== null ? (int)$p['paragraph_page'] : null,
-            (int)$p['paragraph_number'],
-            $cumulativeMs,
-            $cumulativeBytes,
-        ]);
-    } catch (Exception $e) { /* don't fail resume if marker write fails */ }
-    $cumulativeBytes += strlen($bytes);
-    $cumulativeMs    += probeDurationMs($ffprobeBin, $bytes, $tmpDir);
     $startIdx = $i + 1;
 }
 if ($startIdx > 0) {
-    fwrite(STDERR, "resuming from paragraph $startIdx (found $startIdx cached parts)\n");
+    fwrite(STDERR, "resuming from paragraph $startIdx (found $startIdx contiguous cached parts)\n");
     updateAudio($db, $audioKey, [
         'tts_audio_message'  => "Resuming at paragraph $startIdx / $nPara",
         'tts_audio_progress' => (int)floor($startIdx / max(1, $nPara) * 95) + 2,
@@ -685,6 +760,107 @@ $skipParaNums = array_flip(array_map('intval', $settings['skip_paragraphs'] ?? [
 // the next paragraph is a chapter heading or an introOverride (those
 // don't continue the prior format context).
 $carryState = ['bold' => 0, 'italic' => 0, 'paren' => 0, 'bibStack' => []];
+
+// "Earlier redo jumps ahead of our later paragraphs." A 'Redo' re-queues an
+// already-built chapter/paragraph as 'pending'; with one build slot it then
+// waits until THIS worker exits. To honour reading order without interrupting
+// the paragraph that's already rendering, the per-paragraph status check below
+// asks once per iteration: is any 'pending' build waiting on the slot whose
+// reading-order location (series → volume → chapter, NULL chapter = whole-book =
+// first) sorts strictly before ours? This mirrors the promote-next ORDER BY in
+// the shutdown hook exactly. The comparison is column-vs-column (self-join to
+// our own row) so column types line up and there's no param-cast ambiguity;
+// '-Infinity' replays the promoter's "chapter NULLS FIRST". Strict '<' over a
+// total order means no two rows can yield to each other → no ping-pong.
+$earlierPendingStmt = $db->prepare("
+    SELECT a.tts_audio_key
+      FROM yy_tts_audio a
+      JOIN yy_tts     t ON t.tts_key     = a.tts_key
+      JOIN yy_volume  v ON v.volume_key  = a.volume_key
+      JOIN yy_series  s ON s.series_key  = v.series_key
+ LEFT JOIN yy_chapter c ON c.chapter_key = a.chapter_key,
+           yy_tts_audio m
+      JOIN yy_tts     mt ON mt.tts_key     = m.tts_key
+      JOIN yy_volume  mv ON mv.volume_key  = m.volume_key
+      JOIN yy_series  ms ON ms.series_key  = mv.series_key
+ LEFT JOIN yy_chapter mc ON mc.chapter_key = m.chapter_key
+     WHERE m.tts_audio_key = :me
+       AND a.tts_audio_status = 'pending'
+       AND a.tts_audio_worker_pid IS NULL
+       AND a.tts_audio_key <> :me
+       AND ROW(s.series_number, v.volume_sort, v.volume_number,
+               COALESCE(c.chapter_sort,  '-Infinity'::double precision),
+               COALESCE(c.chapter_number,'-Infinity'::double precision))
+         < ROW(ms.series_number, mv.volume_sort, mv.volume_number,
+               COALESCE(mc.chapter_sort,  '-Infinity'::double precision),
+               COALESCE(mc.chapter_number,'-Infinity'::double precision))
+     LIMIT 1
+");
+
+// Emit any page-break-within-paragraph continuation markers (byte_offset
+// NULL, time interpolated by char-ratio) for one paragraph. Factored out so
+// BOTH the synth path and the cache-reuse path call it — previously only the
+// synth path emitted these, so a gap-fill / resume that reused cached parts
+// silently dropped every continuation marker for those paragraphs (and the
+// "Retry/Redo" path, which resumes, dropped the whole chapter's set).
+$emitPageBreakMarkers = function (array $p, ?int $paraStartPage, int $paraStartMs, int $paragraphMs)
+        use ($audioKey, $insertMarker, $bundleDir, &$pageTextCache): void {
+    if ($paraStartPage === null || $paragraphMs <= 0) return;
+    $paraTextPlain = (string)($p['paragraph_text_plain'] ?? '');
+    if ($paraTextPlain === '') return;
+    $totalLen = max(1, mb_strlen($paraTextPlain));
+    $nextPageTexts = [];
+    for ($k = 1; $k <= 5; $k++) {
+        $pt = ttsLoadPageText($bundleDir, $paraStartPage + $k, $pageTextCache);
+        if ($pt === '') break;
+        $nextPageTexts[$k] = $pt;
+    }
+    // Text-matched ratios pin the exact break point per page; keyed by page
+    // OFFSET (1..5) from $paraStartPage. May be empty/partial when the flipbook
+    // text layer diverges (special glyphs, Hebrew transliteration, headers).
+    $ratios = $nextPageTexts ? ttsFindPageBreakRatios($paraTextPlain, $nextPageTexts) : [];
+
+    // The AUTHORITATIVE set of page crossings is $_cont_by_page, recorded at
+    // coalesce time from the parser's continuation flags — we KNOW a
+    // continuation paragraph begins on each of these pages regardless of whether
+    // the fuzzy text match succeeded. Emit a marker for every one: use the
+    // text-matched ratio when available, else fall back to the char-offset ratio
+    // (char_at / total) so a failed match NEVER drops the marker. Historically
+    // this relied solely on $ratios, so ~31% of continuation pages got no marker
+    // and the flipbook started their audio at the next full paragraph.
+    $byPage = $p['_cont_by_page'] ?? [];
+    if (!$byPage) {
+        // Un-split paragraph that merely overflows a page (no continuation row):
+        // keep the prior behaviour — matched ratios only, keyed to the head.
+        foreach ($ratios as $kOffset => $ratio) {
+            $crossedPage = $paraStartPage + $kOffset;
+            $brkMs = (int)round($paraStartMs + $ratio * $paragraphMs);
+            $mkKey = $p['paragraph_key'] !== null ? (int)$p['paragraph_key'] : null;
+            $mkNum = (int)$p['paragraph_number'];
+            try {
+                $insertMarker->execute([$audioKey, $mkKey, $crossedPage, $mkNum, $brkMs, null]);
+            } catch (Exception $e) { /* skip */ }
+        }
+        return;
+    }
+    foreach ($byPage as $crossedPage => $cont) {
+        $kOffset = (int)$crossedPage - $paraStartPage;
+        // Prefer the text-matched ratio; else char-offset ratio from coalesce.
+        $ratio = $ratios[$kOffset] ?? null;
+        if ($ratio === null) {
+            $ratio = min(0.999, max(0.0, ($cont['char_at'] ?? 0) / $totalLen));
+        }
+        $brkMs = (int)round($paraStartMs + $ratio * $paragraphMs);
+        // Key to the continuation paragraph that begins this page (not the head)
+        // so tts-audio.php joins the page's own text for read-along highlight and
+        // the per-segment STT onset fixer aligns to the right paragraph.
+        $mkKey = $cont['key'] ?? ($p['paragraph_key'] !== null ? (int)$p['paragraph_key'] : null);
+        $mkNum = (int)$cont['number'];
+        try {
+            $insertMarker->execute([$audioKey, $mkKey, (int)$crossedPage, $mkNum, $brkMs, null]);
+        } catch (Exception $e) { /* skip */ }
+    }
+};
 
 foreach ($paragraphs as $idx => $p) {
     // Honour admin's per-paragraph skip list.
@@ -723,7 +899,11 @@ foreach ($paragraphs as $idx => $p) {
                 ]);
             } catch (Exception $e) { /* idempotent */ }
             $cumulativeBytes += strlen($paraBytes);
-            $cumulativeMs    += probeDurationMs($ffprobeBin, $paraBytes, $tmpDir);
+            $paragraphMs      = probeDurationMs($ffprobeBin, $paraBytes, $tmpDir);
+            $cumulativeMs    += $paragraphMs;
+            // Same page-break continuation markers the synth path emits — so a
+            // gap-fill / resume that reuses this cached part keeps them.
+            $emitPageBreakMarkers($p, $paraStartPage, $paraStartMs, $paragraphMs);
             // Light progress update — same shape as the post-synth path.
             $pct = (int)floor(($idx + 1) / max(1, $nPara) * 95) + 2;
             updateAudio($db, $audioKey, [
@@ -763,6 +943,28 @@ foreach ($paragraphs as $idx => $p) {
     $regPid = isset($row['tts_audio_worker_pid']) ? (int)$row['tts_audio_worker_pid'] : 0;
     if ($regPid > 0 && $regPid !== getmypid()) {
         fwrite(STDERR, "superseded by worker $regPid at idx=$idx — exiting\n");
+        exit(0);
+    }
+    // Yield to an earlier-in-the-book redo (see $earlierPendingStmt above).
+    // We don't touch the paragraph that already rendered — we stop at this
+    // boundary, re-queue ourselves as 'pending' (parts stay cached, so the
+    // resume scan gap-fills) and exit. The shutdown promoter then spawns the
+    // earlier 'pending' row (it sorts first); when it completes, the promoter
+    // picks us back up as the new earliest pending and we resume from the
+    // first uncached paragraph. Runs only at the synth frontier (cached parts
+    // already 'continue'd above), so a worker walking its cache doesn't yield
+    // until it's actually about to start new synthesis.
+    $earlierPendingStmt->execute([':me' => $audioKey]);
+    $earlierKey = (int)$earlierPendingStmt->fetchColumn();
+    if ($earlierKey > 0) {
+        $pct = (int)floor($idx / max(1, $nPara) * 95) + 2;
+        updateAudio($db, $audioKey, [
+            'tts_audio_status'     => 'pending',
+            'tts_audio_progress'   => min(99, $pct),
+            'tts_audio_message'    => sprintf('Yielded at paragraph %d / %d — earlier redo (#%d) jumps ahead', $idx, $nPara, $earlierKey),
+            'tts_audio_worker_pid' => null,
+        ]);
+        fwrite(STDERR, "yielding at idx=$idx to earlier pending build $earlierKey\n");
         exit(0);
     }
 
@@ -815,6 +1017,11 @@ foreach ($paragraphs as $idx => $p) {
                 . "Chapter $chNum"
                 . "\x01PAUSE_0_{$pauseChapAfter}\x01";
         }
+        // Advance the segmentation carry through the heading's real markup so
+        // an open delimiter can't leak into the body (see the introOverride
+        // note below). Headings sit at chapter start so this is normally a
+        // no-op, but it keeps the carry contract identical across all branches.
+        segmentParagraph($rawHtml, $carryState);
         $segs = [['category' => 'main', 'text' => $headingText]];
     } else if (isset($introOverrides[(int)$p['paragraph_number']])) {
         // Paragraph was pre-classified by one of the prepass detectors:
@@ -825,6 +1032,15 @@ foreach ($paragraphs as $idx => $p) {
         // bold-→-translation classifier.
         $plainText = trim(preg_replace('/\s+/u', ' ', strip_tags($rawHtml)));
         if ($plainText === '') continue;
+        // ⚠ Advance the segmentation carry through this paragraph's REAL markup
+        // even though we override its category. Otherwise an open delimiter
+        // (paren / bib / bold) opened BEFORE this quote/intro block leaks
+        // straight past it — the next body paragraph inherits the open state,
+        // routes to word_definition (read_flag=false) and is dropped with NO
+        // audio, cascading to the end of the chapter. This silently lost
+        // paras 207-352 of s02v01 "Composition and Methodology" (body after an
+        // extended-quote block whose preceding paragraph ended mid-definition).
+        segmentParagraph($rawHtml, $carryState);
         $segs = [['category' => $introOverrides[(int)$p['paragraph_number']], 'text' => $plainText]];
     } else {
         $segs = segmentParagraph($rawHtml, $carryState);
@@ -856,6 +1072,12 @@ foreach ($paragraphs as $idx => $p) {
     // fragments per paragraph; ElevenLabs hallucinates / fails on short
     // fragments and individual paragraphs would lose all their audio.
     $segs = ttsCollapseSkippedSegments($cfg, $segs);
+    if (!$segs) continue;
+    // Drop orphan segments with no speakable content (lone "ʾ"/"ʿ" transliteration
+    // marks or stray punctuation stranded between two dropped word definitions).
+    // The local engine 400s on these as "empty text" and the whole paragraph
+    // would be marked failed → "— not yet synthesised —". See helper for detail.
+    $segs = ttsDropUnspeakableSegments($segs);
     if (!$segs) continue;
     $paraBytes = '';
     if ($allSsml) {
@@ -980,36 +1202,8 @@ foreach ($paragraphs as $idx => $p) {
     $paragraphMs      = probeDurationMs($ffprobeBin, $paraBytes, $tmpDir);
     $cumulativeMs    += $paragraphMs;
 
-    // Page-break-within-paragraph markers. Look ahead up to 5 pages —
-    // far more than any real paragraph spans — and emit one marker per
-    // crossed page boundary at the interpolated time offset.
-    if ($paraStartPage !== null && $paragraphMs > 0) {
-        $paraTextPlain = (string)($p['paragraph_text_plain'] ?? '');
-        if ($paraTextPlain !== '') {
-            $nextPageTexts = [];
-            for ($k = 1; $k <= 5; $k++) {
-                $pt = ttsLoadPageText($bundleDir, $paraStartPage + $k, $pageTextCache);
-                if ($pt === '') break;
-                $nextPageTexts[$k] = $pt;
-            }
-            if ($nextPageTexts) {
-                $ratios = ttsFindPageBreakRatios($paraTextPlain, $nextPageTexts);
-                foreach ($ratios as $kOffset => $ratio) {
-                    $brkMs = (int)round($paraStartMs + $ratio * $paragraphMs);
-                    try {
-                        $insertMarker->execute([
-                            $audioKey,
-                            $p['paragraph_key'] !== null ? (int)$p['paragraph_key'] : null,
-                            $paraStartPage + $kOffset,
-                            (int)$p['paragraph_number'],
-                            $brkMs,
-                            null,
-                        ]);
-                    } catch (Exception $e) { /* skip */ }
-                }
-            }
-        }
-    }
+    // Page-break-within-paragraph markers — same emitter the reuse path uses.
+    $emitPageBreakMarkers($p, $paraStartPage, $paraStartMs, $paragraphMs);
 
     // Per-paragraph progress flush. Old throttle was every 5th iteration,
     // which on slow engines (Chatterbox ~5-20s/paragraph) left the UI
@@ -1041,6 +1235,79 @@ for ($i = 0; $i < $nPara; $i++) {
 }
 fclose($fh);
 
+// Re-derive marker offsets from the ACTUAL audio timeline. The per-chunk
+// ffprobe durations summed into $cumulativeMs during the loop drift a few
+// seconds over a chapter (MP3 encoder padding isn't perfectly additive),
+// so the page→time markers run progressively early. Each marker already
+// stored its exact byte position in the concatenated file
+// (tts_audio_marker_byte_offset); map that byte → true presentation time
+// via ffprobe's packet table — done HERE on the pre-remux $finalPath,
+// whose byte layout the offsets match — and rewrite the offset_ms.
+// Best-effort: on any failure the loop-derived offsets simply stand.
+$ffprobeForMarkers = trim(shell_exec('which ffprobe 2>/dev/null') ?: '');
+if ($ffprobeForMarkers) {
+    $pkOut = shell_exec(escapeshellcmd($ffprobeForMarkers)
+        . ' -v error -select_streams a:0 -show_entries packet=pts_time,pos -of csv=p=0 '
+        . escapeshellarg($finalPath) . ' 2>/dev/null');
+    if ($pkOut) {
+        $pkPos = []; $pkPts = [];
+        foreach (explode("\n", $pkOut) as $ln) {
+            if ($ln === '') continue;
+            $c = explode(',', $ln);
+            if (count($c) < 2 || !is_numeric($c[0]) || !is_numeric($c[1])) continue;
+            $pkPts[] = (float)$c[0]; $pkPos[] = (int)$c[1];
+        }
+        $nPk = count($pkPos);
+        if ($nPk) {
+            $timeAtByte = function ($byte) use ($pkPos, $pkPts, $nPk) {
+                $lo = 0; $hi = $nPk - 1; $ans = $nPk - 1;
+                while ($lo <= $hi) {
+                    $mid = intdiv($lo + $hi, 2);
+                    if ($pkPos[$mid] >= $byte) { $ans = $mid; $hi = $mid - 1; }
+                    else { $lo = $mid + 1; }
+                }
+                return $pkPts[$ans];
+            };
+            try {
+                $mSel = $db->prepare("SELECT paragraph_number, paragraph_page, tts_audio_marker_byte_offset bo
+                                        FROM yy_tts_audio_marker
+                                       WHERE tts_audio_key = ? AND tts_audio_marker_byte_offset IS NOT NULL");
+                $mSel->execute([$audioKey]);
+                $markerRows = $mSel->fetchAll();   // buffer before issuing UPDATEs on same conn
+                $mUpd = $db->prepare("UPDATE yy_tts_audio_marker SET tts_audio_marker_offset_ms = ?
+                                       WHERE tts_audio_key = ? AND paragraph_number = ? AND paragraph_page = ?");
+                foreach ($markerRows as $mk) {
+                    $newMs = (int)round($timeAtByte((int)$mk['bo']) * 1000);
+                    $mUpd->execute([$newMs, $audioKey, $mk['paragraph_number'], $mk['paragraph_page']]);
+                }
+            } catch (Exception $e) { /* keep loop-derived offsets on failure */ }
+        }
+    }
+}
+
+// Re-mux the byte-concatenated MP3 so it's actually SEEKABLE in browsers.
+// A naive byte-concat of per-paragraph MP3s produces a stream with no
+// (or a wrong, first-segment-only) Xing/TOC header. Chrome can't seek
+// into such a file — currentTime updates but the decoder stalls or
+// restarts from 0, so the flipbook's "jump audio to this page" lands at
+// the beginning. `ffmpeg -c copy -write_xing 1` rewrites a correct Xing
+// header WITHOUT re-encoding (fast, lossless, frames untouched), making
+// arbitrary seeks work. Best-effort: if ffmpeg is missing or errors,
+// keep the concatenated file rather than failing the build.
+$ffmpegBin = trim(shell_exec('which ffmpeg 2>/dev/null') ?: '');
+if ($ffmpegBin) {
+    $remuxPath = $finalPath . '.remux.mp3';
+    $cmd = escapeshellcmd($ffmpegBin) . ' -y -loglevel error -i ' . escapeshellarg($finalPath)
+         . ' -c copy -write_xing 1 -f mp3 ' . escapeshellarg($remuxPath) . ' 2>&1';
+    shell_exec($cmd);
+    if (is_file($remuxPath) && filesize($remuxPath) > 0) {
+        @chmod($remuxPath, 0664);
+        if (!@rename($remuxPath, $finalPath)) { @unlink($remuxPath); }
+    } else {
+        @unlink($remuxPath);
+    }
+}
+
 $finalSize = filesize($finalPath);
 if (!$finalSize) bail($db, $audioKey, "output file is empty (every paragraph failed); first errs: " . implode(' | ', array_slice($failures, 0, 3)));
 
@@ -1069,6 +1336,36 @@ updateAudio($db, $audioKey, [
     'tts_audio_live_dtime'      => $liveNow,
     'tts_audio_error'           => $failures ? implode(' | ', array_slice($failures, 0, 5)) : null,
 ]);
+
+// ── Auto page-break continuation onset correction (best-effort, detached) ──
+// Normal page markers are byte-offset-derived (ffprobe packet PTS) and accurate
+// — they land a beat early, but inside the inter-paragraph silence, so they need
+// no fixing. The EXCEPTION is a page-break CONTINUATION marker: when one logical
+// paragraph splits across a page break, the tail is coalesced into the head for
+// synthesis, so the new page's first marker falls MID-CHUNK with no byte offset
+// and only a char-ratio ESTIMATE for its offset — which drifts progressively
+// early through the chapter (seconds, by the back pages), landing inside the
+// previous page's SPOKEN words. tts-cont-onset-fix.php re-derives each such
+// marker per-segment: it extracts just that marker's window, decodes it fresh
+// (so it avoids the cumulative byte-concat drift that makes whole-chapter
+// apply-onsets QA UNUSABLE here), and word-aligns the continuation paragraph's
+// opening words to find the true onset. Touches ONLY NULL-byte markers and only
+// on a confident, in-window match. Detached so it never blocks this build or the
+// queue; wrapped so a failure can't touch the already-completed build. Markers
+// are served dynamically (tts-audio.php), so no cache bump is needed.
+//
+// NOTE: do NOT auto-enqueue whole-chapter apply-onsets QA here — on these
+// byte-concatenated chapter MP3s it drags every marker progressively early
+// (accumulated per-chunk encoder padding). The Sync/QA tab can still be run
+// manually for the advisory word-mismatch report. Only for clean builds.
+if ($liveNow) {
+    try {
+        spawnCappedWorker(__DIR__ . '/tts-cont-onset-fix.php', [(string)$audioKey, '--apply', '--quiet'],
+            sys_get_temp_dir() . '/tts_cont_onset_' . $audioKey . '.log', ['cpu_secs' => 1200, 'nice' => 12]);
+    } catch (\Throwable $e) {
+        error_log("[tts-build $audioKey] continuation onset-correction spawn failed (non-fatal): " . $e->getMessage());
+    }
+}
 
 // Refresh the volume's bundled mp3.zip so the flipbook's "Download MP3"
 // button always serves the latest chapter set. Best-effort — a zip

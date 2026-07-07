@@ -6,7 +6,7 @@
 if (!document.getElementById('error-reporter-js')) {
     var s = document.createElement('script');
     s.id = 'error-reporter-js';
-    s.src = '/js/error-reporter.js?v=5';
+    s.src = '/js/error-reporter.js?v=11';
     document.head.appendChild(s);
 }
 
@@ -42,6 +42,7 @@ var tabs = [
     ['admin-timeline.html', 'Timeline'],
     ['admin-memorial.html', 'Memorial'],
     ['admin-media.html', 'Media'],
+    ['admin-ai.html', 'AI', 'AI image + video generation (image-to-video, etc.).'],
     ['admin-tts.html', 'TTS', 'Configure voices, pronunciations, pauses, and generate audio per book.'],
     ['admin-music.html', 'Music'],
     ['admin-chat.html', 'Chat'],

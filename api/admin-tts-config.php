@@ -37,18 +37,26 @@ if ($method === 'POST') {
 }
 
 if ($method === 'GET' && $action === 'catalog') {
-    // Provider list for the Pronunciations Provider column. Only engines that
-    // actually pronounce something — i.e. yy_provider rows whose label is
-    // 'Azure Neural TTS' or whose settings.engine is a known local engine.
-    // TTS engines only — local engines declare settings.engine, plus Azure
-    // Neural TTS (provider_key=1). Excludes STT providers (Azure Fast
-    // Transcription, Whisper variants, etc.) so the Pronunciations Provider
-    // dropdown stays meaningful.
+    // Provider list for the per-tune Provider dropdown (+ tune-table sort).
+    // TTS engines ONLY — must mirror the list_providers filter, else non-speech
+    // self-hosted providers leak in: image/video gen engines (Flux, CogVideoX,
+    // …) also declare provider_settings.engine, so the old "engine IS NOT NULL"
+    // test wrongly offered them as pronunciation providers. Gate on "has a voice
+    // OR is registered for the 'tts' functionality" (Azure 1 stays via voices).
     $provStmt = $db->query("
         SELECT provider_key, provider_label, provider_settings->>'engine' AS engine
-          FROM yy_provider
+          FROM yy_provider p
          WHERE provider_active_flag = TRUE
-           AND (provider_settings->>'engine' IS NOT NULL OR provider_key = 1)
+           AND (
+                provider_key IN (SELECT DISTINCT provider_key FROM yy_tts_voice)
+             OR provider_key IN (
+                    SELECT fp.provider_key
+                      FROM yy_functionality_provider fp
+                      JOIN yy_functionality f USING (functionality_key)
+                     WHERE f.functionality_code = 'tts'
+                       AND fp.functionality_provider_active_flag = TRUE
+                )
+           )
          ORDER BY provider_sort, provider_label
     ")->fetchAll(PDO::FETCH_ASSOC);
     jsonResponse([
@@ -464,7 +472,7 @@ if ($action === 'save_tune') {
                  tts_tune_seed_min, tts_tune_seed_max,
                  tts_tune_book_count)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (tts_key, tts_tune_print, (COALESCE(tts_tune_voice_code, ''))) DO UPDATE SET
+            ON CONFLICT (tts_tune_print, provider_key, (COALESCE(tts_tune_voice_code, ''::character varying))) DO UPDATE SET
                 tts_tune_phonetic             = EXCLUDED.tts_tune_phonetic,
                 tts_tune_phonetic_sub         = EXCLUDED.tts_tune_phonetic_sub,
                 tts_tune_phonetic_ipa         = EXCLUDED.tts_tune_phonetic_ipa,
@@ -486,16 +494,18 @@ if ($action === 'save_tune') {
         $tuneKey = (int)$ins->fetchColumn();
         $cloned  = true;
     } elseif ($tuneKey > 0) {
-        // If renaming print or changing voice_code would land on a tuple already
-        // held by another row, delete that row first (mirrors ON CONFLICT DO UPDATE).
+        // If renaming print / changing voice_code would land on a tuple already
+        // held by another row, delete that row first (mirrors the ON CONFLICT DO
+        // UPDATE on the unique index yy_tts_tune_print_voice_uq which covers
+        // (tts_tune_print, provider_key, COALESCE(voice,''))).
         $clearColliding = $db->prepare("
             DELETE FROM yy_tts_tune
-             WHERE tts_key = ?
-               AND tts_tune_print = ?
+             WHERE tts_tune_print = ?
+               AND provider_key = ?
                AND COALESCE(tts_tune_voice_code, '') = COALESCE(?, '')
                AND tts_tune_key != ?
         ");
-        $clearColliding->execute([$ttsKey, $print, $voiceCode, $tuneKey]);
+        $clearColliding->execute([$print, $providerKey, $voiceCode, $tuneKey]);
 
         $stmt = $db->prepare("
             UPDATE yy_tts_tune
@@ -512,9 +522,10 @@ if ($action === 'save_tune') {
         // serialises bool false as "" which Postgres rejects.
         $stmt->execute([$print, $mirror, $sub, $ipa, $sapi, $type, $note ?: null, (int)$active, (int)$mBold, (int)$mItalic, (int)$mCase, $voiceCode, $sort, $providerKey, $seedMin, $seedMax, $tuneKey, $ttsKey]);
     } else {
-        // Brand-new row. Use ON CONFLICT on the (tts_key, Print, voice_code)
-        // tuple — that matches the new unique index that allows multiple
-        // rows per Print as long as each has a distinct voice_code.
+        // Brand-new row. Use ON CONFLICT on (tts_tune_print, provider_key, voice_code)
+        // which matches the unique index yy_tts_tune_print_voice_uq:
+        //   (tts_tune_print, provider_key, COALESCE(tts_tune_voice_code, ''))
+        // Allows multiple rows per Print as long as each has a distinct voice_code.
         $stmt = $db->prepare("
             INSERT INTO yy_tts_tune
                 (tts_key, tts_tune_print, tts_tune_phonetic,
@@ -525,7 +536,7 @@ if ($action === 'save_tune') {
                  tts_tune_seed_min, tts_tune_seed_max,
                  tts_tune_book_count)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (tts_key, tts_tune_print, (COALESCE(tts_tune_voice_code, ''))) DO UPDATE SET
+            ON CONFLICT (tts_tune_print, provider_key, (COALESCE(tts_tune_voice_code, ''::character varying))) DO UPDATE SET
                 tts_tune_phonetic              = EXCLUDED.tts_tune_phonetic,
                 tts_tune_phonetic_sub          = EXCLUDED.tts_tune_phonetic_sub,
                 tts_tune_phonetic_ipa          = EXCLUDED.tts_tune_phonetic_ipa,
@@ -550,7 +561,10 @@ if ($action === 'save_tune') {
     // After any save where this row ends up with a voice override,
     // mark OTHER active same-Print voice-override rows inactive so only
     // ONE voice-specific override remains active per Print (alongside
-    // the voice-NULL catch-all, which stays untouched).
+    // the voice-NULL catch-all, which stays untouched). Scoped to the SAME
+    // provider_key — tunes are per-provider, so a voice override for one
+    // provider must not deactivate another provider's override for the
+    // same Print.
     if ($voiceCode !== null && $voiceCode !== '') {
         $deact = $db->prepare("
             UPDATE yy_tts_tune
@@ -558,12 +572,13 @@ if ($action === 'save_tune') {
                    tts_tune_revision_dtime = NOW()
              WHERE tts_key = ?
                AND tts_tune_print = ?
+               AND provider_key = ?
                AND tts_tune_voice_code IS NOT NULL
                AND tts_tune_key <> ?
                AND tts_tune_active_flag = TRUE
             RETURNING tts_tune_key
         ");
-        $deact->execute([$ttsKey, $print, $tuneKey]);
+        $deact->execute([$ttsKey, $print, $providerKey, $tuneKey]);
         $deactivatedKeys = array_map('intval', $deact->fetchAll(PDO::FETCH_COLUMN));
     }
 

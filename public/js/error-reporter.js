@@ -28,7 +28,36 @@
     // Admin session expiry — api() helper in admin pages rethrows 401 as
     // unhandled rejection; expired session is expected, not a code bug.
     /Authentication required/i,
-    /^401:/i
+    /^401:/i,
+    // YouTube embed infrastructure calls iframe.contentWindow.postMessage()
+    // for player communication; when the iframe is null (removed from DOM
+    // during re-renders or not yet loaded) Safari fires this error attributed
+    // to the host page URL. Yadayah.com has zero contentWindow.postMessage
+    // calls of its own, so all such errors are third-party noise.
+    /contentWindow\.postMessage/i,
+    // Android WebView Java bridge errors from YouTube's embedded player —
+    // the backing Java object is garbage-collected while YouTube's JS still
+    // holds a reference. Nothing in yadayah.com code uses Java bridge APIs;
+    // all such errors originate from third-party embed scripts.
+    /Java object is gone/i,
+    // Firefox-specific error fired when a JS reference points to a DOM node
+    // that has been garbage-collected (removed from the DOM). The stack always
+    // originates in connectedCallback inside YouTube's injected web-component
+    // scripts (<anonymous code>), never in yadayah.com code.
+    /can't access dead object/i,
+    // Facebook in-app browser (iOS) injects setupIosCallbackHandler into every
+    // page it renders and calls window.webkit.messageHandlers.*. When that iOS
+    // WebKit bridge isn't present (e.g. Facebook's own partial implementation),
+    // it throws. Yadayah.com has zero webkit.messageHandlers calls; all such
+    // errors are third-party noise from Facebook's injected scripts.
+    /window\.webkit\.messageHandlers/i,
+    /navigationPerformanceLoggerWithReply/i,
+    // TinyMCE registers a Trusted Types "default" policy on load; if the page
+    // loads the TinyMCE bundle more than once (e.g. eager + lazy load race),
+    // the browser throws because only one "default" policy can exist. This
+    // originates entirely inside TinyMCE, not in yadayah.com code.
+    /Policy with name .default. already exists/i,
+    /Failed to execute 'createPolicy'.*already exists/i
   ];
 
   // Files whose errors we should not report (third-party bundles)

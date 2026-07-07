@@ -85,57 +85,249 @@ if ($method === 'GET' && $action === 'status') {
 }
 
 // GET: list paragraphs of a chapter — used by the Books-tab expand panel.
-// Must sit ABOVE the POST-required gate. The full implementation (with
-// failed-set, skip-set, part-file enumeration) lives down with the other
-// per-paragraph handlers so it's read alongside redo / delete; this stub
-// just hands control to the bottom of the file via a short-circuit.
+// Must sit ABOVE the POST-required gate.
+//
+// Each paragraph is classified into a status the admin can trust at a
+// glance, so a chapter that is FULLY built doesn't look half-broken:
+//
+//   voiced     → has audio (a marker exists for its paragraph_number)
+//   merged     → page-break continuation tail; the worker coalesces it
+//                into the preceding "head" paragraph, so it shares the
+//                head's clip and has no part of its own — BY DESIGN
+//   skip_table → parser flagged it a table; not narrated — BY DESIGN
+//   skip_page  → inside the volume's volume_skip_pages range — BY DESIGN
+//   skip_admin → admin Deleted/skipped it (settings.skip_paragraphs)
+//   empty      → no speakable text after the synth pipeline drops word
+//                definitions / unspeakable glyphs (e.g. a lone "hwhy" or
+//                an all-(definition) line) — nothing to narrate, BY DESIGN
+//   missing    → none of the above and still no audio → a GENUINE gap
+//                that warrants a rebuild
+//
+// ⚠ Coverage is keyed on paragraph_NUMBER, never paragraph_key: many
+// historical builds wrote markers with a NULL paragraph_key (the
+// page-break path and pre-key-fix builds), and a re-parse churns keys
+// while numbers are stable. The marker table is the authoritative record
+// of what got voiced.
+//
+// ⚠ The worker's part-file index (p#####.mp3) is the position among the
+// paragraphs that SURVIVE its pre-synth filter — i.e. after dropping
+// continuation tails, tables, and skip-page rows. A naive row-by-row
+// index desyncs at the first such paragraph and mislabels every later
+// paragraph as "not synthesised". We replicate that filter below so
+// part_url / redo / delete address the right file.
 if ($method === 'GET' && $action === 'list_paragraphs') {
     $audioKey = (int)($_GET['tts_audio_key'] ?? 0);
     if (!$audioKey) errorResponse('tts_audio_key required');
-    $stmt = $db->prepare("SELECT chapter_key, tts_audio_failed_paragraphs, tts_audio_settings FROM yy_tts_audio WHERE tts_audio_key = ?");
+    $stmt = $db->prepare("SELECT chapter_key, volume_key, tts_key, tts_profile_key, tts_audio_failed_paragraphs, tts_audio_settings, tts_audio_status, tts_audio_path, tts_audio_started_dtime FROM yy_tts_audio WHERE tts_audio_key = ?");
     $stmt->execute([$audioKey]);
     $a = $stmt->fetch();
     if (!$a) errorResponse('not found', 404);
     $chapterKey = (int)$a['chapter_key'];
+    $volumeKey  = (int)($a['volume_key'] ?? 0);
+    // A narratable paragraph is COMPLETE (has audio you can play now),
+    // PROCESSING (this chapter is building and this paragraph isn't done
+    // this run) or PENDING (chapter queued). It follows the CHAPTER's build
+    // state — old markers/clips from a previous version are stale (a rebuild
+    // makes new ones) so they never mark a paragraph "complete" on their own.
+    $chapterStatus  = (string)($a['tts_audio_status'] ?? '');
+    $chapterRunning = ($chapterStatus === 'running');
+    $chapterDone    = ($chapterStatus === 'complete');
+    // For a RUNNING build, a clip counts as produced-this-run only if it was
+    // written at/after this build started — so reused-but-stale old clips
+    // from a prior build read as "processing", not a premature "complete".
+    $startedEpoch = !empty($a['tts_audio_started_dtime']) ? strtotime((string)$a['tts_audio_started_dtime']) : 0;
     $failedSet = array_flip(array_map('intval',
         preg_split('/[,{}]/', (string)($a['tts_audio_failed_paragraphs'] ?? ''), -1, PREG_SPLIT_NO_EMPTY)));
     $settings = json_decode((string)($a['tts_audio_settings'] ?? '{}'), true) ?: [];
     $skipSet = array_flip(array_map('intval', $settings['skip_paragraphs'] ?? []));
+
+    // Voiced set — paragraph_numbers that have a marker (authoritative).
+    $mkStmt = $db->prepare("SELECT DISTINCT paragraph_number FROM yy_tts_audio_marker WHERE tts_audio_key = ? AND paragraph_number IS NOT NULL");
+    $mkStmt->execute([$audioKey]);
+    $voicedSet = array_flip(array_map('intval', $mkStmt->fetchAll(PDO::FETCH_COLUMN)));
+
+    // volume_skip_pages ranges — same parsing the build worker uses.
+    $skipRanges = [];
+    if ($volumeKey) {
+        $sr = $db->prepare("SELECT volume_skip_pages FROM yy_volume WHERE volume_key = ?");
+        $sr->execute([$volumeKey]);
+        foreach (preg_split('/\s*,\s*/', (string)($sr->fetchColumn() ?: ''), -1, PREG_SPLIT_NO_EMPTY) as $tok) {
+            if (preg_match('/^\s*(\d+)\s*-\s*(\d+)\s*$/', $tok, $m))  $skipRanges[] = [(int)$m[1], (int)$m[2]];
+            elseif (preg_match('/^\s*(\d+)\s*$/', $tok, $m))         $skipRanges[] = [(int)$m[1], (int)$m[1]];
+        }
+    }
+    $inSkipRange = function (?int $pg) use ($skipRanges): bool {
+        if ($pg === null) return false;
+        foreach ($skipRanges as $r) if ($pg >= $r[0] && $pg <= $r[1]) return true;
+        return false;
+    };
+
     $pStmt = $db->prepare("
-        SELECT paragraph_number, paragraph_page, paragraph_text_plain, paragraph_is_table
+        SELECT paragraph_number, paragraph_page, paragraph_text_plain, paragraph_text_html, paragraph_is_table, paragraph_is_continuation
           FROM yy_paragraph WHERE chapter_key = ? ORDER BY paragraph_number
     ");
     $pStmt->execute([$chapterKey]);
     $rows = $pStmt->fetchAll();
+
+    // Voice config — only needed to tell a by-design empty paragraph apart
+    // from a genuinely-missing one. Best-effort: if it can't load we treat
+    // every unvoiced non-skip paragraph as speakable (i.e. err toward
+    // "missing" so a real gap is never hidden).
+    $cfg = null; $cfgErr = '';
+    try { $cfg = loadTtsConfig($db, (int)($a['tts_key'] ?? 0), $a['tts_profile_key'] !== null ? (int)$a['tts_profile_key'] : null); }
+    catch (Throwable $e) { $cfgErr = $e->getMessage(); }
+
+    // Pre-pass: which paragraph_numbers collapse to NO speakable audio?
+    // This must mirror the worker exactly, because whether a paragraph
+    // produces sound depends on carry state THREADED across the chapter:
+    // a word-definition parenthesis (read aloud=false) opened in one
+    // paragraph silences the tail that closes it in the next. Running the
+    // pipeline per-paragraph in isolation (fresh carry) wrongly reports
+    // those tails as speakable → false "missing". So: coalesce
+    // continuation tails into their head (worker step 1), skip table /
+    // skip-page rows (filtered before the worker's synth loop, carry
+    // untouched), then thread one $carry through preprocessFontFilter →
+    // segmentParagraph → collapse-skipped → drop-unspeakable in reading
+    // order. A survivor that yields nothing is empty BY DESIGN.
+    $emptyNums = [];
+    if ($cfg !== null) {
+        $merged = [];
+        foreach ($rows as $r) {
+            if (!empty($r['paragraph_is_continuation']) && $merged) {
+                $h =& $merged[count($merged) - 1];
+                $h['paragraph_text_html'] = rtrim((string)$h['paragraph_text_html']) . ' ' . ltrim((string)($r['paragraph_text_html'] ?? ''));
+                unset($h);
+                continue;
+            }
+            $merged[] = $r;
+        }
+        $fonts = $cfg['fonts'] ?? [];
+        $carry = [];
+        foreach ($merged as $r) {
+            $pg = $r['paragraph_page'] !== null ? (int)$r['paragraph_page'] : null;
+            if (!empty($r['paragraph_is_table']) || $inSkipRange($pg)) continue;   // not narrated; carry untouched
+            $segs = segmentParagraph(preprocessFontFilter((string)($r['paragraph_text_html'] ?? ''), $fonts), $carry);
+            if ($segs) $segs = ttsCollapseSkippedSegments($cfg, $segs);
+            if ($segs) $segs = ttsDropUnspeakableSegments($segs);
+            if (empty($segs)) $emptyNums[(int)$r['paragraph_number']] = true;
+        }
+    }
+
     $audioBase = is_dir(dirname(__DIR__) . '/u') ? dirname(__DIR__) : '/opt/yada-www/public';
     $partsDir  = $audioBase . '/u/tts-parts/' . $audioKey;
+
+    // Does the assembled chapter MP3 exist on disk? In a COMPLETE chapter a
+    // paragraph whose own per-clip was purged is still genuinely playable
+    // (inside the chapter file), so it stays "complete". Only consulted for
+    // complete chapters (see $playableNow below).
+    $finalPath   = (string)($a['tts_audio_path'] ?? '');
+    $finalExists = $finalPath !== '' && is_file($audioBase . $finalPath) && filesize($audioBase . $finalPath) > 0;
+
+    // Pass 1: replicate the worker's part-index assignment (survivors of
+    // the coalesce + table/skip-page filter). part_idx is the paragraph's
+    // OWN file index; a continuation tail borrows its head's index purely
+    // so its merged audio is still playable in the panel.
+    $partIdxByNum  = [];   // paragraph_number → own part idx
+    $playIdxByNum  = [];   // paragraph_number → idx whose part to PLAY
+    $headNumByCont = [];   // continuation paragraph_number → head paragraph_number
+    $widx = 0; $lastHeadIdx = null; $lastHeadNum = null;
+    foreach ($rows as $r) {
+        $num = (int)$r['paragraph_number'];
+        $pg  = $r['paragraph_page'] !== null ? (int)$r['paragraph_page'] : null;
+        if (!empty($r['paragraph_is_continuation'])) {
+            if ($lastHeadIdx !== null) { $playIdxByNum[$num] = $lastHeadIdx; $headNumByCont[$num] = $lastHeadNum; }
+            continue;                                   // coalesced — no own index
+        }
+        if (!empty($r['paragraph_is_table']) || $inSkipRange($pg)) continue;   // filtered before synth
+        $partIdxByNum[$num] = $widx;
+        $playIdxByNum[$num] = $widx;
+        $lastHeadIdx = $widx; $lastHeadNum = $num;
+        $widx++;
+    }
+
     $out = [];
+    $counts = ['complete'=>0,'processing'=>0,'pending'=>0,'merged'=>0,'skip_table'=>0,'skip_page'=>0,'skip_admin'=>0,'empty'=>0,'missing'=>0];
     $idx = 0;
     foreach ($rows as $r) {
-        $partName = sprintf('p%05d.mp3', $idx);
-        $partFile = $partsDir . '/' . $partName;
-        $hasPart  = is_file($partFile) && filesize($partFile) > 0;
+        $num     = (int)$r['paragraph_number'];
+        $pg      = $r['paragraph_page'] !== null ? (int)$r['paragraph_page'] : null;
+        $isTable = !empty($r['paragraph_is_table']);
+        $isCont  = !empty($r['paragraph_is_continuation']);
+        $isSkipAdmin = isset($skipSet[$num]);
+        $isSkipPage  = $inSkipRange($pg);
+        $voiced  = isset($voicedSet[$num]);
+
+        $partIdx = $partIdxByNum[$num] ?? null;             // own file (redo/delete target)
+        $playIdx = $playIdxByNum[$num] ?? null;             // file to play (own or head's)
+        $hasPart = false; $partUrl = null; $partBytes = 0; $partMtime = 0;
+        if ($playIdx !== null) {
+            $partName = sprintf('p%05d.mp3', $playIdx);
+            $partFile = $partsDir . '/' . $partName;
+            if (is_file($partFile) && filesize($partFile) > 0) {
+                $hasPart = true;
+                $partBytes = (int)filesize($partFile);
+                $partMtime = (int)@filemtime($partFile);
+                // ?v=<mtime> cache-buster — a Rebuild/Redo overwrites the part
+                // at the SAME path; without it the browser replays stale bytes.
+                $partUrl = '/u/tts-parts/' . $audioKey . '/' . $partName . '?v=' . $partMtime;
+            }
+        }
+
+        // Is there audio you can PLAY for this paragraph right now? Its own
+        // per-paragraph clip, or (clip purged after assembly) the finished
+        // chapter MP3 that contains it. This is the sole "done" signal —
+        // the play control itself is what tells the admin it's done.
+        $playableNow = $hasPart || ($chapterDone && $finalExists);
+
+        // Classify. Structural not-narrated cases (admin skip / continuation
+        // / table / skip-page / no speakable text) first — they're by design
+        // and independent of build state. Then the narratable paragraph's
+        // state follows its CHAPTER:
+        //   complete chapter → complete (or a genuine gap if it produced no
+        //                      audio at all → "missing", the real alarm)
+        //   running chapter  → complete once its clip is produced THIS run,
+        //                      else processing
+        //   pending chapter  → pending (old markers/clips are stale — ignore)
+        if ($isSkipAdmin)                $status = 'skip_admin';
+        elseif ($isCont)                 $status = 'merged';
+        elseif ($isTable)                $status = 'skip_table';
+        elseif ($isSkipPage)             $status = 'skip_page';
+        elseif (isset($emptyNums[$num])) $status = 'empty';
+        elseif ($chapterDone)            $status = ($playableNow || $voiced) ? 'complete' : 'missing';
+        elseif ($chapterRunning)         $status = ($hasPart && $partMtime >= $startedEpoch) ? 'complete' : 'processing';
+        else                             $status = 'pending';   // queued for generation
+
+        // Only offer a per-paragraph player when the clip is genuinely
+        // current — never for a stale clip left over on a pending rebuild.
+        $showPlayer = ($status === 'complete' && $hasPart
+                        && ($chapterDone || ($chapterRunning && $partMtime >= $startedEpoch)));
+        if (!$showPlayer) { $partUrl = null; }
+
+        $counts[$status] = ($counts[$status] ?? 0) + 1;
+
         $textPlain = (string)($r['paragraph_text_plain'] ?? '');
         $preview = mb_substr(preg_replace('/\s+/u', ' ', $textPlain), 0, 140);
         if (mb_strlen($textPlain) > 140) $preview .= '…';
+
         $out[] = [
-            'idx'              => $idx,
-            'paragraph_number' => (int)$r['paragraph_number'],
-            'paragraph_page'   => $r['paragraph_page'] !== null ? (int)$r['paragraph_page'] : null,
-            'is_table'         => !empty($r['paragraph_is_table']),
-            'is_failed'        => isset($failedSet[(int)$r['paragraph_number']]),
-            'is_skipped'       => isset($skipSet[(int)$r['paragraph_number']]),
+            'idx'              => $idx,                       // stable per-row DOM identity
+            'part_idx'         => $partIdx,                   // worker part index (redo/delete); null = no own part
+            'paragraph_number' => $num,
+            'paragraph_page'   => $pg,
+            'status'           => $status,
+            'is_table'         => $isTable,
+            'is_continuation'  => $isCont,
+            'is_failed'        => isset($failedSet[$num]),
+            'is_skipped'       => $isSkipAdmin,
+            'cont_head_number' => $isCont ? ($headNumByCont[$num] ?? null) : null,
             'preview'          => $preview,
-            'has_part'         => $hasPart,
-            // ?v=<mtime> cache-buster: a Rebuild/Redo overwrites the part at the
-            // SAME path, so without this the browser replays the stale cached
-            // bytes and the audio "doesn't change". mtime bumps on every re-synth.
-            'part_url'         => $hasPart ? ('/u/tts-parts/' . $audioKey . '/' . $partName . '?v=' . (int)@filemtime($partFile)) : null,
-            'part_bytes'       => $hasPart ? (int)filesize($partFile) : 0,
+            'has_part'         => $showPlayer,       // whether to offer a per-paragraph player (current clip only)
+            'part_url'         => $partUrl,
+            'part_bytes'       => $partBytes,
         ];
         $idx++;
     }
-    jsonResponse(['audio_key' => $audioKey, 'paragraphs' => $out]);
+    jsonResponse(['audio_key' => $audioKey, 'paragraphs' => $out, 'counts' => $counts, 'config_error' => $cfgErr]);
 }
 
 if ($method !== 'POST') errorResponse('POST required');
@@ -359,6 +551,15 @@ if ($action === 'start_all') {
         return $st === null || in_array($st, ['failed', 'none'], true);
     }));
     if (!$filtered) jsonResponse(['queued' => 0, 'spawned' => 0, 'audio_keys' => [], 'message' => 'no chapters matched the scope filter']);
+
+    // scope='all' = "Build all chapters" = clean slate: wipe every existing
+    // rendering AND queued row for this volume (all profiles) — DB rows,
+    // markers, live MP3s, and parts caches — before enqueueing the fresh
+    // whole-book build below. scope='missing'/'failed' deliberately skip
+    // this so they preserve the chapters they aren't rebuilding.
+    if ($scope === 'all') {
+        ttsPurgeVolume($db, $ttsKey, $volumeKey);
+    }
 
     // Upsert each filtered chapter's row using the same INSERT…ON CONFLICT
     // as the single-chapter path (intentionally repeated rather than
@@ -750,6 +951,43 @@ if ($action === 'delete_paragraph') {
 errorResponse('Unknown action');
 
 // ── helpers ────────────────────────────────────────────────────────
+// Build All = clean slate. Purge EVERY existing audio for this volume
+// (all profiles): stop any in-flight worker, remove the DB rows + markers,
+// the live MP3 files (+ .staging), and the per-paragraph parts caches.
+// Without this a whole-book build layers a new profile's queue on top of
+// stale renderings from a prior profile (the orphaned-complete-rows bug),
+// instead of starting from nothing. Scoped by (tts_key, volume_key) — all
+// of a volume's audio shares one tts_key, so this clears the whole book.
+function ttsPurgeVolume(PDO $db, int $ttsKey, int $volumeKey): void {
+    $audioBase = is_dir(dirname(__DIR__) . '/u') ? dirname(__DIR__) : '/opt/yada-www/public';
+    $stmt = $db->prepare("SELECT tts_audio_key, tts_audio_path, tts_audio_worker_pid
+                            FROM yy_tts_audio WHERE tts_key = ? AND volume_key = ?");
+    $stmt->execute([$ttsKey, $volumeKey]);
+    foreach ($stmt->fetchAll() as $r) {
+        $ak  = (int)$r['tts_audio_key'];
+        // Stop any worker building one of this volume's chapters so it can't
+        // resurrect a parts dir or flip a row back to 'running' mid-purge.
+        $pid = (int)($r['tts_audio_worker_pid'] ?? 0);
+        if ($pid > 0 && function_exists('posix_kill')) {
+            @posix_kill($pid, defined('SIGTERM') ? SIGTERM : 15);
+        }
+        // Live MP3 (+ staging) — strip any ?v=… cache buster defensively.
+        $relPath = preg_replace('/\?.*$/', '', (string)($r['tts_audio_path'] ?? ''));
+        if ($relPath !== '') {
+            $diskPath = $audioBase . $relPath;
+            if (is_file($diskPath)) @unlink($diskPath);
+            if (is_file($diskPath . '.staging')) @unlink($diskPath . '.staging');
+        }
+        ttsWipePartsDir($ak);
+    }
+    // Markers then rows. _rev tables are trigger-maintained — no manual cleanup.
+    $db->prepare("DELETE FROM yy_tts_audio_marker
+                   WHERE tts_audio_key IN (SELECT tts_audio_key FROM yy_tts_audio WHERE tts_key = ? AND volume_key = ?)")
+       ->execute([$ttsKey, $volumeKey]);
+    $db->prepare("DELETE FROM yy_tts_audio WHERE tts_key = ? AND volume_key = ?")
+       ->execute([$ttsKey, $volumeKey]);
+}
+
 function ttsWipePartsDir(int $audioKey): void {
     $audioBase = is_dir(dirname(__DIR__) . '/u') ? dirname(__DIR__) : '/opt/yada-www/public';
     $dir = $audioBase . '/u/tts-parts/' . $audioKey;

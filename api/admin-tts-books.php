@@ -81,7 +81,7 @@ if ($action === 'chapters') {
     // describe THIS profile's build. The Build button label and Play
     // button on the row reflect the currently-selected profile.
     $cStmt = $db->prepare("
-        SELECT c.chapter_key, c.chapter_number, c.chapter_label, c.chapter_page,
+        SELECT c.chapter_key, c.chapter_number, c.chapter_name AS chapter_label, c.chapter_page,
                a.tts_audio_status, a.tts_audio_progress, a.tts_audio_message,
                a.tts_audio_path, a.tts_audio_duration_secs, a.tts_audio_size_bytes,
                a.tts_audio_completed_dtime, a.tts_audio_started_dtime,
@@ -94,7 +94,7 @@ if ($action === 'chapters') {
            AND a.tts_key = ?
            AND a.tts_profile_key = ?
          WHERE c.volume_key = ?
-         ORDER BY c.chapter_number
+         ORDER BY c.chapter_sort, c.chapter_number
     ");
     $cStmt->execute([$ttsKey, $profileKey, $volumeKey]);
     $chapters = $cStmt->fetchAll();

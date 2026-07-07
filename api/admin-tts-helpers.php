@@ -193,7 +193,11 @@ function rewriteBibleCitations(string $text, array $bookNames): string {
     usort($patterns, function ($a, $b) { return strlen($b) - strlen($a); });
     $bookAlt = implode('|', $patterns);
     // Citation pattern: <book><optional " / English-name "><chapter>:<verse>[-<endverse>]
-    $re = '/(?<![A-Za-z])(' . $bookAlt . ')(\s*(?:\/\s*[A-Za-z][A-Za-z\s]+?\s+)?)(\d+):(\d+)(?:-(\d+))?(?![\d:])/iu';
+    // Trailing guard: (?!:?\d) blocks a chained ":<digit>" (e.g. "2:4:5") so we
+    // never half-match a longer reference, but ALLOWS a plain trailing colon —
+    // "here is Galatians 2:4:" (colon introducing the quote) must still rewrite,
+    // otherwise "2:4" is spoken as one run-together number.
+    $re = '/(?<![A-Za-z])(' . $bookAlt . ')(\s*(?:\/\s*[A-Za-z][A-Za-z\s]+?\s+)?)(\d+):(\d+)(?:-(\d+))?(?!:?\d)/iu';
     return preg_replace_callback($re, function ($m) {
         $book   = $m[1];
         $sep    = rtrim($m[2]) === '' ? ' ' : $m[2];
@@ -203,6 +207,35 @@ function rewriteBibleCitations(string $text, array $bookNames): string {
         $verses = $vTo > 0 ? "Verses $vFrom to $vTo" : "Verse $vFrom";
         return $book . rtrim($sep) . " Chapter $chap, $verses";
     }, $text);
+}
+
+/**
+ * Rewrite Islamic scripture citations so the engine speaks the chapter
+ * and verse as two separate numbers instead of one run-together value.
+ * "Quran 005:033" would otherwise be read as a single number
+ * ("five thousand thirty-three") or a timestamp; this yields
+ * "Quran 5, 33" — leading zeros stripped, a comma between the two
+ * numbers so the voice pauses between them. Handles ":" or "." as the
+ * chapter/verse separator and verse ranges:
+ *   "Quran 005:033"  -> "Quran 5, 33"
+ *   "Quran 003.150"  -> "Quran 3, 150"
+ *   "Quran 9:5-7"    -> "Quran 9, 5 to 7"
+ * Only the Quran uses the chapter:verse form in the YY corpus; the
+ * Bukhari/Ishaq/Tabari citations are page/hadith codes and are left
+ * untouched. Runs alongside rewriteBibleCitations (before applyTunes)
+ * on every segment-builder path so the number reads the same on Azure
+ * and on the self-hosted engines.
+ */
+function rewriteIslamicCitations(string $text): string {
+    return preg_replace_callback(
+        '/\b(Qur[\x{2019}\x{02BE}\x{0027}]?an|Koran)\s+0*(\d+)\s*[:.]\s*0*(\d+)(?:\s*[-\x{2013}\x{2014}]\s*0*(\d+))?/u',
+        function ($m) {
+            $out = $m[1] . ' ' . (int)$m[2] . ', ' . (int)$m[3];
+            if (isset($m[4]) && $m[4] !== '') $out .= ' to ' . (int)$m[4];
+            return $out;
+        },
+        $text
+    );
 }
 
 /**
@@ -769,6 +802,7 @@ function buildVoiceBlock(string $text, array $cfg, string $category, ?string $ov
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
+    $text = rewriteIslamicCitations($text);
     // Apply tunes BEFORE pauses so tune regexes see the raw half-ring
     // and apostrophe-equivalent characters in the source. If pauses
     // ran first, "ʾ" (0 ms suppression pause) would have been swapped
@@ -1336,6 +1370,30 @@ function segmentParagraph(string $html, array &$carry = []): array {
         $s['text'] = trim($s['text']);
     }
     unset($s);
+    // Islamic citation -> quote voice. The color parser tags an
+    // Islamic-source citation label ("Quran 005:033", "Ishaq:515") with
+    // its source style (data-style="quran"/"ishaq"/... -> category
+    // quran/ishaq/...) but tags the quotation that follows with the
+    // generic data-style="other" (-> 'other'). Left alone, the scripture
+    // quote routes to the 'Other' voice (a Christian narrator in profile
+    // 8) instead of the Islamic source voice. When a paragraph carries an
+    // Islamic-source segment, re-tag its generic-quote ('other'/'quote')
+    // segments to that source so the citation AND its quote read in one
+    // voice. Only 'other'/'quote' are moved; 'main' narration and other
+    // styled scripture are left untouched.
+    $islamSources = ['islam', 'quran', 'islam_translation', 'bukhari', 'muslim', 'tabari', 'ishaq'];
+    $islamCat = null;
+    foreach ($merged as $s) {
+        if (in_array($s['category'], $islamSources, true)) { $islamCat = $s['category']; break; }
+    }
+    if ($islamCat !== null) {
+        foreach ($merged as &$s) {
+            if ($s['category'] === 'other' || $s['category'] === 'quote') {
+                $s['category'] = $islamCat;
+            }
+        }
+        unset($s);
+    }
     // Hand the final depths back to the caller so it can pass them in to
     // the next paragraph's call. Continuation handling lives in the worker
     // loop — see the $carryState variable around the segmentParagraph
@@ -1486,6 +1544,51 @@ function ttsCollapseSkippedSegments(array $cfg, array $segments): array {
     unset($s);
     // Drop any that ended up empty after the trim.
     return array_values(array_filter($out, function ($s) { return ($s['text'] ?? '') !== ''; }));
+}
+
+/**
+ * Final safety net after ttsCollapseSkippedSegments(): drop any segment with no
+ * SPEAKABLE content — i.e. no base letter (Ll/Lu/Lt/Lo) and no digit. A segment
+ * whose text is only punctuation, whitespace, combining marks, or transliteration
+ * modifier letters (ʾ U+02BE, ʿ U+02BF — Unicode category Lm) is unsynthesisable:
+ * the local GPU engine rejects it with "HTTP 400 — empty text", which makes the
+ * whole paragraph count as a failure and never gets cached, so it shows
+ * "— not yet synthesised —" and Redo loops forever on the same bad input.
+ *
+ * These orphans appear when a stray connector character sits BETWEEN two
+ * parenthesised Hebrew definitions (category word_definition, which the collapse
+ * drops): the lone "ʾ" / "." / "," is tagged main/translation, has no
+ * same-category neighbour left to merge into, and so survives on its own.
+ *
+ * Any real punctuation in such an orphan (a trailing "." or ",") is folded onto
+ * the previous KEPT segment so sentence boundaries aren't lost; modifier letters
+ * and marks are discarded. An orphan with no previous segment is dropped outright.
+ *
+ * NB: \p{L} alone would be WRONG here — it includes Lm (modifier letters) like
+ * ʾ ʿ, which is exactly the content we need to treat as unspeakable.
+ *
+ * Idempotent; a no-op once every segment carries a letter or digit.
+ */
+function ttsDropUnspeakableSegments(array $segments): array {
+    $out = [];
+    foreach ($segments as $s) {
+        $text = (string)($s['text'] ?? '');
+        if (preg_match('/[\p{Ll}\p{Lu}\p{Lt}\p{Lo}\p{N}]/u', $text)) {
+            $out[] = $s;
+            continue;
+        }
+        // Unspeakable. Salvage only punctuation onto the previous kept segment;
+        // discard modifier letters / marks / whitespace.
+        if ($out) {
+            $punct = preg_replace('/[^\p{P}]/u', '', $text);
+            if ($punct !== '') {
+                $tail = $out[count($out) - 1]['text'];
+                $out[count($out) - 1]['text'] = rtrim($tail) . $punct;
+            }
+        }
+        // else: no previous segment to attach to — drop entirely.
+    }
+    return array_values($out);
 }
 
 /**
@@ -1963,6 +2066,7 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
+    $text = rewriteIslamicCitations($text);
     $tuneHits = 0;
     $matchedTuneSeed = null;
     // Phonetic flattening is Chatterbox-specific: pass the flattener only when
@@ -1970,7 +2074,25 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     // the canonical (hyphenated) DB respelling. See chatterboxFlattenPhonetic.
     $engineName = strtolower(ttsProviderEngineName($cfg, $providerKey));
     $tunes      = ttsTunesForProvider($cfg, $providerKey, $voiceCode);
-    if ($engineName === 'kokoro') {
+    // Some local engines (CosyVoice, Qwen3) have NO usable pronunciation-override
+    // channel: their text frontend 500s on a hyphenated respelling and reads a
+    // flattened one as gibberish. Such providers carry BOTH
+    // provider_phonetic_capable=false AND provider_ipa_capable=false; for them we
+    // skip tune substitution and speak the canonical words (the engine can't honour
+    // the respelling anyway — substituting only yields garbled audio / dropped
+    // segments). See reference_tts_pronunciation_capability.
+    $prov        = $cfg['providers'][$providerKey] ?? null;
+    $ttsCapBool  = function ($v, bool $dflt): bool {
+        if ($v === null) return $dflt;
+        if (is_bool($v)) return $v;
+        $s = strtolower(trim((string)$v));
+        return !($s === '' || $s === 'f' || $s === '0' || $s === 'false' || $s === 'no');
+    };
+    $phonCapable = $ttsCapBool($prov['provider_phonetic_capable'] ?? true,  true);
+    $ipaCapable  = $ttsCapBool($prov['provider_ipa_capable']      ?? false, false);
+    if (!$phonCapable && !$ipaCapable) {
+        // No override channel — leave $text as the canonical words (no tunes).
+    } elseif ($engineName === 'kokoro') {
         // Kokoro is IPA-native (misaki g2p): ipa-typed tunes are emitted as
         // inline [word](/IPA/) so explicit stress marks survive. Sub-typed
         // tunes pass through raw (hyphens kept). See applyTunesKokoro.
@@ -1986,6 +2108,14 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     // on the local-engine path — Azure's buildVoiceBlock calls applyPauses
     // too but the local path was skipping it, so "Moseh | Moses" ran with
     // no pause between Hebrew and English forms.
+    // The author uses '|' as the Hebrew-word | English-meaning separator
+    // ("Towrah | Teaching"). On the local-engine path the configured " | " pause
+    // renders as a PERIOD, and a hard stop mid-phrase makes the autoregressive
+    // engines slur a garbage syllable across it ("Towrah. Teaching" was heard as
+    // "Torah Dayah teaching"). A comma reads the way the author intends and
+    // synthesises cleanly, so collapse every '|' (spaced or not) to a comma here,
+    // BEFORE applyPauses so the " | " pause rule finds nothing left to match.
+    $text = preg_replace('/\s*\|\s*/u', ', ', $text);
     if (!empty($cfg['pauses'])) {
         $localPlaceholder = '';
         $text = applyPauses($text, $cfg['pauses'], $localPlaceholder);
@@ -2033,7 +2163,31 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     // boundary silence is handled by the assembly's leading-trim + trailing-pad and
     // the inter-paragraph gap — so strip it. INTERIOR pause-periods (between
     // sentences) are untouched; those render fine.
-    $text = trim((string)preg_replace('/^[\s.,]+|[\s.,]+$/u', '', $text));
+    // Also strip dangling quotes / brackets / parens at the very start or end: a
+    // quoted scripture translation (“…right.”) keeps a boundary quote that makes the
+    // autoregressive local engines hallucinate a garbage syllable — or a whole
+    // spurious clause — after the clip (“…glorious intent.” → “…glorious intent. May
+    // Dayah be with you.”) and a spurious "it" before it. Boundary silence is
+    // handled by the assembly leading-trim + trailing-pad + inter-paragraph gap, so
+    // nothing of value is spoken there. Strip leading junk entirely; strip trailing
+    // quotes/brackets/commas; collapse any trailing period-run to ONE '.'; and
+    // guarantee a single sentence terminator so the engine emits a clean EOS.
+    // Normalise the Unicode ellipsis (… U+2026) and dot leaders
+    // (‥ U+2025, ․ U+2024) to ASCII dots BEFORE the boundary cleanup
+    // below. Chatterbox does not recognise '…': interior it verbalises the
+    // literal "Oh", and a TRAILING '…' (common in YY italic sub-heads such
+    // as "Previously Functional…") reads as "keep going" so the autoregressive
+    // engine HALLUCINATES garbage syllables ("B" / "I") for 1-2s after the real
+    // words. Converting to ASCII dots lets the leading-strip drop a leading run
+    // and the trailing period-collapse below reduce a terminal run to one clean
+    // '.' (EOS); an interior ellipsis becomes an ordinary pause.
+    $text = str_replace(array("…", "‥", "․"), array('...', '..', '.'), $text);
+    // Verified end-to-end on s01v01 para 74 (XTTS) + para 64 (Chatterbox).
+    $text = preg_replace('/^[\s.,;:!?"\'“”‘’«»‹›()\[\]{}–—-]+/u', '', $text);
+    $text = preg_replace('/[\s,;:"\'“”‘’«»‹›()\[\]{}]+$/u', '', $text);
+    $text = preg_replace('/[\s.]*\.[\s.]*$/u', '.', $text);
+    $text = trim((string)$text);
+    if ($text !== '' && !preg_match('/[.!?]$/u', $text)) $text .= '.';
     // Category prosody (parent-walked like buildVoiceBlock).
     $cat = $cfg['categories'][$category] ?? null;
     $cur = $category;
@@ -2076,6 +2230,7 @@ function buildInworldSegment(string $text, array $cfg, string $category): array 
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
+    $text = rewriteIslamicCitations($text);
     $tuneHits = 0;
     $matchedTuneSeed = null;
     $text = applyTunesInworld($text, ttsTunesForProvider($cfg, $providerKey, $voiceCode), $tuneHits, $matchedTuneSeed);
@@ -2147,6 +2302,7 @@ function buildElevenLabsSegment(string $text, array $cfg, string $category): arr
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
+    $text = rewriteIslamicCitations($text);
     // Same applyTunes path Azure uses — IPA columns produce <phoneme> tags,
     // SUB columns produce <sub alias="..."> tags. Both render correctly on
     // ElevenLabs v3 / flash_v2 / turbo_v2.

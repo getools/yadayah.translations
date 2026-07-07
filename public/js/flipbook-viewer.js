@@ -525,6 +525,28 @@
         return cur;
       }
       function chapterBySlug(slug) { return toc.find(e => e.slug === slug); }
+      // Smallest TOC heading page strictly after `headingPage` (i.e. where
+      // the next chapter/section begins). Falls back to TOTAL+1 for the last
+      // entry so the slot covers the rest of the book.
+      function nextTocPageAfter(headingPage) {
+        let next = 0;
+        for (const e of toc) {
+          if (e.page && e.page > headingPage && (next === 0 || e.page < next)) next = e.page;
+        }
+        return next || (TOTAL + 1);
+      }
+      // Tell the TTS player the reader explicitly jumped to the chapter whose
+      // TOC heading is `headingPage`. Passing the chapter's whole TOC slot
+      // lets it bind to THIS chapter rather than the previous one whose last
+      // paragraph bleeds onto this chapter's heading page (see
+      // FlipbookTTS.selectChapterByTocSlot for the full rationale).
+      function ttsSelectChapter(headingPage) {
+        try {
+          if (window.FlipbookTTS && FlipbookTTS.selectChapterByTocSlot && headingPage) {
+            FlipbookTTS.selectChapterByTocSlot(headingPage, nextTocPageAfter(headingPage));
+          }
+        } catch (e) {}
+      }
       // Resolve a chapter reference from a URL param. Accepts either:
       //   - a full slug ("2-hayah-existence")
       //   - just the chapter number as a string ("2")
@@ -924,7 +946,7 @@
             btn.className = 'toc-item';
             btn.style.paddingLeft = (10 + depth * 14) + 'px';
             btn.innerHTML = `<span class="pg">${it.page ?? ''}</span>${it.title}`;
-            if (it.page) btn.onclick = () => { goto(it.page); maybeCloseSidebarAfterNav(); };
+            if (it.page) btn.onclick = () => { goto(it.page); ttsSelectChapter(it.page); maybeCloseSidebarAfterNav(); };
             tocPane.appendChild(btn);
             if (it.children && it.children.length) walk(it.children, depth + 1);
           }
@@ -1222,7 +1244,7 @@
         const hh = parseInt(p.get('h') || '0', 10);
         const qq = p.get('q') || '';
         if (pg) goto(pg, { silent: true });
-        else if (ch) { const c = chapterByRef(ch); if (c && c.page) goto(c.page, { silent: true }); }
+        else if (ch) { const c = chapterByRef(ch); if (c && c.page) { goto(c.page, { silent: true }); ttsSelectChapter(c.page); } }
         if (searchInput && qq !== searchInput.value) {
           searchInput.value = qq;
           searchInput.dispatchEvent(new Event('input'));
@@ -1234,8 +1256,9 @@
       });
 
       let initialPage = null;
+      let initialChapterPage = 0;   // set when the deep-link is a chapter ref
       if (hashPage) initialPage = hashPage;
-      else if (hashChapter) { const c = chapterByRef(hashChapter); if (c && c.page) initialPage = c.page; }
+      else if (hashChapter) { const c = chapterByRef(hashChapter); if (c && c.page) { initialPage = c.page; initialChapterPage = c.page; } }
 
       // Build carousel DOM up-front so mode toggling is instant. We start in
       // spread mode by default; if storage said carousel, flip it on after
@@ -1274,6 +1297,10 @@
         } catch (e) {}
         if (pageFlipReady) goto(initialPage);
         else pendingInitialNav = initialPage;
+        // A #c=… deep-link lands on the chapter's heading page; bind the TTS
+        // player to that chapter explicitly (init's page-based fetch resolves
+        // the heading page to the previous chapter — same overlap as the TOC).
+        if (initialChapterPage) ttsSelectChapter(initialChapterPage);
       } else {
         update();
       }

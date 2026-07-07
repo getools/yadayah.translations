@@ -189,6 +189,7 @@ foreach ($feeds as $feed) {
                    OR yy_feed_item.feed_item_episode IS DISTINCT FROM COALESCE(EXCLUDED.feed_item_episode, yy_feed_item.feed_item_episode)
                    OR yy_feed_item.feed_item_tags IS DISTINCT FROM COALESCE(EXCLUDED.feed_item_tags, yy_feed_item.feed_item_tags)
                    OR yy_feed_item.feed_item_orientation IS DISTINCT FROM COALESCE(EXCLUDED.feed_item_orientation, yy_feed_item.feed_item_orientation)
+                   OR (EXCLUDED.feed_item_publish_import_dtime IS NOT NULL AND yy_feed_item.feed_item_publish_import_dtime IS DISTINCT FROM EXCLUDED.feed_item_publish_import_dtime)
                 RETURNING (xmax = 0) AS inserted
             ");
 

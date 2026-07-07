@@ -284,13 +284,21 @@ function runDbCheck(PDO $db, array $config): array {
     $query = $config['query'] ?? '';
     if (!$query) return ['status' => 'fail', 'message' => 'No query configured'];
 
-    // Safety: only allow SELECT
-    if (!preg_match('/^\s*SELECT\s/i', $query)) {
-        return ['status' => 'fail', 'message' => 'Only SELECT queries are allowed'];
+    // Safety: allow SELECT and read-only CTEs (WITH ... SELECT). No DML.
+    if (!preg_match('/^\s*(SELECT|WITH)\s/i', $query)) {
+        return ['status' => 'fail', 'message' => 'Only SELECT/WITH queries are allowed'];
     }
 
-    $stmt = $db->query($query);
-    $rows = $stmt->fetchAll();
+    // Cap db_check queries so a slow test can't become a long-running query event.
+    $timeoutS = (int)($config['timeout_s'] ?? 30);
+    $db->exec("SET LOCAL statement_timeout = '{$timeoutS}s'");
+
+    try {
+        $stmt = $db->query($query);
+        $rows = $stmt->fetchAll();
+    } finally {
+        $db->exec("SET LOCAL statement_timeout = DEFAULT");
+    }
     $count = count($rows);
 
     if (isset($config['expect_min']) && $count < $config['expect_min']) {

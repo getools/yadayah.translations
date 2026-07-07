@@ -228,10 +228,99 @@ function findAnchor(array $primNorm, array $refNorm, int $pLo, int $pHi, int $rL
  * build per-primary-word slots with a consensus vote. Returns
  * [primaryWords, refAligned(code→[tokens]), slots, disagreements].
  */
-function buildComparison(PDO $db, int $itemKey, string $primary, array $refs): array {
-    $pRows = loadCompareRows($db, $itemKey, $primary);
-    if (!$pRows) return ['error' => 'primary has no rows for this item'];
-    $pWords = primaryWords($pRows);
+/**
+ * Coverage-union spine: start from the chosen word spine, then fill spans the
+ * spine never covered (VAD-dropped songs, engine dropouts) with words from the
+ * baseline that best covers each gap. Plain consensus builds exactly one slot
+ * per spine word and drops any ref token with no spine anchor (see
+ * buildComparison), so a hole in the spine is a permanent hole in the output no
+ * matter how many baselines heard the passage. This pre-pass gives those
+ * passages spine slots so the vote can include them.
+ *
+ * Returns a primaryWords()-shaped list [{i,t,word}] with gap words spliced in
+ * (time-ordered, re-indexed). $filled is populated with {start,end,code,words}
+ * entries describing what was injected, for logging/telemetry. Pure DB read:
+ * the "another engine produced >= $minWords words here" requirement is itself a
+ * strong sound gate (engines with their own VAD do not fabricate a passage into
+ * true silence) — pass $soundGate to add an ffmpeg audible-content check too.
+ */
+function unionSpineWords(PDO $db, int $itemKey, string $spineCode, array $baselineCodes,
+                         array &$filled = [], float $minGapSecs = 8.0, int $minWords = 3,
+                         ?callable $soundGate = null): array {
+    $spineRows = loadCompareRows($db, $itemKey, $spineCode);
+    $pWords = primaryWords($spineRows);
+    $filled = [];
+    if (count($pWords) < 2) return $pWords;
+
+    $cands = array_values(array_filter($baselineCodes, fn($c) => $c !== $spineCode));
+    if (!$cands) return $pWords;
+    // Lazy-load each candidate's word stream once.
+    $wordsByCode = [];
+    $loadWords = function (string $c) use (&$wordsByCode, $db, $itemKey): array {
+        if (!array_key_exists($c, $wordsByCode)) {
+            $wordsByCode[$c] = primaryWords(loadCompareRows($db, $itemKey, $c));
+        }
+        return $wordsByCode[$c];
+    };
+
+    $inserts = [];
+    $n = count($pWords);
+    for ($k = 0; $k + 1 < $n; $k++) {
+        $gapStart = (float)$pWords[$k]['t'];
+        $gapEnd   = (float)$pWords[$k + 1]['t'];
+        if ($gapEnd - $gapStart < $minGapSecs) continue;
+        if ($soundGate && !$soundGate($gapStart, $gapEnd)) continue;
+        // Choose the baseline to fill this gap by (quality tier, word count):
+        // tier 3 = word-level engines (accurate per-word timing), tier 2 =
+        // segment engines (whisperx/parakeet), tier 1 = coarse chunkers
+        // (canary/qwen, ~30s blocks — usable text but poor timing). A word-level
+        // engine that covers the gap always beats a coarse one that merely dumps
+        // more tokens at one timestamp. Only baselines with >= $minWords qualify.
+        $scored = [];
+        foreach ($cands as $c) {
+            $ws = [];
+            foreach ($loadWords($c) as $w) {
+                $t = (float)$w['t'];
+                if ($t > $gapStart + 0.05 && $t < $gapEnd - 0.05) $ws[] = $w;
+            }
+            if (count($ws) < $minWords) continue;
+            $tier = in_array($c, ['gpu-canary-1b-flash', 'gpu-qwen2-audio'], true) ? 1
+                  : (str_ends_with($c, '-word') ? 3 : 2);
+            $scored[] = ['code' => $c, 'tier' => $tier, 'words' => $ws];
+        }
+        if ($scored) {
+            usort($scored, fn($a, $b) => [$b['tier'], count($b['words'])] <=> [$a['tier'], count($a['words'])]);
+            $pick = $scored[0];
+            $inserts[] = ['start' => $gapStart, 'end' => $gapEnd, 'code' => $pick['code'], 'words' => $pick['words']];
+        }
+    }
+    if (!$inserts) return $pWords;
+
+    $merged = $pWords;
+    foreach ($inserts as $ins) {
+        foreach ($ins['words'] as $w) $merged[] = ['t' => (float)$w['t'], 'word' => $w['word']];
+        $filled[] = ['start' => $ins['start'], 'end' => $ins['end'],
+                     'code' => $ins['code'], 'words' => count($ins['words'])];
+    }
+    usort($merged, fn($a, $b) => ($a['t'] <=> $b['t']));
+    foreach ($merged as $i => &$w) $w['i'] = $i;
+    unset($w);
+    return $merged;
+}
+
+function buildComparison(PDO $db, int $itemKey, string $primary, array $refs, ?array $spineWords = null): array {
+    // $spineWords (optional): a prebuilt primaryWords()-shaped spine, used by the
+    // coverage-union path so voting can run over a spine whose gaps were filled
+    // from other baselines. When null, the spine is loaded from $primary's rows
+    // as before.
+    if ($spineWords !== null) {
+        $pWords = $spineWords;
+        if (!$pWords) return ['error' => 'primary has no rows for this item'];
+    } else {
+        $pRows = loadCompareRows($db, $itemKey, $primary);
+        if (!$pRows) return ['error' => 'primary has no rows for this item'];
+        $pWords = primaryWords($pRows);
+    }
     $pNorm = array_map(fn($w) => normTok($w['word']), $pWords);
 
     $np = count($pWords);

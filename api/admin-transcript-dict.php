@@ -83,10 +83,11 @@ if ($method === 'POST') {
             $right = trim($data['right'] ?? '');
             if (!$wrong || !$right) errorResponse('wrong and right required');
             $db->prepare("
-                INSERT INTO yy_transcript_correction (correction_wrong, correction_right, correction_case_sensitive, correction_word_boundary)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO yy_transcript_correction (correction_wrong, correction_right, correction_case_sensitive, correction_word_boundary, correction_origin)
+                VALUES (?, ?, ?, ?, 'human')
                 ON CONFLICT (correction_wrong, correction_right) DO UPDATE
                     SET correction_active_flag = TRUE,
+                        correction_origin = 'human',
                         correction_case_sensitive = EXCLUDED.correction_case_sensitive,
                         correction_word_boundary = EXCLUDED.correction_word_boundary
             ")->execute([$wrong, $right, (int)!empty($data['case_sensitive']), (int)!empty($data['word_boundary'])]);

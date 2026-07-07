@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782371576">
+    <meta name="page-version" content="1783367583">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
@@ -93,7 +93,7 @@
 <div id="app" class="container" style="display:none">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=17"></script>
+<script src="/js/admin-nav.js?v=20"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -464,6 +464,7 @@
 
 <script src="js/admin-links.js?v=4"></script>
 <script src="js/admin-ui-state.js?v=1"></script>
+<script src="/js/admin-login.js?v=8"></script>
 <script>
 var API = '/api';
 var feeds = [];
@@ -1660,6 +1661,13 @@ function pollSyncStatus(key, baseKey, feedName) {
 var _transcriptItemKey = null;
 var _transcriptJobKey = null;     // current admin-transcript-models.php job
 var _transcriptPollTimer = null;
+// The Baseline dropdown is populated lazily — on first hover/focus of the
+// view <select> — instead of on every editor open. Loading the per-model
+// last-run catalog (an aggregate over every baseline row for the item) is
+// wasted work when the user just wants to edit the current transcript and
+// never touches the Baseline picker. Reset per open.
+var _viewSelectPopulated = false;
+var _viewSelectLoading = false;
 // View selector state. '' = live editable transcript. Any other value is a
 // model code (e.g. 'whisper-1-segment') and renders _auto rows read-only.
 var _transcriptView = '';
@@ -1702,6 +1710,7 @@ function openTranscript(itemKey) {
     // dropdown is rebuilt by populateViewSelect() below, which reads this back.
     _transcriptView = '';
     _transcriptReadonly = false;
+    _viewSelectPopulated = false;   // re-arm lazy Baseline-dropdown load for this open
     var ov = document.getElementById('transcript-overlay');
     if (!ov) {
         ov = document.createElement('div');
@@ -1781,7 +1790,7 @@ function openTranscript(itemKey) {
             + '</div>'
             + '<div style="flex:1;display:flex;flex-direction:column;gap:10px;min-width:0;">'
             + '<div id="t-table-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
-            + '<select id="t-view-select" autocomplete="off" onchange="onTranscriptViewChange(this.value)" title="Switch between the live editable transcript and any per-model Baseline snapshot. Picking a model with no rows offers to generate it." style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;max-width:320px;background:#fff;"><option value="">Current (editable)</option></select>'
+            + '<select id="t-view-select" autocomplete="off" onchange="onTranscriptViewChange(this.value)" onmouseenter="ensureViewSelectPopulated()" onfocus="ensureViewSelectPopulated()" onmousedown="ensureViewSelectPopulated()" title="Switch between the live editable transcript and any per-model Baseline snapshot. Picking a model with no rows offers to generate it." style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;font-family:inherit;max-width:320px;background:#fff;"><option value="">Current (editable)</option></select>'
             + '<button id="t-rerun-btn" onclick="rerunCurrentView()" title="Re-run the currently selected model. Writes to Baseline only — live transcript is never touched." style="display:none;background:#27ae60;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Re-run</button>'
             + '<button id="t-init-btn" onclick="openGenerateStudio(_transcriptItemKey)" title="Generate baselines and build the editable transcript from a consensus of chosen baselines, segmented by tunable rules" style="background:#0b7285;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Generate</button>'
             + '<button onclick="document.getElementById(\'t-upload-input\').click()" title="Upload an MP3 (or M4A/WAV/VTT/SRT) — used as the audio source for transcription instead of downloading from YouTube" style="background:#31345A;color:#fff;border:1px solid #31345A;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">↑ Upload MP3</button>'
@@ -1826,10 +1835,16 @@ function openTranscript(itemKey) {
             + '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">'
             + '<div id="t-spk-popover" onmouseenter="speakerPopoverEnter()" onmouseleave="speakerPopoverLeave()" style="display:none;position:fixed;background:#fff;border:1px solid #ccc;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.18);padding:8px 10px;font-size:0.82rem;z-index:10003;min-width:220px;"></div>'
             + '<div id="t-row-spk-popover" style="display:none;position:fixed;background:#fff;border:1px solid #ccc;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.18);padding:6px;font-size:0.82rem;z-index:10004;min-width:240px;"></div>'
+            + '<div id="t-excerpt-popover" style="display:none;position:fixed;background:#fff;border:1px solid #ccc;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.18);padding:10px;font-size:0.85rem;z-index:10005;min-width:280px;max-width:340px;"></div>'
             + '<thead style="background:#f5f5f5;position:sticky;top:0;z-index:1;"><tr>'
             +   '<th style="padding:4px 2px;width:1%;text-align:center;color:#888;" title="Notes / bookmarks on this line"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" style="vertical-align:middle;"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></th>'
+            +   '<th style="padding:4px 2px;width:1%;text-align:center;white-space:nowrap;">'
+            +     '<span id="t-excerpt-anchor" onclick="openExcerptPopover(event)" title="Excerpt — select a range of segments, then click to save or insert a snippet" style="display:inline-block;cursor:pointer;padding:2px 4px;color:#555;">'
+            +       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><rect x="9" y="9" width="11" height="12" rx="1.5"/><path d="M6 15H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1"/></svg>'
+            +     '</span>'
+            +   '</th>'
             +   '<th style="padding:4px 2px;width:1%;text-align:center;white-space:nowrap;" title="Speaker — hover or click to rename">'
-            +     '<span id="t-spk-anchor" onmouseenter="speakerPopoverEnter()" onmouseleave="speakerPopoverLeave()" onclick="toggleSpeakerPopover()" style="display:inline-block;cursor:pointer;padding:2px 4px;">'
+            +     '<span id="t-spk-anchor" onmouseenter="speakerPopoverEnter()" onmouseleave="speakerPopoverLeave()" onclick="toggleSpeakerPopover()" ondblclick="resetSpeakerFilter();refreshSpeakerPopoverIfOpen();" title="Speaker filter — double-click to show all speakers" style="display:inline-block;cursor:pointer;padding:2px 4px;">'
             +       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:middle;"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1z"/></svg>'
             +     '</span>'
             +   '</th>'
@@ -1861,13 +1876,13 @@ function openTranscript(itemKey) {
     if (_tb) _tb.innerHTML = '<tr><td colspan="5" style="padding:16px;text-align:center;color:#999;">Loading…</td></tr>';
     // Reset the view dropdown to "Current (editable)" *immediately*. The overlay
     // is reused, so its <select> still holds the previous open's options with a
-    // model (e.g. "elevenlabs-scribe") selected until populateViewSelect()
-    // finishes its async rebuild. Collapse it to just the Current option now so
-    // the user never sees a stale model selected on open.
+    // model (e.g. "elevenlabs-scribe") selected. Collapse it to just the Current
+    // option now so the user never sees a stale model selected on open. The full
+    // Baseline list is loaded lazily (ensureViewSelectPopulated) only when the
+    // user actually reaches for the dropdown — not eagerly on every open.
     var _vs = document.getElementById('t-view-select');
     if (_vs) _vs.innerHTML = '<option value="">Current (editable)</option>';
     loadTranscript();
-    populateViewSelect();
 }
 
 function closeTranscript() {
@@ -2068,8 +2083,23 @@ function syncTranscriptToPlayer() {
     if (idx >= 0 && rows[idx]) {
         rows[idx].classList.add('t-row-active');
         var auto = document.getElementById('t-autoscroll');
-        if (auto && auto.checked) rows[idx].scrollIntoView({block:'nearest', behavior:'smooth'});
+        // Don't auto-scroll while the operator is editing a timestamp or text
+        // field. The sync tick re-reads each row's time from the DOM, so a
+        // half-typed timestamp flips which row is "current" and yanks the view
+        // away mid-edit — especially bad on a song whose segments already have
+        // out-of-order timestamps.
+        if (auto && auto.checked && !_isEditingTranscriptField()) rows[idx].scrollIntoView({block:'nearest', behavior:'smooth'});
     }
+}
+// True while a transcript timestamp input (unlocked for editing) or a text
+// textarea currently has focus — used to suppress playback auto-scroll so it
+// doesn't fight the operator.
+function _isEditingTranscriptField() {
+    var ae = document.activeElement;
+    if (!ae || !ae.dataset) return false;
+    if (ae.tagName === 'TEXTAREA' && ae.dataset.field === 'text') return true;
+    if (ae.tagName === 'INPUT' && ae.dataset.field === 'segment' && !ae.readOnly) return true;
+    return false;
 }
 
 // Render a row of speed-pill buttons for the requested rates. The active
@@ -3331,6 +3361,19 @@ function _gsFmtDtime(s) {
     return String(s).replace('T', ' ').substring(0, 16);
 }
 
+// Format a Postgres timestamp as local "YYYY-MM-DD HH:mm:ss" for the queue's
+// Generated column (fixed-width, sortable-looking; no locale AM/PM).
+function _gsFmtDtimeYmd(s) {
+    if (!s) return '';
+    var ms = (typeof parseJobDtime === 'function') ? parseJobDtime(s) : 0;
+    if (ms) { try {
+        var d = new Date(ms), p = function(n){ return (n < 10 ? '0' : '') + n; };
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+             + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    } catch (e) {} }
+    return String(s).replace('T', ' ').substring(0, 19);
+}
+
 function _gsDefaultSel() {
     var sel = { baseline: {}, edits: {}, primary: null };
     TRANSCRIPT_GEN_MODELS.forEach(function(m) {
@@ -3377,11 +3420,13 @@ function _gsReadParams() {
     return {
         max_chars:   Math.max(10, Math.round(_gsNum('gs-max_chars', 45))),
         max_lines:   Math.max(1,  Math.round(_gsNum('gs-max_lines', 2))),
+        preferred_lines: Math.max(1, Math.round(_gsNum('gs-pref_lines', 1))),
         max_secs:    _gsNum('gs-max_secs', 7.0),
         min_secs:    _gsNum('gs-min_secs', 1.2),
         break_gap:   Math.max(0, _gsNum('gs-break_gap', 1.5)),
         break_punct: !!(document.getElementById('gs-break_punct') || {}).checked,
         prioritize_primary_breaks: !!(document.getElementById('gs-primary_breaks') || {}).checked,
+        break_speaker: !!(document.getElementById('gs-break_speaker') || {}).checked,
         dedup:       !!(document.getElementById('gs-dedup') || {}).checked
     };
 }
@@ -3436,7 +3481,7 @@ function openGenerateStudio(singleItemKey) {
     ov.innerHTML =
         '<div style="background:#fff;border-radius:10px;width:100%;max-width:1040px;box-shadow:0 12px 40px rgba(0,0,0,.4);display:flex;flex-direction:column;max-height:92vh;">'
       +   '<div style="display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:#f7f8fc;border-radius:10px 10px 0 0;border-bottom:1px solid #ddd;">'
-      +     '<h3 style="margin:0;font-size:1.05rem;color:#31345A;">Generate Transcripts &mdash; ' + nItems + ' item' + (nItems === 1 ? '' : 's') + '</h3>'
+      +     '<h3 style="margin:0;font-size:1.05rem;color:#31345A;">Generate Transcripts &mdash; ' + nItems + ' item' + (nItems === 1 ? '' : 's') + '<span id="gs-mon-count" style="color:#8a92a5;font-weight:400;font-size:0.85rem;"></span></h3>'
       +     '<button onclick="closeGenerateStudio()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">&times;</button>'
       +   '</div>'
       +   '<div id="gs-config" style="padding:14px 20px;overflow-y:auto;">'
@@ -3451,6 +3496,7 @@ function openGenerateStudio(singleItemKey) {
       +       '<legend style="font-weight:600;color:#31345A;font-size:0.85rem;padding:0 6px;">Segments</legend>'
       +       '<div style="display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;">'
       +         seg('Lines', 'gs-max_lines', (p.max_lines != null ? p.max_lines : 2), { width: 54 })
+      +         seg('Preferred Lines', 'gs-pref_lines', (p.preferred_lines != null ? p.preferred_lines : 1), { width: 54 })
       +         seg('Max Characters Per Line', 'gs-max_chars', (p.max_chars != null ? p.max_chars : 45), { width: 54 })
       +         seg('Seconds Per Line — Min', 'gs-min_secs', (p.min_secs != null ? p.min_secs : 1.2), { tenths: true })
       +         seg('Max', 'gs-max_secs', (p.max_secs != null ? p.max_secs : 7.0), { tenths: true })
@@ -3459,6 +3505,7 @@ function openGenerateStudio(singleItemKey) {
       +       '<div style="display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:10px;">'
       +         '<label style="font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="gs-break_punct"' + (p.break_punct === false ? '' : ' checked') + '> Break on Punctuation</label>'
       +         '<label style="font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="gs-primary_breaks"' + (p.prioritize_primary_breaks ? ' checked' : '') + '> Prioritize Breaks from Primary</label>'
+      +         '<label style="font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="gs-break_speaker"' + (p.break_speaker ? ' checked' : '') + '> Break on Speaker Change</label>'
       +         '<label style="font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="gs-dedup"' + (p.dedup === false ? '' : ' checked') + '> Collapse Rolling-Caption Duplication</label>'
       +       '</div>'
       +     '</fieldset>'
@@ -3651,8 +3698,54 @@ function runGenerateStudio() {
         _gsRenderQueue();
         _gsUpdatePauseBtn();
         var clrb = document.getElementById('gs-clear-btn'); if (clrb) clrb.style.display = 'inline-block';
-        _gsDispatchPending();   // creates baseline jobs in page order, then enqueues Edits (from _gsEditsPlan)
+        // Create the ENTIRE queue server-side in ONE request, in page order. This
+        // (a) runs items in exactly the arranged order (ascending job_key; the
+        // worker dequeues FIFO) and (b) SURVIVES the operator closing this popover
+        // or the whole window — the old client-side per-job dispatch (_gsDispatchPending)
+        // fired one POST at a time from the page, so closing it mid-run left the
+        // rest of the queue never created, and it could interleave the run order.
+        var batchItems = _gsItems.map(function(it) {
+            var models = (_gsState[it.key].jobs || [])
+                .filter(function(j){ return j.state === 'queued' && j.jobKey == null; })
+                .map(function(j){ return j.model; });
+            return { item_key: it.key, models: models };
+        }).filter(function(x){ return x.models.length; });
+        var batchEdits = (_gsEditsPlan || []).map(function(e) {
+            return { item_key: e.key, baselines: e.editsCodes, primary: e.primary, params: e.params, wait_for: e.waitFor };
+        });
+        _gsEditsPlan = [];   // consumed — the server now owns these editable builds
         if (_gsPollTimer) clearInterval(_gsPollTimer);
+        // Nothing new to create (e.g. every selected baseline already exists and
+        // no editable build is due): skip the POST and let the poll show the ⏭
+        // existing rows and settle to Done — matches the old silent behavior.
+        if (batchItems.length || batchEdits.length) {
+        fetch(API + '/admin-transcript-models.php', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'enqueue_batch', items: batchItems, edits: batchEdits }) })
+            .then(function(r){ return safeJson(r); })
+            .then(function(rd) {
+                if (!rd || !rd.ok) throw new Error((rd && rd.error) || 'enqueue failed');
+                // Fold the server's job_keys back into _gsState so the single-item
+                // poll (_gsPollTick) and Pause can address the jobs; the batch
+                // monitor rebuilds _gsState from the server each tick anyway.
+                var byKeyModel = {};
+                (rd.jobs || []).forEach(function(j){ byKeyModel[j.item_key + '|' + j.model] = j.job_key; });
+                Object.keys(_gsState).forEach(function(k) {
+                    (_gsState[k].jobs || []).forEach(function(j) {
+                        var jk = byKeyModel[k + '|' + j.model];
+                        if (jk && j.jobKey == null) j.jobKey = jk;
+                    });
+                });
+                (rd.edits || []).forEach(function(e) {
+                    var s = _gsState[e.item_key];
+                    if (s) { s.initJobKey = e.job_key; if (s.editsState === 'waiting') s.editsState = 'queued'; }
+                });
+                _gsRenderQueue();
+            })
+            .catch(function(err) {
+                alert('Could not queue the transcription jobs: ' + (err && err.message ? err.message : err) + '\nNo jobs were started.');
+                _gsResetGoBtn();
+            });
+        }
         _gsPollTimer = setInterval(_gsSingle ? _gsPollTick : _gsMonitorTick, 2000);
     });
 
@@ -4027,7 +4120,7 @@ function _gsFmtClock(ms) {
     return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ap;
 }
 // Shared grid template so the column header + rows align.
-var _GS_GRID = 'display:grid;grid-template-columns:16px minmax(150px,1.4fr) 72px minmax(150px,2.4fr);gap:8px;align-items:center;';
+var _GS_GRID = 'display:grid;grid-template-columns:16px minmax(150px,1.4fr) 72px minmax(120px,1.6fr) minmax(150px,1.3fr);gap:8px;align-items:center;';
 function _gsRenderQueue() {
     var host = document.getElementById('gs-queue'); if (!host) return;
     var activeKey = null;   // first item currently being processed → auto-scroll target
@@ -4046,27 +4139,32 @@ function _gsRenderQueue() {
                 default:         ic = '⏳'; col = '#6f7a99';
             }
             var blocks = (_gsModelByCode(j.model) || {}).blocks || '';
-            var status;
+            // status = what the row is doing; generated = the Generated column
+            // (an absolute YYYY-MM-DD HH:mm:ss for finished rows, or an ETA for
+            // running rows, blank otherwise).
+            var status, generated = '';
             if (j.state === 'running') {
-                // Baseline STT rows: percent · ETA only. The segment count isn't
-                // meaningful until the save phase (single blocking provider call),
-                // so per request it's omitted here — segment counts are shown on
-                // the editable-transcript (Edits) line where they're built.
+                // Baseline STT rows: percent only in Status. The segment count
+                // isn't meaningful until the save phase (single blocking provider
+                // call), so per request it's omitted here — segment counts are
+                // shown on the editable-transcript (Edits) line where they're built.
                 var parts = [];
                 // Hide the percent when it's a frozen, uninformative value — the
                 // worker parks at 70% through the whole (blocking) transcription
                 // and 0% before it starts; only the moving values (download %,
                 // save %) are worth showing.
                 if (j.pct != null && j.pct !== 0 && j.pct !== 70) parts.push(j.pct + '%');
-                // ETA as the clock-time it should FINISH (not a remaining duration).
+                status = parts.join(' · ') || 'Running…';
+                // ETA (clock-time it should FINISH, not a remaining duration)
+                // lives in the Generated column for in-flight rows.
                 var eta = (j.etaSec != null) ? j.etaSec : _gsEtaFromMsg(j.msg);
                 var finishAt = _gsEtaFinishAt(j.jobKey, eta);
-                if (finishAt != null) parts.push('ETA ' + _gsFmtClock(finishAt));
-                status = parts.join(' · ') || 'Running…';
+                if (finishAt != null) generated = 'ETA ' + _gsFmtClock(finishAt);
             } else if (j.state === 'complete') {
                 status = j.segDone ? (j.segDone + ' segments') : 'done';
             } else if (j.state === 'exists') {
-                status = (j.segs ? j.segs + ' segments · ' : '') + (j.dtime ? 'generated ' + esc(_gsFmtDtime(j.dtime)) : 'already generated');
+                status = j.segs ? (j.segs + ' segments') : 'already generated';
+                generated = j.dtime ? esc(_gsFmtDtimeYmd(j.dtime)) : '';
             } else if (j.state === 'failed') {
                 status = 'Failed: ' + esc(j.err || 'error');
             } else if (j.state === 'cancelled') {
@@ -4080,10 +4178,11 @@ function _gsRenderQueue() {
                 + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(_gsServiceOf(j.model)) + '">' + esc(_gsServiceOf(j.model)) + '</span>'
                 + '<span style="color:#8a92a5;font-size:0.76rem;">' + esc(blocks) + '</span>'
                 + '<span style="font-size:0.8rem;color:#444;">' + status + '</span>'
+                + '<span style="font-size:0.76rem;color:#8a92a5;white-space:nowrap;font-variant-numeric:tabular-nums;">' + generated + '</span>'
                 + '</div>';
         }).join('') || (_gsMonitor ? '' : '<div style="padding:2px 6px;color:#999;">No baselines to generate (using existing).</div>');
         var colHead = st.jobs.length
-            ? '<div style="' + _GS_GRID + 'padding:0 6px 3px;font-size:0.66rem;text-transform:uppercase;letter-spacing:.04em;color:#9aa1b2;border-bottom:1px solid #eef0f5;margin-bottom:3px;"><span></span><span>Service</span><span>Blocks</span><span>Status</span></div>'
+            ? '<div style="' + _GS_GRID + 'padding:0 6px 3px;font-size:0.66rem;text-transform:uppercase;letter-spacing:.04em;color:#9aa1b2;border-bottom:1px solid #eef0f5;margin-bottom:3px;"><span></span><span>Service</span><span>Blocks</span><span>Status</span><span>Generated</span></div>'
             : '';
         var editsLine;
         switch (st.editsState) {
@@ -4145,23 +4244,31 @@ function _gsRenderQueue() {
             + monEdit
             + '</div>';
     }).join('');
-    if (!_gsItems.length && _gsMonitor) host.innerHTML = '<div style="color:#999;padding:10px 4px;">Queue is empty — nothing waiting or running.</div>';
+    if (!_gsItems.length && _gsMonitor) host.innerHTML = (_gsSelItems && _gsSelItems.length)
+        ? '<div style="color:#1d6b3a;padding:10px 4px;font-weight:600;">✓ All items complete — their editable transcripts are built.</div>'
+        : '<div style="color:#999;padding:10px 4px;">Queue is empty — nothing waiting or running.</div>';
     host.scrollTop = prevScroll;   // restore scroll the innerHTML reset clobbered
     _gsScrollToActive(activeKey);
 }
 
-// Keep the item currently being processed in view. Scrolls only the queue
-// container (never the page) and only when processing ADVANCES to a new item,
-// so the operator can freely scroll to read other rows without being yanked
-// back every poll tick.
+// Keep the item currently being processed in view AT ALL TIMES. Scrolls only
+// the queue container (never the page). Because completed items are now kept in
+// the list (they pile up above the active one and push it toward / past the
+// bottom edge), tracking only on item-advance let the running item roll off the
+// top. So we re-check every tick: scroll when processing advances to a new item,
+// OR whenever the current active item has drifted out of the viewport. While the
+// active item is already fully visible we don't scroll, so the operator can
+// still read the rows around it without being yanked every poll. (Per operator
+// 2026-07-04: the scroll should always move to the active transcript.)
 function _gsScrollToActive(activeKey) {
-    if (activeKey == null || activeKey === _gsLastScrolledKey) return;
+    if (activeKey == null) return;
     var host = document.getElementById('gs-queue'); if (!host) return;
     var el = document.getElementById('gs-item-' + activeKey); if (!el) return;
+    var advanced = (activeKey !== _gsLastScrolledKey);
     _gsLastScrolledKey = activeKey;
     var top = el.offsetTop, bot = top + el.offsetHeight;
     var viewTop = host.scrollTop, viewBot = viewTop + host.clientHeight;
-    if (top < viewTop || bot > viewBot) {
+    if (advanced || top < viewTop || bot > viewBot) {
         host.scrollTo({ top: Math.max(0, top - 8), behavior: 'smooth' });
     }
 }
@@ -4220,11 +4327,24 @@ function _gsMonitorTick() {
             _gsMonitorActive = act;
             var c = document.getElementById('gs-mon-count');
             if (c) {
-                // Running totals: baselines done (complete) / queued (active);
-                // feed-items done (have an editable transcript) / queued (active).
-                var bits = ['Baselines: ' + (d.baselines_done != null ? d.baselines_done : '–') + ' done / ' + act + ' queued'];
-                if (d.items_done != null && d.items_queued != null) bits.push('Items: ' + d.items_done + ' done / ' + d.items_queued + ' queued');
-                c.innerHTML = '&mdash; ' + bits.join(' &nbsp;·&nbsp; ') + (act > 400 ? ' (first 400 shown)' : '');
+                if (_gsSelItems && _gsSelItems.length) {
+                    // Batch view: progress over the operator's selection. Items
+                    // drop out of _gsItems the moment their editable transcript is
+                    // rendered, so remaining = still-visible selected items and
+                    // done = the rest. (_gsItems was just rebuilt by _gsMonitorApply.)
+                    var total = _gsSelItems.length, selSet = {};
+                    _gsSelItems.forEach(function(k){ selSet[k] = 1; });
+                    var remaining = _gsItems.filter(function(it){ return selSet[it.key]; }).length;
+                    var done = Math.max(0, total - remaining);
+                    c.innerHTML = '&nbsp;&mdash; ' + done + ' of ' + total + ' complete' + (remaining ? ' &nbsp;·&nbsp; ' + remaining + ' remaining' : '');
+                } else {
+                    // Standalone monitor: running site-wide totals — baselines done
+                    // (complete) / queued (active); feed-items done (have an editable
+                    // transcript) / queued (active).
+                    var bits = ['Baselines: ' + (d.baselines_done != null ? d.baselines_done : '–') + ' done / ' + act + ' queued'];
+                    if (d.items_done != null && d.items_queued != null) bits.push('Items: ' + d.items_done + ' done / ' + d.items_queued + ' queued');
+                    c.innerHTML = '&mdash; ' + bits.join(' &nbsp;·&nbsp; ') + (act > 400 ? ' (first 400 shown)' : '');
+                }
             }
             // The multi-item Generate path polls via THIS monitor (not _gsPollTick),
             // so the Generate→"Working…" button is only swapped to "Done" here. When
@@ -4236,7 +4356,7 @@ function _gsMonitorTick() {
             if (goB && goB.disabled && !_gsPaused) {
                 var sel = _gsSelItems || [];
                 var batchDone = sel.length > 0 && sel.every(function(k){
-                    var st = _gsState[k]; if (!st) return false;          // selected item not loaded yet → not done
+                    var st = _gsState[k]; if (!st) return true;           // dropped from the view = its editable transcript is complete
                     var jobsActive = (st.jobs || []).some(function(j){ return j.state === 'queued' || j.state === 'running' || j.state === 'paused'; });
                     var ej = st.editJob;
                     var editActive = ej && (ej.job_status === 'pending' || ej.job_status === 'running');
@@ -4263,6 +4383,7 @@ function _gsMonitorApply(d) {
     // Opt-in set + best editable (consensus) job per item + per-item edit status.
     var optin = {}; (d.optin || []).forEach(function(k){ optin[k] = true; });
     var tstatus = d.tstatus || {};
+    var live = d.live || {};   // itemKey -> live editable-transcript row count (0/absent = not rendered yet)
     var rank = function(s){ return s === 'running' ? 4 : s === 'pending' ? 3 : s === 'done' ? 2 : 1; };
     var editByItem = {};
     (d.edit_jobs || []).forEach(function(e) {
@@ -4297,17 +4418,20 @@ function _gsMonitorApply(d) {
     (d.edit_jobs || []).forEach(function(e){ if (e.job_status === 'pending' || e.job_status === 'running') addKey(e.feed_item_key); });
     var groups = allKeys.map(function(k) {
         var arr = (byItem[k] || []).slice().sort(function(a,b){ return a.job_key - b.job_key; });
-        // Order by the item's lowest PENDING/RUNNING job_key — its NEXT job to be
-        // processed (the worker pulls the lowest pending key). Idle items (no
-        // active job) get Infinity and fall to the bottom, ordered by selection.
-        var minKey = arr.reduce(function(m,x){ return (x.job_status === 'pending' || x.job_status === 'running') ? Math.min(m, x.job_key) : m; }, Infinity);
+        // STABLE order: use the item's OVERALL lowest job_key = its position in
+        // the arranged/enqueue order. Ordering by the lowest still-ACTIVE key made
+        // an item sink to the bottom the moment it finished, so the queue "jumped
+        // around" every tick. Overall-min keeps each item fixed in place (finished
+        // jobs keep their keys) while it processes, top-to-bottom in run order.
+        var minKey = arr.reduce(function(m,x){ return Math.min(m, x.job_key); }, Infinity);
         return { key: k, title: titleOf[k] || (arr[0] && arr[0].item_title) || '', minKey: minKey, jobs: arr };
     });
     groups.sort(function(a,b){
-        if (a.minKey !== b.minKey) return a.minKey - b.minKey;            // active first, in run order
-        var ao = selOrder[a.key] != null ? selOrder[a.key] : 1e9;          // then selected, in selection order
+        var ao = selOrder[a.key] != null ? selOrder[a.key] : 1e9;          // selected items in popover arrangement
         var bo = selOrder[b.key] != null ? selOrder[b.key] : 1e9;
-        return ao !== bo ? ao - bo : a.key - b.key;
+        if (ao !== bo) return ao - bo;
+        if (a.minKey !== b.minKey) return a.minKey - b.minKey;             // else stable enqueue (run) order
+        return a.key - b.key;
     });
     var items = [], state = {};
     groups.forEach(function(g) {
@@ -4349,9 +4473,13 @@ function _gsMonitorApply(d) {
         var anyActive = mapped.some(function(o){ return o.state === 'queued' || o.state === 'running' || o.state === 'paused'; });
         var ej = editByItem[g.key];
         var editActive = ej && (ej.job_status === 'pending' || ej.job_status === 'running');
-        // Non-selected items drop off once nothing's active (existing monitor
-        // behavior — keeps Clear/supersede churn out). Selected items ALWAYS show,
-        // with their full engine detail (⏭ dates included).
+        // SELECTED (batch) items stay in the popover for the whole run — even
+        // once done — so the operator keeps a full list of what was processed,
+        // each finished baseline shown as ✓ plus the editable-transcript status
+        // line as its completion indicator. (Per operator 2026-07-04: don't
+        // remove processed items; just keep the scroll pinned to the active one.)
+        // Only PURE-MONITOR (non-selected) items drop when idle, so the site-wide
+        // queue view still collapses to just what's waiting/running.
         if (!anyActive && !editActive && !isSel) return;
         // Visible rows: active + complete (✓) + exists (⏭); hide cancelled/failed
         // churn. Order engines by the config table order so it's stable.
@@ -5117,7 +5245,7 @@ function loadTranscript() {
     fetch(url, {credentials:'include', cache:'no-store'})
         .then(function(r){return safeJson(r);})
         .then(function(d) {
-            if (d.error) { alert(d.error); return; }
+            if (d.error) { hideTranscriptBusy(); alert(d.error); return; }
             document.getElementById('t-title').textContent = 'Transcript: ' + (d.item.title || '').substring(0, 80);
             // Cache video duration for ETA math in updateJobUI / smoothBarTick.
             // ~15s of pipeline time per minute of audio + 8s overhead is empirically
@@ -5131,6 +5259,15 @@ function loadTranscript() {
             // badges + side panel once rows are in the DOM.
             loadBookmarks();
             updateJobUI(d.job);
+            // Resume live polling for an in-flight generation job. This used to
+            // be done by populateViewSelect() on open, but that now loads lazily,
+            // so we key off d.job (the latest job, already in this response).
+            if (d.job && (d.job.job_status === 'pending' || d.job.job_status === 'running')) {
+                _transcriptJobKey = d.job.feed_item_transcript_job_key;
+                var _pg = document.getElementById('t-progress');
+                if (_pg) _pg.style.display = '';
+                if (!_transcriptPollTimer) _transcriptPollTimer = setInterval(pollJob, 2000);
+            }
             populateValidation(d.validation);
             // Analyze Changes is meaningful only when all three versions
             // exist for this item: text_current (live rows) AND the
@@ -5160,7 +5297,9 @@ function loadTranscript() {
             if (!_ytPlayer && d.item) {
                 initVideoPlayer(d.item.feed_site_code, d.item.feed_item_external_id);
             }
-        });
+            hideTranscriptBusy();   // rows repainted — release the structural-save veil
+        })
+        .catch(function(){ hideTranscriptBusy(); });
 }
 
 function refreshUploadedSourceInfo() {
@@ -5339,8 +5478,11 @@ function transcriptRowCells(seg, secs, text, speaker) {
     var roStyle = _transcriptReadonly ? 'background:#f3f3f3;color:#777;cursor:default;' : '';
     var rowActions = _transcriptReadonly ? ''
         : '<button onmousedown="event.preventDefault()" onclick="splitTranscriptRow(this)" title="Insert a new row after this one — splits text at the cursor if you have one in this row" style="background:none;border:none;color:#27ae60;cursor:pointer;font-size:1.15rem;padding:0 4px;font-weight:700;">+</button>'
-            + '<button onclick="this.closest(\'tr\').remove(); scheduleAutoSave();" title="Delete this row" style="background:none;border:none;color:#c00;cursor:pointer;font-size:1rem;padding:0 4px;">&times;</button>';
+            + '<button onclick="showTranscriptBusy(\'Deleting…\'); this.closest(\'tr\').remove(); scheduleAutoSave();" title="Delete this row" style="background:none;border:none;color:#c00;cursor:pointer;font-size:1rem;padding:0 4px;">&times;</button>';
     return bookmarkCellForRow(seg)
+        + '<td class="t-excerpt-cell" style="padding:6px 2px;border-top:1px solid #eee;vertical-align:top;text-align:center;white-space:nowrap;">'
+        +   '<input type="checkbox" class="t-excerpt-cb" onclick="excerptCbToggle(this)" title="Select this segment for a snippet (Excerpt)" style="cursor:pointer;margin:2px 0 0;">'
+        + '</td>'
         + '<td style="padding:6px 2px;border-top:1px solid #eee;vertical-align:top;text-align:center;white-space:nowrap;">'
         +   speakerChipForRow(s)
         + '</td>'
@@ -5382,7 +5524,7 @@ function renderTranscriptRows(rows) {
     _segmentSeconds = [];
     _activeRowIdx = -1;
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="5" style="padding:20px;text-align:center;color:#999;">No transcript yet. Pick a model from the dropdown to generate one.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="padding:20px;text-align:center;color:#999;">No transcript yet. Pick a model from the dropdown to generate one.</td></tr>';
         renderSpeakersPanel([]);
         return;
     }
@@ -5515,6 +5657,12 @@ function bindTimeCellHandlers(td) {
             // refresh data-secs on the cell so click-to-seek uses the new value
             td.dataset.secs = parseSegmentToSeconds(seg.value);
             _tsHideEditTools(td);
+            // If the new time now belongs at a different point in the ordered
+            // list (e.g. it was pushed past the next row, or before the prev
+            // one), move the whole row into its correct time-sorted slot so the
+            // visible order matches what saveTranscript() persists (it sorts by
+            // seconds). Small edits that don't cross a neighbour are a no-op.
+            _tsReorderRow(td);
         });
     }
 }
@@ -5543,6 +5691,42 @@ function _tsShowEditTools(td) {
 function _tsHideEditTools(td) {
     var b = td.querySelector('.ts-edit-tools'); if (b) b.remove();
     if (_tsPlayTimer) { clearInterval(_tsPlayTimer); _tsPlayTimer = null; }
+}
+
+// Re-position a row after its timestamp was edited so the list stays sorted by
+// time. Assumes the other rows are already in ascending-time order (they are,
+// since every prior edit re-sorts and saveTranscript() persists sorted): we
+// drop the edited row in front of the first sibling whose time exceeds it, or
+// at the end if none do. If it's already in the right slot this is a no-op, so
+// only edits large enough to jump a neighbour actually move the row.
+function _tsReorderRow(td) {
+    var tr = td.closest('tr');
+    if (!tr) return;
+    var tbody = tr.parentNode;
+    if (!tbody) return;
+    var mine = parseFloat(td.dataset.secs);
+    if (isNaN(mine)) return;
+    // Candidate siblings = every other row that carries a real time cell
+    // (skips the "No transcript yet" placeholder row, which has none).
+    var rows = Array.prototype.filter.call(tbody.children, function(r) {
+        return r !== tr && r.querySelector('td.t-time-cell');
+    });
+    var before = null;
+    for (var i = 0; i < rows.length; i++) {
+        var c = rows[i].querySelector('td.t-time-cell');
+        var cs = c ? parseFloat(c.dataset.secs) : NaN;
+        if (!isNaN(cs) && cs > mine) { before = rows[i]; break; }
+    }
+    // Already correctly placed? (immediately before `before`, or last when
+    // there's nothing later) → nothing to do.
+    if (before === tr.nextElementSibling) return;
+    tbody.insertBefore(tr, before);   // before === null appends at the end
+    // Briefly highlight the moved row so the operator can see where it landed.
+    try {
+        tr.style.transition = 'background-color .6s ease';
+        tr.style.backgroundColor = '#fff6d6';
+        setTimeout(function(){ tr.style.backgroundColor = ''; }, 700);
+    } catch (e) {}
 }
 
 // Play the video from this row's (possibly just-edited) time up to the next row's.
@@ -5776,12 +5960,21 @@ function cancelTranscript() {
 // Build the view dropdown: "Current (editable)" + every available model
 // with its last-run timestamp. Caches the catalog so the change handler
 // can detect models that have no _auto rows yet.
+// Lazily load the Baseline dropdown the first time the user reaches for it.
+// Guarded so hover + focus + mousedown (all three fire) only trigger one fetch.
+function ensureViewSelectPopulated() {
+    if (_viewSelectPopulated || _viewSelectLoading) return;
+    populateViewSelect();
+}
 function populateViewSelect() {
     if (!_transcriptItemKey) return;
+    _viewSelectLoading = true;
     fetch(API + '/admin-transcript-models.php?action=status&item_key=' + _transcriptItemKey, {credentials:'include'})
         .then(function(r){return safeJson(r);})
         .then(function(d) {
+            _viewSelectLoading = false;
             if (d.error || !d.models) return;
+            _viewSelectPopulated = true;
             _modelCatalog = d.models;
             var sel = document.getElementById('t-view-select');
             if (!sel) return;
@@ -5806,7 +5999,8 @@ function populateViewSelect() {
                 _transcriptPollTimer = setInterval(pollJob, 2000);
             }
             updateTranscriptRerunBtn();
-        });
+        })
+        .catch(function(){ _viewSelectLoading = false; });   // let a later hover retry
 }
 
 function onTranscriptViewChange(newView) {
@@ -5947,12 +6141,14 @@ function openInitializeEditsModal() {
         +   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;font-size:0.8rem;color:#444;">'
         +     _ieNum('ie-max_chars', 'Max chars / line', 42)
         +     _ieNum('ie-max_lines', 'Max lines', 2)
+        +     _ieNum('ie-pref_lines', 'Preferred lines', 1)
         +     _ieNum('ie-max_secs', 'Max seconds/line', 7, '0.1')
         +     _ieNum('ie-min_secs', 'Min seconds/line', 1.2, '0.1')
         +     _ieNum('ie-break_gap', 'Break on pause (seconds) (0 = off)', 0, '0.1')
         +   '</div>'
         +   '<label style="display:block;margin-top:10px;font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="ie-break_punct" checked> Break on punctuation</label>'
         +   '<label style="display:block;margin-top:4px;font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="ie-use_boundaries"> Prefer breaks at baseline segment boundaries</label>'
+        +   '<label style="display:block;margin-top:4px;font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="ie-break_speaker"> Break on speaker change (needs a diarized baseline)</label>'
         +   '<label style="display:block;margin-top:4px;font-size:0.82rem;cursor:pointer;"><input type="checkbox" id="ie-dedup" checked> Collapse rolling-caption duplication</label>'
         + '</div>'
         + '<div style="padding:12px 18px;border-top:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;">'
@@ -6307,9 +6503,27 @@ function openRowSpeakerPicker(chipEl) {
         + '</div>';
     pop.innerHTML = html;
     pop.style.display = 'block';
+    // Keep the picker fully on-screen. It's position:fixed, so coordinates are
+    // viewport-relative. Cap its height to the viewport (it scrolls internally),
+    // then place it below the chip — but flip above when it would run off the
+    // bottom, and clamp so it never spills past any edge (the reported bug:
+    // picking a speaker on a row near the page bottom pushed it below view).
     var r = chipEl.getBoundingClientRect();
-    pop.style.top = (r.bottom + 4) + 'px';
-    pop.style.left = Math.max(8, r.left) + 'px';
+    var vw = window.innerWidth, vh = window.innerHeight, margin = 8;
+    pop.style.maxHeight = (vh - margin * 2) + 'px';
+    pop.style.overflowY = 'auto';
+    var ph = pop.offsetHeight, pw = pop.offsetWidth;
+    var top = r.bottom + 4;
+    if (top + ph > vh - margin) {                 // would overflow bottom
+        var above = r.top - 4 - ph;
+        top = (above >= margin) ? above           // flip above the chip
+                                : Math.max(margin, vh - ph - margin);  // else pin within view
+    }
+    if (top < margin) top = margin;
+    var left = Math.max(margin, r.left);
+    if (left + pw > vw - margin) left = Math.max(margin, vw - pw - margin);
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
     setTimeout(function() {
         document.addEventListener('click', closeRowSpeakerPickerOnce, { once: true });
     }, 0);
@@ -6361,17 +6575,63 @@ function applyRowSpeakerLabel(chipEl, newLabel) {
 var _speakerPopoverRows = [];
 var _speakerPopoverHideTimer = null;
 function renderSpeakersPanel(rows) { _speakerPopoverRows = rows || []; }
+// Saved voice-profile names (lowercased), used to draw each speaker's ★ filled
+// (saved) vs ☆ empty (not saved yet). `null` = not loaded; `{}` = loaded/empty.
+// A profile is keyed by NAME server-side (save_speaker_profile matches on
+// lower(name)), so we mirror that here.
+var _savedSpeakerProfileNames = null;
+function ensureSpeakerProfilesLoaded() {
+    if (_savedSpeakerProfileNames !== null) return;   // loaded or in-flight
+    _savedSpeakerProfileNames = {};                   // mark in-flight; avoids duplicate fetches
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'list_speaker_profiles'})
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        var names = {};
+        if (d && d.profiles) d.profiles.forEach(function(p){
+            if (p && p.name) names[String(p.name).trim().toLowerCase()] = true;
+        });
+        // MERGE, don't overwrite: a save that resolved before this list fetch
+        // has already marked its name here optimistically. Overwriting would
+        // clobber it and revert the just-lit star.
+        Object.keys(_savedSpeakerProfileNames || {}).forEach(function(k){ names[k] = true; });
+        _savedSpeakerProfileNames = names;
+        refreshSpeakerPopoverIfOpen();   // repaint stars now that we know what's saved
+    }).catch(function(){ /* leave as {} — stars stay empty, saving still works */ });
+}
+function isSpeakerProfileSaved(name) {
+    return !!(_savedSpeakerProfileNames && name && _savedSpeakerProfileNames[String(name).trim().toLowerCase()]);
+}
+// Read the CURRENT speaker of every row from the live table inputs rather than
+// the _speakerPopoverRows snapshot. Per-row reassignment (applyRowSpeakerLabel)
+// updates the row's hidden input but not the snapshot, so counting the snapshot
+// left renamed-away labels (e.g. the last SPEAKER_09) lingering with a stale
+// count. Falls back to the snapshot only when the table isn't rendered.
+function currentRowSpeakerValues() {
+    var inputs = document.querySelectorAll('#t-rows input[data-field="speaker"]');
+    if (inputs.length) {
+        var out = [];
+        inputs.forEach(function(inp){ out.push(inp.value == null ? '' : String(inp.value)); });
+        return out;
+    }
+    return (_speakerPopoverRows || []).map(function(r){
+        return (r.feed_item_transcript_speaker == null) ? '' : String(r.feed_item_transcript_speaker);
+    });
+}
 function buildSpeakerPopoverHtml() {
-    var rows = _speakerPopoverRows;
+    var speakerVals = currentRowSpeakerValues();
     var counts = {};
-    rows.forEach(function(r) {
-        var s = (r.feed_item_transcript_speaker == null) ? '' : String(r.feed_item_transcript_speaker);
+    speakerVals.forEach(function(s) {
         if (s === '') return;
         counts[s] = (counts[s] || 0) + 1;
     });
     var labels = Object.keys(counts).sort(function(a, b) { return counts[b] - counts[a]; });
+    var blankCount = 0;
+    speakerVals.forEach(function(s) { if (s === '') blankCount++; });
     if (!labels.length) {
-        return '<div style="color:#888;padding:6px 4px;">No speaker labels on this transcript yet.</div>';
+        var fillBtn0 = _transcriptReadonly ? '' :
+            '<div style="margin-top:8px;"><button onclick="fillSpeakersFromBaseline()" style="background:#31345A;color:#fff;border:none;border-radius:4px;padding:5px 10px;font-size:0.76rem;cursor:pointer;" title="Label each segment using the automatic voice-based speaker detection (WhisperX). Doesn\'t change any text and won\'t overwrite speakers you have set.">Auto-assign speakers</button></div>';
+        return '<div style="color:#888;padding:6px 4px;">No speaker labels on this transcript yet.</div>' + fillBtn0;
     }
     var ro = !!_transcriptReadonly;
     var roAttr  = ro ? ' disabled' : '';
@@ -6381,12 +6641,24 @@ function buildSpeakerPopoverHtml() {
         : '';
     var html = '<div style="font-weight:600;color:#31345A;margin-bottom:6px;font-size:0.78rem;">Speakers in this transcript</div>'
         + roBanner
-        + '<table style="border-collapse:collapse;font-size:0.78rem;">';
+        + '<div style="font-size:0.7rem;color:#888;margin-bottom:6px;">Tick to show a speaker’s segments, untick to hide.</div>'
+        + '<table style="border-collapse:collapse;font-size:0.78rem;">'
+        + '<tr>'
+        +   '<td style="padding:3px 6px 3px 0;text-align:center;"><input type="checkbox" id="t-spk-all" checked onchange="toggleAllSpeakerFilters(this)" title="Show/hide all speakers"></td>'
+        +   '<td colspan="' + (ro ? 5 : 6) + '" style="padding:3px 0;font-size:0.7rem;color:#888;">Double-click a box to show only that speaker. Top checkbox shows/hides all speakers</td>'
+        + '</tr>';
     labels.forEach(function(lbl) {
         var parsed = parseSpeakerLabel(lbl);
         var displayAbbrev = speakerAbbrev(lbl);
         var resolvedColor = speakerChipPalette(lbl);
+        var saved = isSpeakerProfileSaved(parsed.name);
+        var starGlyph = saved ? '★' : '☆';
+        var starColor = saved ? '#e0a800' : '#bbb';
+        var starTitle = saved
+            ? 'Saved as a reusable voice profile — click to update it with this transcript’s samples'
+            : 'Save this voice as a reusable profile so future transcripts auto-recognise this speaker';
         html += '<tr data-from="' + esc(lbl) + '">'
+            +   '<td style="padding:3px 6px 3px 0;text-align:center;"><input type="checkbox" class="t-spk-filter" data-label="' + esc(lbl) + '"' + (_speakerFilterHidden[lbl] ? '' : ' checked') + ' onchange="applySpeakerFilter()" ondblclick="soloSpeakerFilter(this)" title="Show/hide this speaker’s segments (double-click to show only this speaker)"></td>'
             +   '<td style="padding:3px 8px 3px 0;text-align:right;color:#888;white-space:nowrap;">' + counts[lbl] + '</td>'
             +   '<td style="padding:3px 4px;text-align:center;">' + speakerChipForLabel(lbl) + '</td>'
             +   '<td style="padding:3px 2px;text-align:center;">'
@@ -6413,10 +6685,22 @@ function buildSpeakerPopoverHtml() {
             +       ' placeholder="name…"'
             +       ' style="font-size:0.78rem;width:130px;padding:3px 6px;border:1px solid #ccc;border-radius:3px;' + roStyle + '">'
             +   '</td>'
+            +   (ro ? '' : '<td style="padding:3px 0 3px 6px;white-space:nowrap;"><button onclick="saveSpeakerProfileFromRow(this)" title="' + esc(starTitle) + '" style="background:none;border:none;cursor:pointer;font-size:0.95rem;color:' + starColor + ';padding:0 2px;line-height:1;">' + starGlyph + '</button>'
+            +     '<button onclick="removeSpeakerFromList(' + JSON.stringify(lbl).replace(/"/g, '&quot;') + ')" title="Remove this speaker — clears it from its ' + counts[lbl] + ' segment(s) (text unchanged) and drops it from the list" style="background:none;border:none;cursor:pointer;font-size:0.9rem;color:#c0392b;padding:0 2px;line-height:1;margin-left:2px;">&times;</button></td>')
             + '</tr>';
     });
+    // Always show an "Undefined" bucket — the segments with no speaker assigned
+    // — so it reads as a consistent third row alongside the named speakers,
+    // with its own count and filter toggle (muted when there are none).
+    html += '<tr data-from=""' + (blankCount === 0 ? ' style="opacity:0.55;"' : '') + '>'
+        +   '<td style="padding:3px 6px 3px 0;text-align:center;"><input type="checkbox" class="t-spk-filter" data-label="__blank__"' + (_speakerFilterHidden['__blank__'] ? '' : ' checked') + ' onchange="applySpeakerFilter()" ondblclick="soloSpeakerFilter(this)" title="Show/hide segments with no speaker assigned (double-click to show only these)"></td>'
+        +   '<td style="padding:3px 8px 3px 0;text-align:right;color:#888;white-space:nowrap;">' + blankCount + '</td>'
+        +   '<td style="padding:3px 4px;text-align:center;color:#bbb;">—</td>'
+        +   '<td colspan="' + (ro ? 3 : 4) + '" style="padding:3px 0;color:#999;font-style:italic;">Undefined (no speaker)</td>'
+        + '</tr>';
     html += '</table>';
     if (!ro) {
+        html += '<div style="margin-top:8px;"><button onclick="fillSpeakersFromBaseline()" style="background:#eef;border:1px solid #ccd;border-radius:4px;padding:4px 9px;font-size:0.74rem;cursor:pointer;" title="Label each segment that has no speaker yet, using the automatic voice-based speaker detection (WhisperX). Doesn\'t change any text and won\'t overwrite speakers you have set.">Auto-assign unlabeled segments</button></div>';
         html += '<div style="font-size:0.7rem;color:#888;margin-top:6px;">Abbreviation drives the chip; if blank it derives from the name.</div>';
     }
     return html;
@@ -6432,6 +6716,7 @@ function positionSpeakerPopover() {
 function showSpeakerPopover() {
     var pop = document.getElementById('t-spk-popover');
     if (!pop) return;
+    ensureSpeakerProfilesLoaded();   // lazily learn which speakers are saved → fills their ★
     if (_speakerPopoverHideTimer) { clearTimeout(_speakerPopoverHideTimer); _speakerPopoverHideTimer = null; }
     // Rebuild only when transitioning hidden → visible so in-progress typing
     // in the abbrev/name inputs isn't blown away.
@@ -6439,6 +6724,7 @@ function showSpeakerPopover() {
         pop.innerHTML = buildSpeakerPopoverHtml();
         pop.style.display = 'block';
         positionSpeakerPopover();
+        syncSpeakerFilterToRows();
     }
 }
 function refreshSpeakerPopoverIfOpen() {
@@ -6446,6 +6732,7 @@ function refreshSpeakerPopoverIfOpen() {
     if (!pop || pop.style.display !== 'block') return;
     pop.innerHTML = buildSpeakerPopoverHtml();
     positionSpeakerPopover();
+    syncSpeakerFilterToRows();
 }
 function hideSpeakerPopover() {
     var pop = document.getElementById('t-spk-popover');
@@ -6461,6 +6748,35 @@ function toggleSpeakerPopover() {
     if (pop && pop.style.display === 'block') hideSpeakerPopover();
     else showSpeakerPopover();
 }
+var _spkRenameChain = Promise.resolve();
+// Distinct speaker labels currently on the transcript's live rows, minus one.
+function _distinctSpeakerLabels(exclude) {
+    var seen = {}, out = [];
+    document.querySelectorAll('#t-rows input[data-field="speaker"]').forEach(function(inp){
+        var v = inp.value || '';
+        if (v === '' || v === exclude) return;
+        if (!seen[v]) { seen[v] = true; out.push(v); }
+    });
+    return out;
+}
+// Find an existing speaker (other than `exclude`) with the SAME abbreviation and
+// name — i.e. the same person under a different chip colour, hence a different
+// stored label. That's the merge target. Case-insensitive. Returns label|null.
+function _findSpeakerMergeTarget(abbrev, name, exclude) {
+    var a = (abbrev || '').trim().toLowerCase(), n = (name || '').trim().toLowerCase();
+    if (!a && !n) return null;
+    var match = null;
+    _distinctSpeakerLabels(exclude).forEach(function(lbl){
+        if (match) return;
+        if (speakerAbbrev(lbl).trim().toLowerCase() === a && parseSpeakerLabel(lbl).name.trim().toLowerCase() === n) match = lbl;
+    });
+    return match;
+}
+function _countRowsWithSpeaker(label) {
+    var c = 0;
+    document.querySelectorAll('#t-rows input[data-field="speaker"]').forEach(function(inp){ if ((inp.value||'') === label) c++; });
+    return c;
+}
 function commitSpeakerRename(inputEl) {
     var tr = inputEl.closest('tr');
     if (!tr || !_transcriptItemKey) return;
@@ -6475,25 +6791,262 @@ function commitSpeakerRename(inputEl) {
         var auto = speakerAbbrev(name);
         if (abbrev === auto) abbrev = '';
     }
-    if (colorInp) {
-        var defaultColor = (colorInp.getAttribute('data-default') || '').toLowerCase();
-        if (color === defaultColor) color = '';
-    }
+    // Pin the shown colour onto the label rather than collapsing it to the auto
+    // palette colour. The chip colour is otherwise a hash of abbrev+name, so a
+    // rename would silently re-hash it to a different colour ("the colours
+    // changed themselves") and an explicit colour would be dropped.
     var to = formatSpeakerLabel(abbrev, name, color);
     if (to === from) return;
+    // If the new abbreviation + name matches an EXISTING different speaker
+    // (same person, different chip colour → different label), offer to merge
+    // rather than leave two identical-looking speakers in the list. Confirming
+    // adopts the existing speaker's exact label (colour and all) so the bulk
+    // rename below folds these rows into it.
+    var doMerge = false;
+    var _toP = parseSpeakerLabel(to);
+    var mergeTarget = _findSpeakerMergeTarget(speakerAbbrev(to), _toP.name, from);
+    if (mergeTarget && mergeTarget !== to) {
+        var _disp = _toP.name || speakerAbbrev(to);
+        var _cnt = _countRowsWithSpeaker(from);
+        if (confirm('A speaker "' + _disp + '" with the same abbreviation and name already exists.\n\nMerge these ' + _cnt + ' segment(s) into it? They’ll share one label and colour.')) {
+            to = mergeTarget;
+            doMerge = true;
+        }
+    }
+    // Advance this row's identity SYNCHRONOUSLY so editing a second field
+    // (e.g. colour after abbreviation) renames from the NEW label, not the
+    // stale original. Repaint in place — a full loadTranscript() reload would
+    // tear down the popover and lose the in-progress edit.
+    tr.setAttribute('data-from', to);
+    var p2 = parseSpeakerLabel(to);
+    if (colorInp) {
+        colorInp.value = speakerChipPalette(to);
+        colorInp.setAttribute('data-default', speakerChipPalette(formatSpeakerLabel(p2.abbrev, p2.name, '')));
+    }
+    if (abbrevInp) abbrevInp.value = speakerAbbrev(to);
+    var chipCell = tr.querySelector('td:nth-child(3)');
+    if (chipCell) chipCell.innerHTML = speakerChipForLabel(to);
     var statusEl = document.getElementById('t-status');
     if (statusEl) statusEl.textContent = 'Renaming speaker…';
+    // Serialize renames so a second edit's DB update can never race ahead of
+    // the first (which would look up an already-renamed label and change 0 rows).
+    _spkRenameChain = _spkRenameChain.then(function() {
+        return fetch(API + '/admin-transcript.php', {
+            method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({action:'rename_speaker', item_key: _transcriptItemKey, from: from, to: to})
+        }).then(function(r){ return safeJson(r); }).then(function(d) {
+            if (!d || d.error) { if (statusEl) statusEl.textContent = '✗ ' + ((d && d.error) || 'rename failed'); return; }
+            _applySpeakerLabelChangeInDom(from, to);
+            // A merge leaves two identical rows in the popover (the edited one +
+            // the pre-existing target) — rebuild so they collapse into one with
+            // the combined count.
+            if (doMerge) refreshSpeakerPopoverIfOpen();
+            if (statusEl) {
+                statusEl.textContent = doMerge ? '✓ Merged ' + d.renamed + ' segment(s)' : '✓ Renamed ' + d.renamed + ' row(s)';
+                setTimeout(function() { if (statusEl.textContent.charAt(0) === '✓') statusEl.textContent = ''; }, 2000);
+            }
+        });
+    });
+}
+// Remove a speaker from this feed item: clears the label off every segment it's
+// on (their text is untouched — they just become "no speaker") and drops it from
+// the list. Implemented as a bulk rename to the empty label, which the backend
+// treats as "clear". Serialized on _spkRenameChain like commitSpeakerRename.
+function removeSpeakerFromList(label) {
+    if (!_transcriptItemKey || _transcriptReadonly) return;
+    var cnt = _countRowsWithSpeaker(label);
+    var disp = parseSpeakerLabel(label).name || speakerAbbrev(label) || label;
+    if (!confirm('Remove speaker "' + disp + '"?\n\nThis clears it from ' + cnt + ' segment(s) — the transcript text is unchanged — and removes it from the list.')) return;
+    var statusEl = document.getElementById('t-status');
+    if (statusEl) statusEl.textContent = 'Removing speaker…';
+    _spkRenameChain = _spkRenameChain.then(function() {
+        return fetch(API + '/admin-transcript.php', {
+            method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({action:'rename_speaker', item_key: _transcriptItemKey, from: label, to: ''})
+        }).then(function(r){ return safeJson(r); }).then(function(d) {
+            if (!d || d.error) { if (statusEl) statusEl.textContent = '✗ ' + ((d && d.error) || 'remove failed'); return; }
+            _applySpeakerLabelChangeInDom(label, '');
+            refreshSpeakerPopoverIfOpen();   // drop the now-empty speaker row
+            if (statusEl) {
+                statusEl.textContent = '✓ Removed speaker (' + d.renamed + ' segment(s) cleared)';
+                setTimeout(function() { if (statusEl.textContent.charAt(0) === '✓') statusEl.textContent = ''; }, 2500);
+            }
+        });
+    });
+}
+// Repaint every transcript row currently labelled `from` as `to`, in place,
+// and keep the popover's cached rows in sync — no full reload.
+function _applySpeakerLabelChangeInDom(from, to) {
+    document.querySelectorAll('#t-rows input[data-field="speaker"]').forEach(function(inp){
+        if ((inp.value || '') !== from) return;
+        var td = inp.closest('td');
+        if (td) td.innerHTML = speakerChipForRow(to);
+    });
+    (_speakerPopoverRows || []).forEach(function(r){
+        var s = (r.feed_item_transcript_speaker == null) ? '' : String(r.feed_item_transcript_speaker);
+        if (s === from) r.feed_item_transcript_speaker = to;
+    });
+}
+
+// Populate the speaker column from a diarized baseline (WhisperX+pyannote) by
+// time-lookup — sets only currently-blank rows, never touches text/segments.
+// Works on human-edited transcripts a rebuild is not allowed to overwrite.
+function fillSpeakersFromBaseline() {
+    if (!_transcriptItemKey || _transcriptReadonly) return;
+    var statusEl = document.getElementById('t-status');
+    if (statusEl) statusEl.textContent = 'Filling speakers from diarized baseline…';
     fetch(API + '/admin-transcript.php', {
         method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({action:'rename_speaker', item_key: _transcriptItemKey, from: from, to: to})
+        body: JSON.stringify({action:'fill_speakers', item_key: _transcriptItemKey})
     }).then(function(r){ return safeJson(r); }).then(function(d) {
-        if (d.error) { if (statusEl) statusEl.textContent = '✗ ' + d.error; return; }
+        if (!d || d.error) { if (statusEl) statusEl.textContent = '✗ ' + ((d && d.error) || 'fill failed'); return; }
         if (statusEl) {
-            statusEl.textContent = '✓ Renamed ' + d.renamed + ' row(s)';
-            setTimeout(function() { if (statusEl.textContent.indexOf('Renamed') === 0) statusEl.textContent = ''; }, 2000);
+            var msg = (d.filled > 0)
+                ? ('✓ Labelled ' + d.filled + ' row(s) from ' + d.source_model)
+                : 'No unlabelled rows to fill';
+            if (d.matched && d.matched.length) {
+                msg += ' · auto-identified ' + d.matched.map(function(m){ return m.name; }).join(', ');
+            }
+            statusEl.textContent = msg;
+            setTimeout(function(){
+                if (statusEl.textContent.charAt(0) === '✓' || statusEl.textContent.indexOf('No unlabelled') === 0) statusEl.textContent = '';
+            }, 3500);
         }
         if (_transcriptItemKey) loadTranscript();
     });
+}
+// Save a named speaker's captured voice embedding into the reusable profile
+// library so recurring people are auto-identified in future transcripts.
+function saveSpeakerProfileFromRow(btn) {
+    var tr = btn.closest('tr');
+    if (!tr || !_transcriptItemKey) return;
+    var label = tr.getAttribute('data-from') || '';
+    var nameInp = tr.querySelector('.t-spk-name');
+    var name = nameInp ? nameInp.value.trim() : '';
+    if (!name) { alert('Give this speaker a name first, then save the profile.'); if (nameInp) nameInp.focus(); return; }
+    var statusEl = document.getElementById('t-status');
+    if (statusEl) statusEl.textContent = 'Saving voice profile…';
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'save_speaker_profile', item_key: _transcriptItemKey, label: label, name: name})
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        if (!d || d.error) {
+            var emsg = (d && d.error) || 'profile save failed';
+            if (statusEl) statusEl.textContent = '✗ ' + emsg;
+            // The status line lives up in the toolbar, far from the popover, so
+            // a silent failure reads as "the star just doesn't work". Surface
+            // the real reason right where the click happened. The common case
+            // is "no voice embedding" — a transcript built before diarization
+            // captured voice samples, so there's nothing to save yet.
+            alert(/embedding/i.test(emsg)
+                ? 'Can’t save “' + name + '” as a voice profile yet:\n\n' + emsg + '\n\nThis speaker has no captured voice sample. Rebuild this transcript with the WhisperX speaker-diarization baseline to capture voice embeddings, then the star will save.'
+                : 'Couldn’t save this voice profile:\n\n' + emsg);
+            return;
+        }
+        // Mark this name as saved so the star stays filled across popover
+        // rebuilds, then repaint the popover so the ★ shows even if this
+        // button node was replaced by a rebuild while the save was in flight.
+        if (_savedSpeakerProfileNames === null) _savedSpeakerProfileNames = {};
+        _savedSpeakerProfileNames[String(d.name).trim().toLowerCase()] = true;
+        btn.textContent = '★';
+        btn.style.color = '#e0a800';
+        btn.title = 'Saved as a reusable voice profile — click to update it with this transcript’s samples';
+        refreshSpeakerPopoverIfOpen();
+        if (statusEl) {
+            statusEl.textContent = '✓ Saved voice profile “' + d.name + '” (' + d.samples + ' sample' + (d.samples > 1 ? 's' : '') + ')';
+            setTimeout(function(){ if (statusEl.textContent.charAt(0) === '✓') statusEl.textContent = ''; }, 3000);
+        }
+    });
+}
+
+// Persisted filter state: labels the user has UNCHECKED (hidden). Survives
+// popover rebuilds so re-opening/refreshing the popover doesn't silently drop
+// the filter — the boxes are rendered from this, and the rows are re-synced to
+// the boxes on every rebuild (see syncSpeakerFilterToRows). Without this, a
+// rebuild reset the boxes to all-checked while leaving rows hidden → "all
+// speakers look selected but some are still missing".
+var _speakerFilterHidden = {};
+// Keep the currently-playing ("active") segment inside the visible area.
+// Applying or clearing a speaker filter hides/shows rows, which reshuffles the
+// scroll position without changing the active row's index — so the playback
+// sync's index-change guard never scrolls it back. Call this whenever the table
+// returns to an unfiltered state so the active segment stays on-screen. Honors
+// the Auto-scroll toggle and yields while the operator is editing a field.
+function scrollActiveSegmentIntoView() {
+    var auto = document.getElementById('t-autoscroll');
+    if (!(auto && auto.checked) || _isEditingTranscriptField()) return;
+    var tbody = document.getElementById('t-rows');
+    if (!tbody) return;
+    var active = tbody.querySelector('tr.t-row-active');
+    if (active && active.style.display !== 'none') {
+        active.scrollIntoView({block:'nearest', behavior:'smooth'});
+    }
+}
+// Filter the transcript table by speaker using the popover's tick boxes. The
+// "__blank__" box governs rows with no speaker assigned. Pure view state —
+// hides/shows rows, never edits them.
+function applySpeakerFilter() {
+    var pop = document.getElementById('t-spk-popover');
+    var boxes = pop ? pop.querySelectorAll('.t-spk-filter') : [];
+    if (!boxes.length) return;
+    var show = {};
+    _speakerFilterHidden = {};
+    boxes.forEach(function(b){
+        var lbl = b.getAttribute('data-label');
+        show[lbl] = b.checked;
+        if (!b.checked) _speakerFilterHidden[lbl] = true;
+    });
+    document.querySelectorAll('#t-rows tr').forEach(function(tr){
+        var inp = tr.querySelector('input[data-field="speaker"]');
+        if (!inp) return;   // skip placeholder / non-data rows
+        var lbl = inp.value || '';
+        var key = (lbl === '') ? '__blank__' : lbl;
+        tr.style.display = ((key in show) ? show[key] : true) ? '' : 'none';
+    });
+    // Back to fully unfiltered (nothing hidden) → keep the active segment shown.
+    if (Object.keys(_speakerFilterHidden).length === 0) scrollActiveSegmentIntoView();
+    // Keep the master "show/hide all" box reflecting the individual boxes:
+    // checked when every speaker is shown, indeterminate on a mixed state.
+    var master = document.getElementById('t-spk-all');
+    if (master) {
+        var checkedCount = 0;
+        boxes.forEach(function(b){ if (b.checked) checkedCount++; });
+        master.checked = checkedCount === boxes.length;
+        master.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+    }
+}
+// Master toggle above the filter column: force every speaker box to match the
+// master, then apply. Mirrors soloSpeakerFilter's explicit-set approach.
+function toggleAllSpeakerFilters(master) {
+    var pop = document.getElementById('t-spk-popover');
+    if (!pop) return;
+    pop.querySelectorAll('.t-spk-filter').forEach(function(b){ b.checked = master.checked; });
+    master.indeterminate = false;
+    applySpeakerFilter();
+}
+// Re-apply the current box states to the rows after the popover is rebuilt.
+// The boxes are freshly rendered from _speakerFilterHidden, so this keeps the
+// visible rows consistent with what the ticks say — no stale display:none.
+function syncSpeakerFilterToRows() {
+    var pop = document.getElementById('t-spk-popover');
+    if (pop && pop.querySelectorAll('.t-spk-filter').length) applySpeakerFilter();
+}
+function resetSpeakerFilter() {
+    _speakerFilterHidden = {};
+    var pop = document.getElementById('t-spk-popover');
+    if (pop) pop.querySelectorAll('.t-spk-filter').forEach(function(b){ b.checked = true; });
+    document.querySelectorAll('#t-rows tr').forEach(function(tr){ tr.style.display = ''; });
+    scrollActiveSegmentIntoView();
+}
+// Double-clicking a filter box "solos" that speaker: check it, uncheck every
+// other, then apply. The dblclick fires after the two clicks toggled the box,
+// so we force `checked` explicitly and don't care what the intervening clicks
+// left it at.
+function soloSpeakerFilter(box) {
+    var pop = document.getElementById('t-spk-popover');
+    if (!pop) return;
+    pop.querySelectorAll('.t-spk-filter').forEach(function(b){ b.checked = (b === box); });
+    applySpeakerFilter();
 }
 
 // ── Bookmarks ─────────────────────────────────────────────────────────────
@@ -6871,11 +7424,13 @@ function doInitializeEdits() {
     var params = {
         max_chars:      Math.max(10, Math.round(num('ie-max_chars', 42))),
         max_lines:      Math.max(1, Math.round(num('ie-max_lines', 2))),
+        preferred_lines: Math.max(1, Math.round(num('ie-pref_lines', 1))),
         max_secs:       num('ie-max_secs', 7),
         min_secs:       num('ie-min_secs', 1.2),
         break_gap:      Math.max(0, num('ie-break_gap', 0)),
         break_punct:    document.getElementById('ie-break_punct').checked,
         use_boundaries: document.getElementById('ie-use_boundaries').checked,
+        break_speaker:  document.getElementById('ie-break_speaker').checked,
         dedup:          document.getElementById('ie-dedup').checked
     };
     _ieSaveParams(params);
@@ -6910,9 +7465,9 @@ function _ieRestoreParams() {
     if (!p) return;
     var set = function(id, v){ var el = document.getElementById(id); if (el != null && v != null) el.value = v; };
     var chk = function(id, v){ var el = document.getElementById(id); if (el != null && typeof v === 'boolean') el.checked = v; };
-    set('ie-max_chars', p.max_chars); set('ie-max_lines', p.max_lines); set('ie-max_secs', p.max_secs);
+    set('ie-max_chars', p.max_chars); set('ie-max_lines', p.max_lines); set('ie-pref_lines', p.preferred_lines); set('ie-max_secs', p.max_secs);
     set('ie-min_secs', p.min_secs); set('ie-break_gap', p.break_gap);
-    chk('ie-break_punct', p.break_punct); chk('ie-use_boundaries', p.use_boundaries); chk('ie-dedup', p.dedup);
+    chk('ie-break_punct', p.break_punct); chk('ie-use_boundaries', p.use_boundaries); chk('ie-break_speaker', p.break_speaker); chk('ie-dedup', p.dedup);
 }
 
 // Watch a queued Initialize job over SSE; the server pushes 'done'/'failed'.
@@ -7040,8 +7595,11 @@ function pollJob() {
                 if (d.job_status === 'complete') {
                     if (msgEl) msgEl.textContent = '✓ Auto version saved for ' + (d.job_model || '') + ' — live transcript unchanged';
                     setTimeout(function() { document.getElementById('t-progress').style.display = 'none'; }, 2000);
-                    // Refresh the dropdown so the new last-run timestamp shows.
-                    populateViewSelect();
+                    // Refresh the dropdown so the new last-run timestamp shows —
+                    // but only if it was already loaded; otherwise leave it lazy
+                    // and it'll pick up the new timestamp on first hover.
+                    _viewSelectPopulated = false;
+                    if (document.querySelector('#t-view-select option[value]:not([value=""])')) populateViewSelect();
                 } else if (d.job_status === 'failed') {
                     if (msgEl) msgEl.textContent = '✗ Failed: ' + (d.job_error || d.job_message || 'unknown');
                 } else {
@@ -7229,6 +7787,33 @@ function renderLastResultNote(job) {
 var _saveTimer = null;        // legacy; kept for compatibility but unused
 var _savePending = false;
 
+// A full-screen veil over the transcript popover shown during a structural
+// save (add / delete / split a segment) — those do a save round-trip AND then
+// a reload, and letting the operator keep editing during that window races the
+// reload (edits land on rows that are about to be replaced). Reused gsspin
+// keyframe for the spinner. Idempotent: safe to call show/hide repeatedly.
+function showTranscriptBusy(msg) {
+    var ov = document.getElementById('t-busy');
+    if (!ov) {
+        ov = document.createElement('div');
+        ov.id = 't-busy';
+        ov.style.cssText = 'position:fixed;inset:0;z-index:10009;background:rgba(245,246,250,0.55);'
+            + 'display:flex;align-items:center;justify-content:center;cursor:progress;';
+        ov.innerHTML = '<div style="background:#fff;border:1px solid #e2e4ee;border-radius:10px;'
+            + 'padding:14px 20px;box-shadow:0 10px 30px rgba(0,0,0,.18);display:flex;align-items:center;'
+            + 'gap:12px;font-size:0.9rem;color:#31345A;font-weight:600;">'
+            + '<span style="width:16px;height:16px;border:3px solid #d5d8ee;border-top-color:#31345A;'
+            + 'border-radius:50%;display:inline-block;animation:gsspin .7s linear infinite;"></span>'
+            + '<span class="t-busy-msg"></span></div>';
+        document.body.appendChild(ov);
+    }
+    ov.querySelector('.t-busy-msg').textContent = msg || 'Saving…';
+    ov.style.display = 'flex';
+}
+function hideTranscriptBusy() {
+    var ov = document.getElementById('t-busy');
+    if (ov) ov.style.display = 'none';
+}
 function scheduleAutoSave() {
     // Legacy entry point — used by the row delete button. Save immediately,
     // since there's no input that will blur to trigger it.
@@ -7250,7 +7835,11 @@ function saveTranscript() {
             // Rows added/split in the editor have no data-tkey → key null →
             // the server INSERTs them as new rows.
             var k = tr.getAttribute('data-tkey');
-            rows.push({key: (k ? parseInt(k, 10) : null), segment: seg.value.trim(), text: txt.value.trim()});
+            // Send the row's current speaker so per-segment speaker changes
+            // (openRowSpeakerPicker → applyRowSpeakerLabel) actually persist.
+            // Without this the label lived only in the DOM and was lost on save.
+            var spk = tr.querySelector('input[data-field="speaker"]');
+            rows.push({key: (k ? parseInt(k, 10) : null), segment: seg.value.trim(), text: txt.value.trim(), speaker: spk ? spk.value : ''});
         }
     });
     rows.sort(function(a, b) {
@@ -7259,13 +7848,17 @@ function saveTranscript() {
     rows.forEach(function(rw, i) { rw.sort = i; }); // sort follows segment order
     var statusEl = document.getElementById('t-status');
     if (statusEl) statusEl.textContent = 'Saving…';
+    // A posted row with no key is a new/split segment → the save will reload.
+    // Gray the popover so nothing is edited against rows about to be replaced.
+    // (Deletes gray via their own call site, since the removed row isn't posted.)
+    if (rows.some(function(r){ return r.key == null; })) showTranscriptBusy('Saving…');
     return fetch(API + '/admin-transcript.php', {
         method: 'POST', credentials: 'include',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({action:'save', item_key: _transcriptItemKey, rows: rows})
     }).then(function(r){return safeJson(r);}).then(function(d) {
         _savePending = false;
-        if (d.error) { if (statusEl) statusEl.textContent = '✗ ' + d.error; return; }
+        if (d.error) { if (statusEl) statusEl.textContent = '✗ ' + d.error; hideTranscriptBusy(); return; }
         if (statusEl) {
             statusEl.textContent = '✓ Saved (' + d.count + ')';
             setTimeout(function() { if (statusEl.textContent.indexOf('Saved') === 0) statusEl.textContent = ''; }, 2000);
@@ -7274,13 +7867,237 @@ function saveTranscript() {
         // DOM have no key yet — reload so they pick up their primary keys and a
         // follow-up save UPDATEs them instead of re-INSERTing. Pure text/timestamp
         // edits keep their keys, so no reload (and no focus disruption) is needed.
+        // The busy veil (if shown) stays up until the reload finishes; otherwise
+        // clear it here.
         if ((d.inserted || d.deleted) && _transcriptItemKey && !_savePending) {
-            loadTranscript();
+            loadTranscript();   // hides the veil when it completes
+        } else {
+            hideTranscriptBusy();
         }
     }).catch(function(err) {
         _savePending = false;
         if (statusEl) statusEl.textContent = '✗ Save failed';
+        hideTranscriptBusy();
     });
+}
+
+// ── Excerpt column: snippet capture + insert ────────────────────────────────
+// The Excerpt column lets an operator tick a contiguous range of segments and
+// either SAVE them as a reusable "snippet" or INSERT a saved snippet over the
+// ticked range. Offsets in a snippet are stored relative to its first segment
+// (which is therefore always 0), so a snippet can be pasted anywhere later.
+
+// All excerpt checkboxes in current DOM order.
+function _excerptBoxes() {
+    return Array.prototype.slice.call(document.querySelectorAll('#t-rows tr .t-excerpt-cb'));
+}
+// The <tr> rows whose excerpt checkbox is ticked, in DOM (time) order.
+function _checkedExcerptRows() {
+    var out = [];
+    document.querySelectorAll('#t-rows tr').forEach(function(tr) {
+        var cb = tr.querySelector('.t-excerpt-cb');
+        if (cb && cb.checked) out.push(tr);
+    });
+    return out;
+}
+// Row time in seconds, read from the (possibly edited) timestamp field.
+function _excerptRowSeconds(tr) {
+    var seg = tr.querySelector('[data-field="segment"]');
+    if (seg) return parseSegmentToSeconds(seg.value);
+    var cell = tr.querySelector('td.t-time-cell');
+    return cell ? (parseFloat(cell.dataset.secs) || 0) : 0;
+}
+
+// Auto-fill range selection:
+//  • First tick: nothing special.
+//  • Ticking a 2nd box (or any box outside the current run): fill every box
+//    between it and the CLOSEST already-ticked box.
+//  • Un-ticking an already-ticked box: clear the whole selection.
+function excerptCbToggle(cb) {
+    var boxes = _excerptBoxes();
+    var idx = boxes.indexOf(cb);
+    if (idx < 0) return;
+    if (!cb.checked) {
+        // An already-checked box was un-ticked → clear everything.
+        boxes.forEach(function(b) { b.checked = false; });
+        return;
+    }
+    var others = [];
+    for (var i = 0; i < boxes.length; i++) {
+        if (i !== idx && boxes[i].checked) others.push(i);
+    }
+    if (!others.length) return; // first box in the selection — nothing to fill
+    var closest = others[0];
+    for (var j = 1; j < others.length; j++) {
+        if (Math.abs(others[j] - idx) < Math.abs(closest - idx)) closest = others[j];
+    }
+    var lo = Math.min(idx, closest), hi = Math.max(idx, closest);
+    for (var k = lo; k <= hi; k++) boxes[k].checked = true;
+}
+
+function _closeExcerptPopover() {
+    var pop = document.getElementById('t-excerpt-popover');
+    if (pop) pop.style.display = 'none';
+    document.removeEventListener('mousedown', _excerptOutsideClick, true);
+}
+function _excerptOutsideClick(e) {
+    var pop = document.getElementById('t-excerpt-popover');
+    var anchor = document.getElementById('t-excerpt-anchor');
+    if (!pop) return;
+    if (pop.contains(e.target) || (anchor && anchor.contains(e.target))) return;
+    _closeExcerptPopover();
+}
+
+// Header copy-icon click. With no ticked segments, prompt to select a range;
+// otherwise open the create/insert popover.
+function openExcerptPopover(ev) {
+    if (ev) ev.stopPropagation();
+    var pop = document.getElementById('t-excerpt-popover');
+    var anchor = document.getElementById('t-excerpt-anchor');
+    if (!pop || !anchor) return;
+    if (pop.style.display === 'block') { _closeExcerptPopover(); return; }
+    var checked = _checkedExcerptRows();
+    if (!checked.length) {
+        _showExcerptPopover(
+              '<div style="display:flex;align-items:flex-start;gap:8px;">'
+            +   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#31345A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-top:1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16"/><circle cx="12" cy="8" r="0.6" fill="#31345A" stroke="none"/></svg>'
+            +   '<div style="color:#333;line-height:1.4;">Select a range of segments in the <strong>Snippet</strong> column first, then click this icon.</div>'
+            + '</div>'
+            + '<button type="button" onclick="_closeExcerptPopover()" style="margin-top:10px;width:100%;background:#31345A;color:#fff;border:none;padding:7px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">OK</button>'
+        );
+        return;
+    }
+    _showExcerptPopover(
+          '<div style="font-weight:600;color:#31345A;margin-bottom:6px;">Save selected segments (' + checked.length + ')</div>'
+        // The label field is deliberately NOT persisted anywhere. autocomplete
+        // (and the vendor variants) plus readonly-until-focus keep the browser
+        // from saving it to form history / session-restore or auto-refilling it;
+        // it starts blank on every open (the popover HTML is rebuilt each time).
+        + '<input id="t-snippet-label" type="text" placeholder="Snippet title…" '
+        +   'autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" '
+        +   'data-lpignore="true" data-form-type="other" data-1p-ignore="true" '
+        +   'readonly onfocus="this.removeAttribute(\'readonly\');" '
+        +   'style="width:100%;box-sizing:border-box;font-size:0.85rem;border:1px solid #ccc;border-radius:4px;padding:6px 8px;margin-bottom:6px;">'
+        + '<button type="button" onclick="createSnippetFromSelection()" '
+        +   'style="width:100%;background:#31345A;color:#fff;border:none;padding:7px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Create Snippet</button>'
+        + '<div style="border-top:1px solid #eee;margin:10px 0 6px;"></div>'
+        + '<div style="font-weight:600;color:#31345A;margin-bottom:4px;">Insert an existing snippet</div>'
+        + '<div id="t-snippet-list" style="max-height:220px;overflow-y:auto;color:#888;font-size:0.8rem;">Loading…</div>'
+    );
+    var inp = document.getElementById('t-snippet-label');
+    if (inp) inp.focus();
+    refreshSnippetList();
+}
+
+// Render arbitrary HTML into the excerpt popover and position it below the
+// header icon. Used for both the create/insert panel and the "select a range
+// first" message box, so both look the same (no browser alert()).
+function _showExcerptPopover(html) {
+    var pop = document.getElementById('t-excerpt-popover');
+    var anchor = document.getElementById('t-excerpt-anchor');
+    if (!pop || !anchor) return;
+    pop.innerHTML = html;
+    pop.style.display = 'block';
+    var r = anchor.getBoundingClientRect();
+    var left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8);
+    pop.style.left = Math.max(8, left) + 'px';
+    pop.style.top = (r.bottom + 4) + 'px';
+    document.addEventListener('mousedown', _excerptOutsideClick, true);
+}
+
+function refreshSnippetList() {
+    var box = document.getElementById('t-snippet-list');
+    if (!box) return;
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'list_snippets'})
+    }).then(function(r){return safeJson(r);}).then(function(d) {
+        var list = (d && d.snippets) || [];
+        if (!list.length) { box.innerHTML = '<div style="color:#999;">No snippets saved yet.</div>'; return; }
+        box.innerHTML = list.map(function(s) {
+            var n = parseInt(s.segment_count, 10) || 0;
+            return '<div onclick="insertSnippet(' + s.transcript_snippet_key + ', this.getAttribute(\'data-label\'))" '
+                + 'data-label="' + esc(s.transcript_snippet_label) + '" '
+                + 'style="padding:6px 8px;border:1px solid #eee;border-radius:4px;margin-bottom:4px;cursor:pointer;color:#333;" '
+                + 'onmouseover="this.style.background=\'#eef2ff\';" onmouseout="this.style.background=\'#fff\';">'
+                + '<span style="font-weight:600;">' + esc(s.transcript_snippet_label) + '</span>'
+                + '<span style="color:#999;font-size:0.75rem;"> · ' + n + ' segment' + (n === 1 ? '' : 's') + '</span>'
+                + '</div>';
+        }).join('');
+    }).catch(function() { box.innerHTML = '<div style="color:#c00;">Could not load snippets.</div>'; });
+}
+
+// Save the ticked segments as a new snippet. The first ticked segment's time is
+// the base; every stored offset is (segment time − base), so the first is 0.
+function createSnippetFromSelection() {
+    var label = (document.getElementById('t-snippet-label') || {}).value || '';
+    label = label.trim();
+    if (!label) { alert('Enter a title for the snippet.'); return; }
+    var checked = _checkedExcerptRows();
+    if (!checked.length) { alert('No segments selected.'); return; }
+    var base = _excerptRowSeconds(checked[0]);
+    var segments = checked.map(function(tr) {
+        var txt = tr.querySelector('[data-field="text"]');
+        var spk = tr.querySelector('input[data-field="speaker"]');
+        return {
+            offset: Math.max(0, _excerptRowSeconds(tr) - base),
+            speaker: spk ? (spk.value || '') : '',
+            text: txt ? (txt.value || '').trim() : ''
+        };
+    }).filter(function(s) { return s.text !== ''; });
+    if (!segments.length) { alert('The selected segments have no text.'); return; }
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'create_snippet', label: label, segments: segments})
+    }).then(function(r){return safeJson(r);}).then(function(d) {
+        if (!d || d.error) { alert('Could not save snippet: ' + ((d && d.error) || 'unknown error')); return; }
+        var inp = document.getElementById('t-snippet-label');
+        if (inp) inp.value = '';
+        refreshSnippetList();
+        var st = document.getElementById('t-status');
+        if (st) { st.textContent = '✓ Snippet saved (' + d.segments + ')'; setTimeout(function(){ if (st.textContent.indexOf('Snippet') >= 0) st.textContent=''; }, 2500); }
+    }).catch(function() { alert('Could not save snippet (network error).'); });
+}
+
+// Insert a saved snippet OVER the ticked segments: the ticked rows are removed
+// and the snippet's segments are added, each anchored at (first-ticked time +
+// stored offset). Text + speaker come from the snippet.
+function insertSnippet(snippetKey, label) {
+    if (_transcriptReadonly) { alert('Switch to the editable transcript to insert a snippet.'); return; }
+    var checked = _checkedExcerptRows();
+    if (!checked.length) { alert('Select the segments to replace in the Excerpt column first.'); return; }
+    if (!confirm('Insert snippet "' + label + '" over the ' + checked.length + ' selected segment(s)?\n\nThe selected segments will be replaced.')) return;
+    var base = _excerptRowSeconds(checked[0]);
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'get_snippet', snippet_key: snippetKey})
+    }).then(function(r){return safeJson(r);}).then(function(d) {
+        if (!d || d.error) { alert('Could not load snippet: ' + ((d && d.error) || 'unknown error')); return; }
+        var segs = d.segments || [];
+        if (!segs.length) { alert('That snippet has no segments.'); return; }
+        _closeExcerptPopover();
+        showTranscriptBusy('Inserting snippet…');
+        var tbody = document.getElementById('t-rows');
+        // Remove the ticked rows; remember where the first one was.
+        var anchorNext = checked[0].nextSibling;
+        checked.forEach(function(tr) { tr.remove(); });
+        // Build + insert the snippet rows at base + offset (segment order kept by
+        // the offset ORDER BY on the server). New rows have no data-tkey → the
+        // save INSERTs them; the removed rows' keys → the save DELETEs them.
+        segs.forEach(function(sg) {
+            var secs = base + (parseFloat(sg.offset_seconds) || 0);
+            var tr = document.createElement('tr');
+            tr.innerHTML = transcriptRowCells(secs, secs, sg.text || '', sg.speaker || '');
+            if (anchorNext && anchorNext.parentNode === tbody) tbody.insertBefore(tr, anchorNext);
+            else tbody.appendChild(tr);
+        });
+        // Persist: saveTranscript() sorts by time, DELETEs the dropped rows,
+        // INSERTs the new ones, then reloads (re-rendering with real keys).
+        saveTranscript();
+    }).catch(function() { hideTranscriptBusy(); alert('Could not insert snippet (network error).'); });
 }
 
 // ── Download transcript (VTT / CSV / text-only) ─────────────────────────────
@@ -8051,14 +8868,36 @@ function openSearchReplaceFromButton() {
 // server-side (yy_transcript_snapshot) so it is reversible via "Revert…".
 var _scMode = null;        // 'ai' | 'fit' — what the Apply button will commit
 var _scAiResults = [];     // [{key,old,new,changed}]
-var _scFitCues = [];       // [{segment,text,chars,lines}]
+var _scFitCues = [];       // [{segment,secs,text,chars,lines}] — proposed (new)
+var _scFitBefore = [];     // [{segment,secs,text}] — current (live) segmentation
+// Lines per AI-cleanup request. A warm 70B needs ~4s/line on this (VRAM-
+// contended) box, so a slice must stay small enough that even a 3–4× slowdown
+// finishes under Cloudflare's ~100s proxy cap. 6 → ~24s nominal.
+var SC_AI_CHUNK = 6;
+// An AI-correction pass runs as a long chain of chunk requests. Track it so the
+// window can be closed mid-run: _scCancel stops the loop, _scAbort aborts the
+// in-flight fetch. Only set while a pass is active, so other requests are normal.
+var _scRunning = false;
+var _scCancel = false;
+var _scAbort = null;
+function scBeginRun() { _scRunning = true; _scCancel = false; _scAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null; }
+function scEndRun()   { _scRunning = false; _scAbort = null; }
+function scCancelRun() {
+    _scCancel = true;
+    if (_scAbort) { try { _scAbort.abort(); } catch (e) {} }
+    scEndRun();
+    scHideProgress();
+    scSetStatus('AI correction cancelled.');
+}
 
 function scEndpoint() { return API + '/admin-transcript-captionfit.php'; }
 function scPost(body) {
-    return fetch(scEndpoint(), {
+    var opt = {
         method: 'POST', credentials: 'include', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(Object.assign({item_key: _transcriptItemKey}, body))
-    }).then(function(r){ return safeJson(r); });
+    };
+    if (_scAbort) opt.signal = _scAbort.signal;   // abortable while a pass is running
+    return fetch(scEndpoint(), opt).then(function(r){ return safeJson(r); });
 }
 function scGet(action) {
     return fetch(scEndpoint() + '?action=' + action + '&item_key=' + encodeURIComponent(_transcriptItemKey) + '&_=' + Date.now(),
@@ -8072,13 +8911,84 @@ function scShowProgress(pct) {
     if (w) w.style.display = 'block'; if (b) b.style.width = Math.max(0, Math.min(100, pct)) + '%';
 }
 function scHideProgress() { var w = document.getElementById('sc-progress'); if (w) w.style.display = 'none'; }
+// Render a full, readable error in the preview pane (not the tiny status line),
+// translating known infrastructure failures into plain language. The complete
+// raw text is always kept in an expandable "Technical detail" block.
+function scShowError(context, raw) {
+    scHideProgress();
+    var msg = String(raw == null ? 'Unknown error' : (raw.message || raw));
+    var friendly = '', hint = '';
+    if (/\bHTTP 52[0-4]\b/.test(msg) || /<!DOCTYPE html>|<html|cloudflare/i.test(msg)) {
+        friendly = 'The request timed out at Cloudflare (its ~100-second proxy limit).';
+        hint = 'The AI model was almost certainly still loading into memory on the box (a cold 70B can take 1–2 minutes). It should be warm now — just click the button again. This build pre-warms the model first to avoid the timeout; if it keeps failing, the box may be low on memory — try Mistral Nemo (lighter).';
+    } else if (/\bHTTP 502\b/.test(msg) || /more system memory|LLM unavailable/i.test(msg)) {
+        friendly = 'The on-box LLM could not load — the box is out of memory.';
+        hint = 'Pick a lighter model (Mistral Nemo) or retry shortly; memory frees up as other jobs on the box finish.';
+    } else if (/Failed to fetch|NetworkError|network/i.test(msg)) {
+        friendly = 'Could not reach the server (network interruption).';
+        hint = 'Check your connection and try again.';
+    }
+    var p = document.getElementById('sc-preview');
+    if (p) {
+        p.innerHTML = '<div style="padding:12px;">'
+            + '<div style="font-weight:600;color:#c0392b;margin-bottom:6px;">⚠ ' + esc(context) + ' failed</div>'
+            + (friendly ? '<div style="color:#333;margin-bottom:6px;">' + esc(friendly) + '</div>' : '')
+            + (hint ? '<div style="color:#555;font-size:0.85rem;margin-bottom:8px;">' + esc(hint) + '</div>' : '')
+            + '<details' + (friendly ? '' : ' open') + '>'
+            + '<summary style="cursor:pointer;color:#777;font-size:0.8rem;">Technical detail</summary>'
+            + '<pre style="white-space:pre-wrap;word-break:break-word;max-height:32vh;overflow:auto;background:#f7f7f7;border:1px solid #eee;border-radius:4px;padding:8px;font-size:0.75rem;color:#444;margin-top:6px;">'
+            + esc(msg) + '</pre></details></div>';
+    }
+    scSetStatus((context || 'Operation') + ' failed — see details above.');
+}
+// Resolve once the chosen LLM is resident on the box. Polls a fast status
+// endpoint so no single request ever waits on the (possibly >100s) cold load
+// that used to trip Cloudflare's 524. Kicks a detached preload, then polls.
+function scEnsureWarm(model, baselines) {
+    baselines = baselines || [];
+    return scPost({action: 'llm_status', model: model}).then(function(d){
+        if (d && d.ready) return true;   // already resident — go straight to work
+        scSetStatus('Warming ' + model + ' — loading it into memory (one-time)…');
+        scShowProgress(4);
+        // Pass baselines so the preload reserves the SAME context size ai_chunk
+        // will use (prevents both an OOM on load and a cold reload mid-run).
+        return scPost({action: 'warm', model: model, baselines: baselines}).then(function(){
+            var waited = 0, stepMs = 4000, capMs = 240000, hostFails = 0;
+            return new Promise(function(resolve, reject){
+                (function poll(){
+                    if (_scCancel) { reject(new Error('cancelled')); return; }
+                    setTimeout(function(){
+                        if (_scCancel) { reject(new Error('cancelled')); return; }
+                        waited += stepMs;
+                        scPost({action: 'llm_status', model: model}).then(function(s){
+                            if (_scCancel) { reject(new Error('cancelled')); return; }
+                            if (s && s.ready) { resolve(true); return; }
+                            // Report only what we actually know, never a guessed cause.
+                            if (s && s.ok === false && ++hostFails >= 2) {
+                                reject(new Error('Could not reach the model host (' + model + '). It looks offline or unreachable — check the GPU box.'));
+                                return;
+                            }
+                            scShowProgress(Math.min(60, 4 + waited / capMs * 56));
+                            if (waited >= capMs) {
+                                var nowLoaded = (s && s.loaded && s.loaded.length) ? s.loaded.join(', ') : 'nothing';
+                                reject(new Error('“' + model + '” still isn’t loaded after ' + Math.round(capMs/1000) + 's. Currently resident on the box: ' + nowLoaded + '. The box is likely busy loading/serving another model — wait a moment and click again, or pick a lighter model (Mistral Nemo).'));
+                                return;
+                            }
+                            poll();
+                        }).catch(function(){ if (waited >= capMs) reject(new Error('Warm-up status checks kept failing — the box may be unreachable.')); else poll(); });
+                    }, stepMs);
+                })();
+            });
+        });
+    });
+}
 function scEnableApply(on) {
     var b = document.getElementById('sc-apply-btn');
     if (b) { b.disabled = !on; b.style.opacity = on ? '1' : '0.5'; }
 }
 function scResetPreview() {
     var p = document.getElementById('sc-preview'); if (p) p.innerHTML = '';
-    _scMode = null; _scAiResults = []; _scFitCues = [];
+    _scMode = null; _scAiResults = []; _scFitCues = []; _scFitBefore = [];
     scEnableApply(false); scHideProgress(); scSetStatus('');
 }
 
@@ -8093,7 +9003,7 @@ function openSmartCaptions() {
         var ipt = 'padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;width:64px;';
         var btn = 'border:1px solid #ccc;background:#fff;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:0.85rem;';
         ov.innerHTML = [
-            '<div style="background:#fff;border-radius:10px;padding:20px;max-width:1100px;width:100%;margin-top:20px;">',
+            '<div style="background:#fff;border-radius:10px;padding:20px;max-width:1360px;width:100%;margin-top:20px;">',
               '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">',
                 '<h3 style="margin:0;font-size:1.05rem;color:#31345A;">✨ Smart Captions — AI Cleanup &amp; Caption Sizing</h3>',
                 '<button id="sc-close" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">×</button>',
@@ -8101,31 +9011,40 @@ function openSmartCaptions() {
               '<div style="font-size:0.8rem;color:#777;margin-bottom:12px;">Operates on the <b>Current (editable)</b> transcript. Each Apply saves a snapshot first — use <b>Revert…</b> to undo.</div>',
               // Section A — AI cleanup
               '<div style="border:1px solid #e6e1f5;background:#faf8ff;border-radius:8px;padding:12px;margin-bottom:12px;">',
-                '<div style="font-weight:600;color:#5a2fb8;margin-bottom:8px;">1 · AI Cleanup <span style="font-weight:400;color:#888;font-size:0.8rem;">— on-box LLM, primed with your saved corrections &amp; glossary (learns from your edits)</span></div>',
+                '<div style="font-weight:600;color:#5a2fb8;margin-bottom:8px;"><label style="cursor:pointer;" title="Uncheck to exclude AI cleanup from Process."><input type="checkbox" id="sc-enable-ai" checked style="vertical-align:middle;margin-right:6px;">1 · AI Cleanup</label> <span style="font-weight:400;color:#888;font-size:0.8rem;">— on-box LLM, primed with your saved corrections &amp; glossary (learns from your edits)</span></div>',
                 '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">',
-                  '<label style="font-size:0.8rem;color:#555;">Model</label>',
+                  '<label style="font-size:0.8rem;color:#555;">Proofreader</label>',
                   '<select id="sc-model" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;max-width:340px;"></select>',
                   '<button id="sc-ai-btn" style="' + btn + 'border-color:#6c3fd6;color:#6c3fd6;font-weight:600;">Preview AI cleanup</button>',
+                '</div>',
+                // Cross-reference baselines — feed the LLM other engines\' readings
+                // of the same span so it can reconcile disagreements (consensus).
+                '<div style="margin-top:8px;">',
+                  '<div style="font-size:0.78rem;color:#555;margin-bottom:3px;" title="When several engines transcribed this item, the AI can compare their readings of each line and prefer what they agree on. Word-level baselines align most precisely.">Cross-reference baselines <span style="color:#999;">(optional — improves Hebrew/proper-noun accuracy)</span></div>',
+                  '<div id="sc-baselines" style="display:flex;gap:4px 14px;flex-wrap:wrap;"></div>',
                 '</div>',
               '</div>',
               // Section B — caption sizing
               '<div style="border:1px solid #e0e4ec;background:#f7f9fc;border-radius:8px;padding:12px;margin-bottom:12px;">',
-                '<div style="font-weight:600;color:#31345A;margin-bottom:8px;">2 · Caption Sizing <span style="font-weight:400;color:#888;font-size:0.8rem;">— re-flow into broadcast-sized cues</span></div>',
+                '<div style="font-weight:600;color:#31345A;margin-bottom:8px;"><label style="cursor:pointer;" title="Uncheck to exclude caption sizing from Process."><input type="checkbox" id="sc-enable-fit" checked style="vertical-align:middle;margin-right:6px;">2 · Caption Sizing</label> <span style="font-weight:400;color:#888;font-size:0.8rem;">— re-flow into broadcast-sized cues</span></div>',
                 '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:0.8rem;color:#555;">',
                   '<label>Timing source <select id="sc-source" style="padding:5px 8px;border:1px solid #ccc;border-radius:4px;font-size:0.85rem;"></select></label>',
                   '<label>Max chars/line <input id="sc-maxchars" type="number" min="10" max="80" style="' + ipt + '"></label>',
                   '<label>Max lines <input id="sc-maxlines" type="number" min="1" max="4" style="' + ipt + '"></label>',
+                  '<label>Preferred lines <input id="sc-preflines" type="number" min="1" max="4" style="' + ipt + '"></label>',
                   '<label>Max secs <input id="sc-maxsecs" type="number" min="1" max="15" step="0.5" style="' + ipt + '"></label>',
                   '<label>Min secs <input id="sc-minsecs" type="number" min="0.3" max="5" step="0.1" style="' + ipt + '"></label>',
                   '<label>Reading cps <input id="sc-cps" type="number" min="5" max="30" style="' + ipt + '"></label>',
+                  '<label title="Start a new segment when the silence before the next word is at least this long. A soft break (like punctuation) — won\'t create tiny fragments. 0 = off.">Break on pause ≥ <input id="sc-breakgap" type="number" min="0" max="10" step="0.1" style="' + ipt + '"> s</label>',
                   '<label style="display:flex;align-items:center;gap:4px;"><input id="sc-breakpunct" type="checkbox"> Break at punctuation</label>',
+                  '<label title="Start a new cue whenever the diarised speaker changes, and keep the speaker label on each re-sized cue. No effect if the transcript has no speaker labels." style="display:flex;align-items:center;gap:4px;"><input id="sc-breakspeaker" type="checkbox"> Break on speaker change</label>',
                   '<label style="display:flex;align-items:center;gap:4px;"><input id="sc-dedup" type="checkbox"> Remove duplicate/overlap</label>',
                   '<button id="sc-fit-btn" style="' + btn + 'border-color:#31345A;color:#31345A;font-weight:600;">Preview sizing</button>',
                 '</div>',
               '</div>',
               // Combined + revert
               '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">',
-                '<button id="sc-pipeline-btn" style="' + btn + 'background:#6c3fd6;color:#fff;border-color:#6c3fd6;font-weight:600;">⚡ Clean + Resize (one pass)</button>',
+                '<button id="sc-pipeline-btn" style="' + btn + 'background:#6c3fd6;color:#fff;border-color:#6c3fd6;font-weight:600;">⚡ Process</button>',
                 '<button id="sc-revert-btn" style="' + btn + '">↶ Revert…</button>',
                 '<span id="sc-status" style="font-size:0.82rem;color:#666;margin-left:auto;"></span>',
               '</div>',
@@ -8146,12 +9065,65 @@ function openSmartCaptions() {
         document.getElementById('sc-pipeline-btn').onclick = scPipeline;
         document.getElementById('sc-revert-btn').onclick = scRevert;
         document.getElementById('sc-apply-btn').onclick = scApply;
+        // Persist every checkbox/knob/dropdown change so selections survive
+        // reopening the panel and page reloads (see scSavePrefs/scApplyPrefs).
+        ov.addEventListener('change', scSavePrefs);
     }
     ov.style.display = 'flex';
     scResetPreview();
     scLoadConfig();
 }
-function closeSmartCaptions() { var ov = document.getElementById('sc-overlay'); if (ov) ov.style.display = 'none'; }
+function closeSmartCaptions() {
+    // If an AI correction pass is mid-flight, offer to stop it before closing.
+    if (_scRunning) {
+        if (!confirm('AI correction is still running. Stop it and close the window?')) return;
+        scCancelRun();
+    }
+    var ov = document.getElementById('sc-overlay'); if (ov) ov.style.display = 'none';
+}
+
+// ── Persist the operator's Smart Captions choices across reopens/reloads ─────
+// Global UI prefs (proofreader, timing source, section toggles, sizing knobs)
+// live under one key; baseline ticks are stored per-item because the available
+// engines differ from item to item.
+var SC_PREFS_KEY = 'yy_sc_opts_v1';
+function scBaseKey() { return 'yy_sc_baselines_' + _transcriptItemKey; }
+function scLoadPrefs() {
+    try { return JSON.parse(localStorage.getItem(SC_PREFS_KEY)) || {}; } catch (e) { return {}; }
+}
+function scSavePrefs() {
+    try {
+        var g = function(id){ return document.getElementById(id); };
+        var chk = function(id, dflt){ var e = g(id); return e ? e.checked : dflt; };
+        localStorage.setItem(SC_PREFS_KEY, JSON.stringify({
+            model: scVal('sc-model'), source: scVal('sc-source'),
+            enable_ai: chk('sc-enable-ai', true), enable_fit: chk('sc-enable-fit', true),
+            break_punct: chk('sc-breakpunct', true), break_speaker: chk('sc-breakspeaker', false),
+            dedup: chk('sc-dedup', true),
+            maxchars: scVal('sc-maxchars'), maxlines: scVal('sc-maxlines'), preflines: scVal('sc-preflines'), maxsecs: scVal('sc-maxsecs'),
+            minsecs: scVal('sc-minsecs'), cps: scVal('sc-cps'), breakgap: scVal('sc-breakgap')
+        }));
+        // Per-item baseline ticks — only once the checkboxes actually exist.
+        if (document.querySelector('#sc-baselines input[type=checkbox]')) {
+            localStorage.setItem(scBaseKey(), JSON.stringify(scCheckedBaselines()));
+        }
+    } catch (e) { /* storage unavailable — best effort */ }
+}
+// Overlay the saved global prefs onto the freshly-loaded server defaults.
+function scApplyPrefs() {
+    var p = scLoadPrefs();
+    var setVal = function(id, v){ var e = document.getElementById(id); if (e && v != null && v !== '') e.value = v; };
+    var setChk = function(id, v){ var e = document.getElementById(id); if (e && typeof v === 'boolean') e.checked = v; };
+    // Adopt a saved dropdown choice only if it's still an available option.
+    var m = document.getElementById('sc-model');
+    if (m && p.model && Array.prototype.some.call(m.options, function(o){ return o.value === p.model; })) m.value = p.model;
+    var s = document.getElementById('sc-source');
+    if (s && p.source && Array.prototype.some.call(s.options, function(o){ return o.value === p.source; })) s.value = p.source;
+    setChk('sc-enable-ai', p.enable_ai); setChk('sc-enable-fit', p.enable_fit);
+    setChk('sc-breakpunct', p.break_punct); setChk('sc-breakspeaker', p.break_speaker); setChk('sc-dedup', p.dedup);
+    setVal('sc-maxchars', p.maxchars); setVal('sc-maxlines', p.maxlines); setVal('sc-preflines', p.preflines); setVal('sc-maxsecs', p.maxsecs);
+    setVal('sc-minsecs', p.minsecs); setVal('sc-cps', p.cps); setVal('sc-breakgap', p.breakgap);
+}
 
 function scLoadConfig() {
     scGet('config').then(function(d){
@@ -8165,19 +9137,63 @@ function scLoadConfig() {
         var c = d.caption_defaults || {};
         document.getElementById('sc-maxchars').value = c.max_chars != null ? c.max_chars : 42;
         document.getElementById('sc-maxlines').value = c.max_lines != null ? c.max_lines : 2;
+        document.getElementById('sc-preflines').value = c.preferred_lines != null ? c.preferred_lines : 1;
         document.getElementById('sc-maxsecs').value  = c.max_secs  != null ? c.max_secs  : 7;
         document.getElementById('sc-minsecs').value  = c.min_secs  != null ? c.min_secs  : 1.2;
         document.getElementById('sc-cps').value      = c.cps       != null ? c.cps       : 17;
+        document.getElementById('sc-breakgap').value = c.break_gap != null ? c.break_gap : 0;
         document.getElementById('sc-breakpunct').checked = c.break_punct !== false;
+        document.getElementById('sc-breakspeaker').checked = !!c.break_speaker;
         document.getElementById('sc-dedup').checked      = c.dedup !== false;
+        var bl = document.getElementById('sc-baselines');
+        if (bl) {
+            var bs = d.baselines || [];
+            if (!bs.length) {
+                bl.innerHTML = '<span style="color:#999;font-size:0.78rem;">No other engine baselines captured for this item yet.</span>';
+            } else {
+                bl.innerHTML = bs.map(function(x){
+                    var lbl = esc(x.code) + (x.word_level ? ' <span style="color:#6c3fd6;">(word-level)</span>' : '')
+                            + ' <span style="color:#aaa;">· ' + (x.rows || 0) + ' rows</span>';
+                    // Word-level baselines align tightest, so pre-check them.
+                    var chk = x.word_level ? ' checked' : '';
+                    return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:0.8rem;color:#555;cursor:pointer;">'
+                         + '<input type="checkbox" value="' + esc(x.code) + '"' + chk + '>' + lbl + '</label>';
+                }).join('');
+                // Restore this item's saved baseline ticks, if any — overrides
+                // the word-level default so the operator's picks are remembered.
+                try {
+                    var savedB = JSON.parse(localStorage.getItem(scBaseKey()));
+                    if (Array.isArray(savedB)) {
+                        Array.prototype.forEach.call(bl.querySelectorAll('input[type=checkbox]'), function(cb){
+                            cb.checked = savedB.indexOf(cb.value) !== -1;
+                        });
+                    }
+                } catch (e) { /* storage unavailable — keep defaults */ }
+            }
+        }
+        // Overlay saved global prefs (proofreader, toggles, sizing knobs) on top
+        // of the server defaults just applied above.
+        scApplyPrefs();
         scSetStatus(d.live_rows + ' lines in the current transcript.');
     });
 }
 
+// Codes of the baselines the operator ticked to cross-reference during AI cleanup.
+function scCheckedBaselines() {
+    var boxes = document.querySelectorAll('#sc-baselines input[type=checkbox]:checked');
+    return Array.prototype.map.call(boxes, function(c){ return c.value; });
+}
+
 function scGuardEditable() {
+    // Smart Captions always operates on the live (editable) transcript
+    // server-side, regardless of which Baseline snapshot happens to be on
+    // screen. If a read-only Baseline view is selected, just flip the view
+    // selector back to "Current (editable)" so the result is reflected in
+    // the table — no need to nag the operator first.
     if (_transcriptReadonly) {
-        alert('Smart Captions edits the live transcript. Switch the view selector to "Current (editable)" first.');
-        return false;
+        var sel = document.getElementById('t-view-select');
+        if (sel) sel.value = '';
+        onTranscriptViewChange('');
     }
     return true;
 }
@@ -8186,24 +9202,43 @@ function scAiPreview() {
     if (!scGuardEditable()) return;
     _scMode = 'ai'; _scAiResults = []; scEnableApply(false);
     var model = scVal('sc-model');
-    scSetStatus('Contacting on-box LLM (first chunk can take ~45s to warm the model)…');
+    var baselines = scCheckedBaselines();
+    var running = baselines.length
+        ? 'Cross-referencing ' + baselines.length + ' baseline(s)…'
+        : 'Cleaning up the transcript…';
+    scSetStatus('Checking model…');
     scShowProgress(2);
-    function next(offset) {
-        return scPost({action: 'ai_chunk', model: model, offset: offset, limit: 40}).then(function(d){
-            if (!d || d.error) { scHideProgress(); scSetStatus('Error: ' + (d ? d.error : 'no response')); return; }
+    scBeginRun();
+    function next(offset, retried) {
+        if (_scCancel) return;
+        return scPost({action: 'ai_chunk', model: model, offset: offset, limit: SC_AI_CHUNK, baselines: baselines}).then(function(d){
+            if (_scCancel) return;
+            if (!d || d.error) throw new Error(d ? d.error : 'no response');
             _scAiResults = _scAiResults.concat(d.results || []);
             var total = d.total || _scAiResults.length;
             scShowProgress(total ? Math.round(_scAiResults.length / total * 100) : 100);
             scSetStatus('Cleaned ' + _scAiResults.length + ' / ' + total + ' lines…');
             scRenderAi();
-            if (d.next !== null && d.next !== undefined) return next(d.next);
+            if (d.next !== null && d.next !== undefined) return next(d.next, false);
             scHideProgress();
             var changed = _scAiResults.filter(function(r){ return r.changed; }).length;
             scSetStatus(changed + ' line(s) changed. Tick the ones to keep and press Apply.');
             scEnableApply(changed > 0);
+        }).catch(function(e){
+            if (_scCancel) return;   // user closed/cancelled — stop quietly
+            // A stall mid-run is usually the box evicting the model for a GPU
+            // job (cold reload > 100s). Re-warm and retry this one chunk once.
+            if (!retried) { scSetStatus('Model stalled — re-warming and retrying…'); return scEnsureWarm(model, baselines).then(function(){ return next(offset, true); }); }
+            throw e;
         });
     }
-    next(0).catch(function(e){ scHideProgress(); scSetStatus('AI cleanup failed: ' + e.message); });
+    // Pre-warm the model, then run the loop in SMALL slices: a warm 70B still
+    // needs ~4s/line on this box, so a big chunk would exceed Cloudflare's 100s
+    // proxy cap. Small slices keep every request well under it and stream
+    // progress; a stalled slice re-warms and retries once (see catch above).
+    scEnsureWarm(model, baselines).then(function(){ scSetStatus(running); return next(0, false); })
+        .then(function(){ scEndRun(); })
+        .catch(function(e){ scEndRun(); if (_scCancel) return; scShowError('AI cleanup', e); });
 }
 
 function scRenderAi() {
@@ -8227,30 +9262,70 @@ function scFitPreview() {
     _scMode = 'fit';
     scSetStatus('Computing caption sizing…');
     var body = {action: 'fit_preview', source: scVal('sc-source'),
-        max_chars: scNum('sc-maxchars'), max_lines: scNum('sc-maxlines'),
+        max_chars: scNum('sc-maxchars'), max_lines: scNum('sc-maxlines'), preferred_lines: scNum('sc-preflines'),
         max_secs: scNum('sc-maxsecs'), min_secs: scNum('sc-minsecs'), cps: scNum('sc-cps'),
+        break_gap: scNum('sc-breakgap'),
         break_punct: document.getElementById('sc-breakpunct').checked,
+        break_speaker: document.getElementById('sc-breakspeaker').checked,
         dedup: document.getElementById('sc-dedup').checked};
     scPost(body).then(function(d){
-        if (!d || d.error) { scSetStatus('Error: ' + (d ? d.error : 'no response')); return; }
+        if (!d || d.error) { scShowError('Caption sizing', d ? d.error : 'no response'); return; }
         _scFitCues = d.cues || [];
+        _scFitBefore = d.before || [];
         scRenderFit();
         scSetStatus(d.count + ' cues from ' + d.in_words + ' words (' + d.source + '). Review and Apply.');
         scEnableApply(_scFitCues.length > 0);
-    });
+    }).catch(function(e){ scShowError('Caption sizing', e); });
+}
+
+// Merge the current (left) and proposed (right) segmentations into aligned
+// bands by start time, so the two columns stay visually in sync. Two-pointer
+// merge: equal-ish starts share a band; otherwise the earlier-starting side
+// gets its own band and the other column is left blank until it catches up.
+function scAlignBands(before, cues) {
+    var bands = [], i = 0, j = 0, tol = 0.25;
+    while (i < before.length || j < cues.length) {
+        var bo = i < before.length ? before[i] : null;
+        var ne = j < cues.length ? cues[j] : null;
+        if (bo && ne) {
+            var ds = (bo.secs || 0) - (ne.secs || 0);
+            if (Math.abs(ds) <= tol) { bands.push({old: bo, neu: ne}); i++; j++; }
+            else if (ds < 0)         { bands.push({old: bo, neu: null}); i++; }
+            else                     { bands.push({old: null, neu: ne}); j++; }
+        } else if (bo) { bands.push({old: bo, neu: null}); i++; }
+        else           { bands.push({old: null, neu: ne}); j++; }
+    }
+    return bands;
 }
 
 function scRenderFit() {
     var p = document.getElementById('sc-preview');
     if (!_scFitCues.length) { p.innerHTML = '<div style="padding:10px;color:#888;">No cues.</div>'; return; }
-    p.innerHTML = _scFitCues.map(function(c){
-        var over = c.chars > (scNum('sc-maxchars') * scNum('sc-maxlines'));
-        return '<div style="padding:6px 10px;border-top:1px solid #eee;display:flex;gap:10px;">'
-            + '<span style="font-family:monospace;color:#888;flex:0 0 92px;">' + esc(c.segment) + '</span>'
-            + '<span style="flex:1;white-space:pre-wrap;">' + esc(c.text) + '</span>'
-            + '<span style="flex:0 0 64px;text-align:right;color:' + (over ? '#b00' : '#aaa') + ';font-size:0.75rem;">' + c.chars + 'c/' + c.lines + 'L</span>'
-            + '</div>';
+    var maxC = scNum('sc-maxchars') * scNum('sc-maxlines');
+    var bands = scAlignBands(_scFitBefore, _scFitCues);
+    var col = 'padding:6px 10px;vertical-align:top;';
+    var time = 'font-family:monospace;color:#aaa;font-size:0.72rem;';
+    var head = '<div style="position:sticky;top:0;display:grid;grid-template-columns:1fr 1fr;background:#f5f5f5;font-size:0.72rem;color:#666;font-weight:600;z-index:1;">'
+        + '<div style="' + col + 'border-right:1px solid #ddd;">Current — ' + _scFitBefore.length + ' segment' + (_scFitBefore.length === 1 ? '' : 's') + '</div>'
+        + '<div style="' + col + '">Proposed — ' + _scFitCues.length + ' cue' + (_scFitCues.length === 1 ? '' : 's') + '</div></div>';
+    var body = bands.map(function(b){
+        var L = b.old
+            ? ('<div style="' + time + '">' + esc(b.old.segment) + '</div><div style="white-space:pre-wrap;">' + esc(b.old.text) + '</div>')
+            : '';
+        var R = '';
+        if (b.neu) {
+            var over = b.neu.chars > maxC;
+            R = '<div style="' + time + '">' + esc(b.neu.segment)
+              + '<span style="float:right;color:' + (over ? '#b00' : '#bbb') + ';font-size:0.7rem;">' + b.neu.chars + 'c/' + b.neu.lines + 'L</span></div>'
+              + '<div style="white-space:pre-wrap;">' + esc(b.neu.text) + '</div>';
+        }
+        var lBg = b.old ? '#fff' : '#fafafa';
+        var rBg = b.neu ? '#fff' : '#fafafa';
+        return '<div style="display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #eee;">'
+            + '<div style="' + col + 'border-right:1px solid #eee;background:' + lBg + ';">' + L + '</div>'
+            + '<div style="' + col + 'background:' + rBg + ';">' + R + '</div></div>';
     }).join('');
+    p.innerHTML = head + body;
 }
 
 function scApply() {
@@ -8281,7 +9356,7 @@ function scFitApply() {
     if (!confirm('Replace the current ' + 'transcript lines with ' + _scFitCues.length + ' re-sized caption cues? A snapshot is saved first so you can revert.')) return;
     scEnableApply(false);
     scSetStatus('Applying caption sizing…');
-    var cues = _scFitCues.map(function(c){ return {segment: c.segment, text: c.text}; });
+    var cues = _scFitCues.map(function(c){ return {segment: c.segment, text: c.text, speaker: c.speaker}; });
     scPost({action: 'fit_apply', cues: cues}).then(function(d){
         if (!d || d.error) { alert(d ? d.error : 'apply failed'); scEnableApply(true); return; }
         scSetStatus('Applied ' + d.inserted + ' cues. Snapshot #' + d.snapshot_key + ' saved.');
@@ -8292,42 +9367,77 @@ function scFitApply() {
 
 function scPipeline() {
     if (!scGuardEditable()) return;
-    if (!confirm('Clean + Resize runs AI cleanup, applies ALL its corrections, then re-sizes the captions — applying both in one pass. A snapshot is saved before each step so you can revert. Continue?')) return;
+    var doAi  = !document.getElementById('sc-enable-ai')  || document.getElementById('sc-enable-ai').checked;
+    var doFit = !document.getElementById('sc-enable-fit') || document.getElementById('sc-enable-fit').checked;
+    if (!doAi && !doFit) { alert('Nothing to process — enable AI Cleanup and/or Caption Sizing.'); return; }
+    var steps = []; if (doAi) steps.push('AI cleanup'); if (doFit) steps.push('caption sizing');
+    if (!confirm('Process runs ' + steps.join(' then ') + ', applying ' + (steps.length > 1 ? 'them in one pass' : 'it') + '. A snapshot is saved before each step so you can revert. Continue?')) return;
+    var nSteps = steps.length, step = 0;
     var model = scVal('sc-model');
-    scSetStatus('Step 1/2 · AI cleanup…'); scShowProgress(2);
-    var all = [];
-    function next(offset) {
-        return scPost({action: 'ai_chunk', model: model, offset: offset, limit: 40}).then(function(d){
-            if (!d || d.error) throw new Error(d ? d.error : 'no response');
-            all = all.concat(d.results || []);
-            scShowProgress(d.total ? Math.round(all.length / d.total * 100) : 100);
-            if (d.next !== null && d.next !== undefined) return next(d.next);
+    var baselines = scCheckedBaselines();
+    scShowProgress(2);
+    scBeginRun();
+
+    function runAi() {
+        step++;
+        scSetStatus('Step ' + step + '/' + nSteps + ' · AI cleanup'
+            + (baselines.length ? ' (× ' + baselines.length + ' baseline)' : '') + '…');
+        var all = [];
+        function next(offset, retried) {
+            if (_scCancel) return;
+            return scPost({action: 'ai_chunk', model: model, offset: offset, limit: SC_AI_CHUNK, baselines: baselines}).then(function(d){
+                if (_scCancel) return;
+                if (!d || d.error) throw new Error(d ? d.error : 'no response');
+                all = all.concat(d.results || []);
+                scShowProgress(d.total ? Math.round(all.length / d.total * 100) : 100);
+                if (d.next !== null && d.next !== undefined) return next(d.next, false);
+            }).catch(function(e){
+                if (_scCancel) return;
+                if (!retried) { return scEnsureWarm(model, baselines).then(function(){ return next(offset, true); }); }
+                throw e;
+            });
+        }
+        // Small slices + pre-warm so no request blocks past Cloudflare's 100s.
+        return scEnsureWarm(model, baselines).then(function(){ return next(0, false); }).then(function(){
+            var changes = all.filter(function(r){ return r.changed; }).map(function(r){ return {key: r.key, text: r.new}; });
+            if (!changes.length) return null;
+            scSetStatus('Step ' + step + '/' + nSteps + ' · applying ' + changes.length + ' corrections…');
+            return scPost({action: 'ai_apply', changes: changes});
         });
     }
-    next(0).then(function(){
-        var changes = all.filter(function(r){ return r.changed; }).map(function(r){ return {key: r.key, text: r.new}; });
-        if (!changes.length) return null;
-        scSetStatus('Step 1/2 · applying ' + changes.length + ' corrections…');
-        return scPost({action: 'ai_apply', changes: changes});
-    }).then(function(){
-        scSetStatus('Step 2/2 · caption sizing…');
+
+    function runFit() {
+        step++;
+        scSetStatus('Step ' + step + '/' + nSteps + ' · caption sizing…');
         return scPost({action: 'fit_preview', source: 'current',
-            max_chars: scNum('sc-maxchars'), max_lines: scNum('sc-maxlines'),
+            max_chars: scNum('sc-maxchars'), max_lines: scNum('sc-maxlines'), preferred_lines: scNum('sc-preflines'),
             max_secs: scNum('sc-maxsecs'), min_secs: scNum('sc-minsecs'), cps: scNum('sc-cps'),
+            break_gap: scNum('sc-breakgap'),
             break_punct: document.getElementById('sc-breakpunct').checked,
-            dedup: document.getElementById('sc-dedup').checked});
-    }).then(function(d){
-        if (!d || d.error) throw new Error(d ? d.error : 'fit failed');
-        var cues = (d.cues || []).map(function(c){ return {segment: c.segment, text: c.text}; });
-        if (!cues.length) throw new Error('no cues produced');
-        return scPost({action: 'fit_apply', cues: cues});
-    }).then(function(d){
-        if (!d || d.error) throw new Error(d ? d.error : 'apply failed');
+            break_speaker: document.getElementById('sc-breakspeaker').checked,
+            dedup: document.getElementById('sc-dedup').checked}).then(function(d){
+            if (!d || d.error) throw new Error(d ? d.error : 'fit failed');
+            var cues = (d.cues || []).map(function(c){ return {segment: c.segment, text: c.text, speaker: c.speaker}; });
+            if (!cues.length) throw new Error('no cues produced');
+            return scPost({action: 'fit_apply', cues: cues});
+        }).then(function(d){
+            if (!d || d.error) throw new Error(d ? d.error : 'apply failed');
+        });
+    }
+
+    var chain = Promise.resolve();
+    if (doAi)  chain = chain.then(runAi);
+    if (doFit) chain = chain.then(runFit);
+    chain.then(function(){
+        scEndRun();
+        if (_scCancel) return;
         scHideProgress();
-        scSetStatus('Done — AI cleanup + caption sizing applied. Use Revert… to undo.');
         loadTranscript();
-        scResetPreview();
-    }).catch(function(e){ scHideProgress(); scSetStatus('Pipeline error: ' + e.message); });
+        scSetStatus('Done — ' + steps.join(' + ') + ' applied. Closing…');
+        // Process applies directly (no review step), so auto-close the popover
+        // once it finishes — briefly leaving the "Done" message on screen first.
+        setTimeout(function(){ if (!_scRunning) { scResetPreview(); closeSmartCaptions(); } }, 900);
+    }).catch(function(e){ scEndRun(); if (_scCancel) return; scShowError('Process', e); });
 }
 
 function scRevert() {
@@ -8678,6 +9788,36 @@ function srRefreshApplyState() {
     apply.disabled = !anyChecked;
     apply.style.opacity = anyChecked ? '1' : '0.5';
 }
+// Indeterminate progress for the apply. The server does the whole replace in
+// one request (no streaming), so we can't show true % — but a moving bar plus a
+// live elapsed counter makes clear it's working, which matters most for global
+// (all-transcripts) replaces that run long.
+var _srApplyTimer = null;
+function srStartApplyProgress(scopeMsg) {
+    var sum = document.getElementById('sr-summary');
+    if (!sum) return;
+    var started = Date.now();
+    sum.innerHTML =
+        '<div style="display:flex;align-items:center;gap:8px;">'
+      + '<div style="flex:1;height:6px;background:#e8eef0;border-radius:3px;overflow:hidden;position:relative;">'
+      + '<div id="sr-indet-bar" style="position:absolute;left:-40%;width:40%;height:100%;background:#27ae60;border-radius:3px;"></div>'
+      + '</div>'
+      + '<span id="sr-apply-elapsed" style="color:#555;white-space:nowrap;">0s</span>'
+      + '</div>'
+      + '<div style="margin-top:4px;color:#888;font-size:0.78rem;">Applying to ' + esc(scopeMsg) + '… global replaces can take a while — please keep this window open.</div>';
+    var pos = -40, dir = 1;
+    if (_srApplyTimer) clearInterval(_srApplyTimer);
+    _srApplyTimer = setInterval(function(){
+        pos += dir * 6;
+        if (pos > 100) { pos = 100; dir = -1; } else if (pos < -40) { pos = -40; dir = 1; }
+        var bar = document.getElementById('sr-indet-bar'); if (bar) bar.style.left = pos + '%';
+        var el = document.getElementById('sr-apply-elapsed'); if (el) el.textContent = Math.round((Date.now() - started) / 1000) + 's';
+    }, 120);
+}
+function srStopApplyProgress() {
+    if (_srApplyTimer) { clearInterval(_srApplyTimer); _srApplyTimer = null; }
+}
+
 function srApply() {
     var p = srPayload();
     if (!p.find) return;
@@ -8709,14 +9849,15 @@ function srApply() {
     var sum = document.getElementById('sr-summary');
     var apply = document.getElementById('sr-apply-btn');
     apply.disabled = true; apply.style.opacity = '0.5';
-    sum.textContent = 'Applying…';
+    srStartApplyProgress(scopeMsg);
     var body = Object.assign({action:'apply'}, p);
     if (selectedKeys !== null) body.selected_keys = selectedKeys;
     fetch(API + '/admin-transcript-replace.php', {
         method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(body)
     }).then(function(r){return safeJson(r);}).then(function(d) {
-        if (d.error) { sum.textContent = '✗ ' + d.error; return; }
+        srStopApplyProgress();
+        if (d.error) { sum.textContent = '✗ ' + d.error; apply.disabled = false; apply.style.opacity = '1'; return; }
         sum.innerHTML = '<span style="color:#27ae60;font-weight:600;">✓ ' + (d.message || 'Applied') + '</span>';
         document.getElementById('sr-preview-list').innerHTML = '';
         srLoadCommon();
@@ -8748,6 +9889,10 @@ function srApply() {
         // first. Reopening resets summary/preview/apply state (openSearchReplace),
         // so nothing stale is left behind.
         setTimeout(closeSearchReplace, 1200);
+    }).catch(function(e){
+        srStopApplyProgress();
+        if (sum) sum.textContent = '✗ ' + (e && e.message ? e.message : 'apply failed — the request may have timed out');
+        apply.disabled = false; apply.style.opacity = '1';
     });
 }
 // Save the current Find / Replace pair as a permanent correction so future
@@ -8986,8 +10131,7 @@ function deleteYoutubeCookies() {
 // Init
 checkAuth();
 </script>
-<script src="/js/admin-login.js?v=8"></script>
 <script src="/js/session-state.js?v=1"></script>
-<script src="/js/error-reporter.js?v=5"></script>
+<script src="/js/error-reporter.js?v=11"></script>
 </body>
 </html>

@@ -1,20 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1782367202">
+    <meta name="page-version" content="1783346404">
     <meta charset="UTF-8">
     <title>AI — Yada Admin</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="icon" href="/favicon.ico">
+    <link rel="stylesheet" href="css/app.css?v=10">
+    <link rel="stylesheet" href="css/login.css">
     <style>
         :root { --fg:#222; --muted:#666; --line:#e2e2e2; --bg:#fafafa; --card:#fff; --accent:#31345A; --accent-hover:#252850; --ok:#1f883d; --warn:#c47a00; --err:#b3261e; }
         * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; background: var(--bg); color: var(--fg); }
-        header { background: var(--accent); color: #fff; padding: 14px 24px; display:flex; align-items:center; gap:16px; }
-        header h1 { font-size: 1.2rem; margin: 0; font-weight: 600; }
-        header nav a { color: #fff; opacity: 0.8; text-decoration: none; font-size: 0.88rem; margin-right: 12px; }
-        header nav a:hover { opacity: 1; text-decoration: underline; }
-        main { max-width: 1100px; margin: 0 auto; padding: 22px; }
+        main { max-width: 1100px; margin: 0 auto; padding: 22px 0; }
         section { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; margin-bottom: 18px; }
         section h2 { font-size: 1rem; margin: 0 0 12px; color: #333; }
         .desc { color: var(--muted); font-size: 0.85rem; margin: -4px 0 12px; }
@@ -62,6 +59,16 @@
         .params-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px 12px; align-items: end; }
         .params-grid > div { display: flex; flex-direction: column; }
         .params-grid label { margin: 0 0 3px; font-weight: 600; color:#555; font-size: 0.78rem; }
+        /* A parameter the currently-selected service does not accept: dimmed +
+           non-interactive, with a small "n/a" note so the operator knows it was
+           intentionally disabled (not broken). */
+        .pfield-off { opacity: 0.4; }
+        .pfield-off input, .pfield-off select, .pfield-off textarea { background:#f3f3f3; cursor:not-allowed; }
+        .pfield-off .na-tag { display:inline; }
+        .na-tag { display:none; color:#999; font-weight:normal; font-size:0.72em; margin-left:4px; }
+        .gate-off { opacity: 0.45; pointer-events: none; }
+        .gate-note { font-size:0.76rem; color: var(--warn); margin:4px 0 0; display:none; }
+        .gate-note.show { display:block; }
         .jobs-table { width:100%; border-collapse: collapse; font-size: 0.88rem; }
         .jobs-table th { text-align:left; font-weight:600; color:#555; padding:8px 8px; border-bottom: 1px solid var(--line); font-size:0.8rem; text-transform: uppercase; letter-spacing: 0.4px; }
         .jobs-table td { padding:8px 8px; border-bottom: 1px solid #f1f1f1; vertical-align: top; }
@@ -106,15 +113,20 @@
     </style>
 </head>
 <body>
-<header>
-    <h1>AI</h1>
-    <nav>
-        <a href="/admin-tts.html">TTS</a>
-        <a href="/admin-books.html">Books</a>
-    </nav>
-</header>
 
-<main>
+<div id="app" class="container">
+    <div class="app-header">
+        <nav class="nav-tabs"></nav>
+<script src="/js/admin-nav.js?v=20"></script>
+        <div class="user-info">
+            <span id="user-display"></span>
+            <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
+        </div>
+    </div>
+
+    <h1>AI</h1>
+
+    <main>
     <div class="tabs">
         <button class="tab active" data-tab="video">Video</button>
         <button class="tab" data-tab="image">Image</button>
@@ -141,11 +153,13 @@
             <label style="margin-top:14px">Prompt</label>
             <textarea data-field="prompt" placeholder="A slow cinematic camera move, golden hour, dust motes…"></textarea>
 
-            <label style="margin-top:10px">Negative prompt (optional)</label>
-            <textarea data-field="negative" placeholder="low quality, watermark, text…"></textarea>
+            <div data-gate="negative">
+                <label style="margin-top:10px">Negative prompt (optional) <span class="na-tag">— not used by this service</span></label>
+                <textarea data-field="negative" placeholder="low quality, watermark, text…"></textarea>
+            </div>
 
             <label style="margin-top:14px">Video parameters</label>
-            <div class="desc" style="margin:-2px 0 8px">Common-denominator knobs every service accepts. <span data-hint="duration" class="small" style="display:block;margin-top:2px;"></span></div>
+            <div class="desc" style="margin:-2px 0 8px">Fields disabled below are not accepted by the selected service. <span data-hint="duration" class="small" style="display:block;margin-top:2px;"></span></div>
             <div class="params-grid">
                 <div><label>Duration (sec)</label><input type="number" data-p="duration_sec" min="1" max="30" step="0.5" value="4"></div>
                 <div><label>Width (px)</label><input type="number" data-p="width" min="256" max="2048" step="16" value="720"></div>
@@ -184,25 +198,30 @@
             <label>Service</label>
             <div id="image-providers" class="provider-grid"><div class="empty">Loading services…</div></div>
 
-            <label style="margin-top:14px">Starter image (optional — img2img / inpainting)</label>
-            <div class="input-actions">
-                <button class="ghost" data-act="pick" data-tab-target="image">Use previous output…</button>
+            <div data-gate="initimage">
+                <label style="margin-top:14px">Starter image (optional — img2img / inpainting) <span class="na-tag">— this service is text-to-image only</span></label>
+                <div class="input-actions">
+                    <button class="ghost" data-act="pick" data-tab-target="image">Use previous output…</button>
+                </div>
+                <div class="desc" style="margin:0 0 6px">Skip to generate from prompt only. Add an image to do img2img; add a mask to inpaint a region.</div>
+                <div id="image-uploader" class="uploader" tabindex="0">
+                    <div>Click or drop an image (optional)</div>
+                    <input type="file" multiple accept="image/png,image/jpeg,image/webp">
+                </div>
             </div>
-            <div class="desc" style="margin:0 0 6px">Skip to generate from prompt only. Add an image to do img2img; add a mask to inpaint a region.</div>
-            <div id="image-uploader" class="uploader" tabindex="0">
-                <div>Click or drop an image (optional)</div>
-                <input type="file" multiple accept="image/png,image/jpeg,image/webp">
-            </div>
+            <p class="gate-note" data-gate-note="initimage">The selected service is text-to-image only — starter image and inpainting are disabled.</p>
             <div id="image-thumbs" class="thumbs"></div>
 
             <label style="margin-top:14px">Prompt</label>
             <textarea data-field="prompt" placeholder="A tabby cat reading a leather-bound book by candlelight, photorealistic"></textarea>
 
-            <label style="margin-top:10px">Negative prompt (optional)</label>
-            <textarea data-field="negative" placeholder="low quality, blurry, watermark, text…"></textarea>
+            <div data-gate="negative">
+                <label style="margin-top:10px">Negative prompt (optional) <span class="na-tag">— not used by this service</span></label>
+                <textarea data-field="negative" placeholder="low quality, blurry, watermark, text…"></textarea>
+            </div>
 
             <label style="margin-top:14px">Image parameters</label>
-            <div class="desc" style="margin:-2px 0 8px">Common knobs every service accepts. <span data-hint="dim" class="small" style="display:block;margin-top:2px;"></span></div>
+            <div class="desc" style="margin:-2px 0 8px">Fields disabled below are not accepted by the selected service. <span data-hint="dim" class="small" style="display:block;margin-top:2px;"></span></div>
             <div class="params-grid">
                 <div>
                     <label>Aspect</label>
@@ -242,6 +261,7 @@
                 <div><label>Seed</label><input type="number" data-p="seed" placeholder="random"></div>
                 <div><label>Inference steps</label><input type="number" data-p="num_inference_steps" min="1" max="100" step="1" value="28"></div>
                 <div><label>Guidance scale</label><input type="number" data-p="guidance_scale" min="0" max="20" step="0.5" value="3.5"></div>
+                <div><label>Init strength <span class="na-tag">n/a</span></label><input type="number" data-p="init_strength" min="0" max="1" step="0.05" value="0.7"></div>
             </div>
 
             <details style="margin-top:12px">
@@ -266,6 +286,7 @@
         </section>
     </div>
 </main>
+</div>
 
 <div id="picker-modal" class="modal-overlay hidden">
     <div class="modal">
@@ -302,6 +323,7 @@
 
 <div id="toast" class="toast"></div>
 
+<script src="/js/admin-login.js?v=8"></script>
 <script>
 "use strict";
 
@@ -349,6 +371,64 @@ function badgeForStatus(st) {
         default:          return '<span class="badge off">' + esc(st || '?') + '</span>';
     }
 }
+
+// ── Per-engine input-parameter schema — OFFLINE FALLBACK ONLY ─────────────
+// The AUTHORITATIVE schema now comes from each engine's own /models endpoint
+// (its param_schema(), built from the same params.get() reads), attached to
+// every provider as `param_schema` by list_providers (PHP, cached). This
+// built-in map is consulted ONLY when the engine was unreachable at page load,
+// so per-service field gating still works during a GPU-box outage. Shape
+// matches the engine: fields{key:{def,min,max,step}|true}, neg/initImage/inpaint.
+const FALLBACK_PARAM_SCHEMA = {
+    // ---------- video (image-to-video) ----------
+    'cogvideox-5b-i2v': { neg:false, fields:{
+        duration_sec:{def:4,min:1,max:6,step:0.5},
+        width:{def:720,min:256,max:1280,step:16}, height:{def:480,min:256,max:1280,step:16},
+        num_inference_steps:{def:50,min:20,max:100,step:1},
+        guidance_scale:{def:6,min:0,max:20,step:0.5}, seed:true } },
+    'ltx-video': { neg:true, fields:{
+        duration_sec:{def:5,min:1,max:8,step:0.5},
+        width:{def:704,min:256,max:1280,step:32}, height:{def:480,min:256,max:1280,step:32},
+        fps:{def:24,min:8,max:30,step:1},
+        num_inference_steps:{def:40,min:10,max:100,step:1},
+        guidance_scale:{def:3,min:0,max:15,step:0.5}, seed:true } },
+    'wan2.2-i2v': { neg:true, fields:{
+        duration_sec:{def:4,min:1,max:5,step:0.5},
+        width:{def:832,min:256,max:1280,step:16}, height:{def:480,min:256,max:1280,step:16},
+        num_inference_steps:{def:40,min:10,max:100,step:1},
+        guidance_scale:{def:3.5,min:0,max:15,step:0.5}, seed:true } },
+    'hunyuan-i2v': { neg:true, fields:{
+        duration_sec:{def:5,min:1,max:8,step:0.5},
+        width:{def:720,min:256,max:1280,step:16}, height:{def:480,min:256,max:1280,step:16},
+        num_inference_steps:{def:30,min:10,max:100,step:1},
+        guidance_scale:{def:6,min:0,max:20,step:0.5}, seed:true } },
+    // ---------- image (text-to-image) ----------
+    'flux-1-schnell': { neg:false, initImage:false, inpaint:false, fields:{
+        width:{def:1024,min:256,max:2048,step:16}, height:{def:1024,min:256,max:2048,step:16},
+        num_inference_steps:{def:4,min:1,max:12,step:1},
+        n_images:{def:1,min:1,max:4,step:1}, format:true, seed:true } },
+    'flux-1-dev': { neg:false, initImage:true, inpaint:true, fields:{
+        width:{def:1024,min:256,max:2048,step:16}, height:{def:1024,min:256,max:2048,step:16},
+        num_inference_steps:{def:28,min:10,max:60,step:1},
+        guidance_scale:{def:3.5,min:0,max:15,step:0.5},
+        n_images:{def:1,min:1,max:4,step:1}, format:true, seed:true,
+        init_strength:{def:0.7,min:0,max:1,step:0.05} } },
+    'sdxl-1.0': { neg:true, initImage:false, inpaint:false, fields:{
+        width:{def:1024,min:256,max:1536,step:16}, height:{def:1024,min:256,max:1536,step:16},
+        num_inference_steps:{def:35,min:10,max:80,step:1},
+        guidance_scale:{def:6,min:0,max:20,step:0.5},
+        n_images:{def:1,min:1,max:4,step:1}, format:true, seed:true } },
+    'sd-3.5-large': { neg:true, initImage:false, inpaint:false, fields:{
+        width:{def:1024,min:256,max:1536,step:16}, height:{def:1024,min:256,max:1536,step:16},
+        num_inference_steps:{def:28,min:10,max:60,step:1},
+        guidance_scale:{def:3.5,min:0,max:15,step:0.5},
+        n_images:{def:1,min:1,max:4,step:1}, format:true, seed:true } },
+    'qwen-image': { neg:true, initImage:false, inpaint:false, fields:{
+        width:{def:1328,min:256,max:1664,step:16}, height:{def:1328,min:256,max:1664,step:16},
+        num_inference_steps:{def:50,min:10,max:80,step:1},
+        guidance_scale:{def:4,min:0,max:20,step:0.5},
+        n_images:{def:1,min:1,max:4,step:1}, format:true, seed:true } },
+};
 
 class TabController {
     constructor(name) {
@@ -413,25 +493,32 @@ class TabController {
             const usable = online && active;
             div.className = 'provider-card' + (this.state.selectedProviderKey === p.provider_key ? ' selected' : '') + (usable ? '' : ' offline');
             const lines = [];
+            const sch = p.param_schema || FALLBACK_PARAM_SCHEMA[p.model_id];
             if (this.name === 'video') {
                 if (p.supports_single_image)     lines.push('single image');
                 if (p.supports_first_last_frame) lines.push('first/last frame');
                 if (p.max_duration_sec)          lines.push('up to ' + p.max_duration_sec + 's');
             } else {
-                if (p.supports_init_image)       lines.push('img2img');
-                if (p.supports_inpainting)       lines.push('inpaint');
+                // Capabilities from the engine schema (authoritative) so the card
+                // agrees with the field gating; fall back to DB flags if unknown.
+                if (sch ? sch.initImage : p.supports_init_image) lines.push('img2img');
+                if (sch ? sch.inpaint   : p.supports_inpainting) lines.push('inpaint');
                 if (p.max_dim)                   lines.push('≤ ' + p.max_dim + 'px');
                 if (p.max_batch)                 lines.push('batch up to ' + p.max_batch);
             }
             div.innerHTML =
                 '<div class="badge ' + (usable ? 'on' : 'off') + '">' + (usable ? 'ready' : (online ? 'inactive' : 'offline')) + '</div>' +
                 '<div class="pname">' + esc(p.label) + '</div>' +
-                '<div class="pmeta">' + esc(p.model_id) + ' &middot; ' + esc(lines.join(' &middot; ') || 'capabilities unknown') + '</div>';
+                '<div class="pmeta">' + esc(p.model_id) + ' · ' + (esc(lines.join(' · ')) || 'capabilities unknown') + '</div>';
             if (usable) {
                 div.addEventListener('click', () => {
+                    const changed = this.state.selectedProviderKey !== p.provider_key;
                     this.state.selectedProviderKey = p.provider_key;
                     this.renderProviders();
                     this.updateHints();
+                    // Reset fields to the new engine's defaults only when the
+                    // selection actually changes (not on a re-click / re-render).
+                    this.applyProviderSchema(changed);
                 });
             }
             el.appendChild(div);
@@ -466,6 +553,77 @@ class TabController {
         else          { h = baseEdge; w = Math.round(baseEdge * aw / ah / 16) * 16; }
         this.paramInput('width').value  = w;
         this.paramInput('height').value = h;
+    }
+
+    currentProvider() { return this.state.providers.find(x => x.provider_key === this.state.selectedProviderKey) || null; }
+    // Server-authoritative: prefer the engine-supplied param_schema (from
+    // list_providers), falling back to the built-in map only if the engine was
+    // offline when the page loaded.
+    currentSchema()   { const p = this.currentProvider(); if (!p) return null; return p.param_schema || FALLBACK_PARAM_SCHEMA[p.model_id] || null; }
+
+    // The full set of gate-able param fields for this tab. aspect/style are
+    // pure UI helpers and stay enabled regardless of engine.
+    gateFields() {
+        return this.name === 'video'
+            ? ['duration_sec','width','height','fps','num_inference_steps','guidance_scale','seed']
+            : ['width','height','n_images','format','num_inference_steps','guidance_scale','init_strength','seed'];
+    }
+
+    // Enable/disable each field per the selected engine's schema, applying its
+    // native default/min/max. With no schema (unknown engine) everything stays
+    // enabled. Also gates the negative-prompt box and (image) the starter-image
+    // + inpaint affordances.
+    applyProviderSchema(resetDefaults) {
+        const schema = this.currentSchema();
+        for (const key of this.gateFields()) {
+            const el = this.paramInput(key);
+            if (!el) continue;
+            const box = el.parentElement;
+            const lab = box.querySelector('label');
+            if (lab && !lab.querySelector('.na-tag')) {
+                const t = document.createElement('span'); t.className = 'na-tag'; t.textContent = 'n/a';
+                lab.appendChild(document.createTextNode(' ')); lab.appendChild(t);
+            }
+            const spec = schema ? schema.fields[key] : true;
+            if (spec) {
+                box.classList.remove('pfield-off');
+                el.disabled = false;
+                if (typeof spec === 'object') {
+                    if (spec.min  != null) el.min  = spec.min;
+                    if (spec.max  != null) el.max  = spec.max;
+                    if (spec.step != null) el.step = spec.step;
+                    if (resetDefaults && spec.def != null) {
+                        el.value = spec.def;
+                    } else if (el.value !== '') {
+                        let v = parseFloat(el.value);
+                        if (isFinite(v)) {
+                            if (spec.max != null) v = Math.min(v, spec.max);
+                            if (spec.min != null) v = Math.max(v, spec.min);
+                            el.value = v;
+                        }
+                    }
+                }
+            } else {
+                box.classList.add('pfield-off');
+                el.disabled = true;
+            }
+        }
+        // Negative prompt
+        const negWrap = this.panel.querySelector('[data-gate="negative"]');
+        const allowNeg = !schema || !!schema.neg;
+        if (negWrap) negWrap.classList.toggle('pfield-off', !allowNeg);
+        if (this.elNegative) this.elNegative.disabled = !allowNeg;
+        // Image-only: starter image (img2img) + inpaint mask
+        if (this.name === 'image') {
+            const initWrap = this.panel.querySelector('[data-gate="initimage"]');
+            const note     = this.panel.querySelector('[data-gate-note="initimage"]');
+            const allowInit = !schema || !!schema.initImage;
+            if (initWrap) initWrap.classList.toggle('gate-off', !allowInit);
+            if (this.elFileInput) this.elFileInput.disabled = !allowInit;
+            if (note) note.classList.toggle('show', !allowInit);
+            if (!allowInit && this.state.files.length) this.state.files = [];
+            this.renderThumbs(); // refresh mask-button visibility for the new engine
+        }
     }
 
     setupUploader() {
@@ -518,7 +676,9 @@ class TabController {
             }
             wrap.appendChild(roleTag);
             const actions = document.createElement('div'); actions.className = 'actions';
-            if (entry.role === 'init') {
+            const sch = this.currentSchema();
+            const inpaintOk = this.name === 'image' && (!sch || sch.inpaint);
+            if (entry.role === 'init' && inpaintOk) {
                 const maskBtn = document.createElement('button'); maskBtn.title = 'Mark region'; maskBtn.textContent = '✎';
                 maskBtn.addEventListener('click', e => { e.stopPropagation(); MaskPainter.open(this, entry); });
                 actions.appendChild(maskBtn);
@@ -536,37 +696,40 @@ class TabController {
         });
     }
 
+    // Build the params object from ONLY the fields the selected engine accepts
+    // (per the selected engine's schema). Disabled fields are skipped so we never send a knob the
+    // engine ignores (e.g. guidance to Flux Schnell, fps to CogVideoX).
     buildParams() {
-        let p;
-        if (this.name === 'video') {
-            p = {
-                duration_sec:        this.readNum('duration_sec', 4),
-                width:               Math.round(this.readNum('width', 720)),
-                height:              Math.round(this.readNum('height', 480)),
-                fps:                 Math.round(this.readNum('fps', 16)),
-                // CogVideoX-5B-I2V reference is 50 inference steps with cfg=6.
-                // Below ~40 steps the model never finishes denoising and the
-                // output looks like noise / smear (job #10 ran with the old 30
-                // default — visibly bad). These fallbacks only kick in if the
-                // form field is missing / blank.
-                num_inference_steps: Math.round(this.readNum('num_inference_steps', 50)),
-                guidance_scale:      this.readNum('guidance_scale', 6),
-            };
+        const schema = this.currentSchema();
+        const p = {};
+        const intKeys = ['width','height','num_inference_steps','n_images','fps'];
+        const readField = (key) => {
+            const el = this.paramInput(key);
+            if (!el || el.disabled || el.value === '' || el.value == null) return;
+            let v = parseFloat(el.value);
+            if (!isFinite(v)) return;
+            if (intKeys.includes(key)) v = Math.round(v);
+            if (key === 'n_images') v = Math.max(1, Math.min(4, v));
+            p[key] = v;
+        };
+        if (schema) {
+            for (const key of Object.keys(schema.fields)) {
+                if (key === 'format' || key === 'seed') continue; // handled explicitly below
+                readField(key);
+            }
+            if (schema.fields.format) { const f = this.paramInput('format'); if (f && !f.disabled && f.value) p.format = f.value; }
+            if (schema.fields.seed)   { const s = this.paramInput('seed');   if (s && !s.disabled && s.value.trim() !== '') p.seed = Math.round(parseFloat(s.value)); }
         } else {
-            p = {
-                width:               Math.round(this.readNum('width', 1024)),
-                height:              Math.round(this.readNum('height', 1024)),
-                n_images:            Math.max(1, Math.min(4, Math.round(this.readNum('n_images', 1)))),
-                num_inference_steps: Math.round(this.readNum('num_inference_steps', 28)),
-                guidance_scale:      this.readNum('guidance_scale', 3.5),
-            };
-            const style  = this.paramInput('style');
-            const format = this.paramInput('format');
-            if (style  && style.value)  p.style  = style.value;
-            if (format && format.value) p.format = format.value;
+            // Unknown engine (no schema) — fall back to sending the visible fields.
+            this.gateFields().forEach(readField);
+            const s = this.paramInput('seed'); if (s && s.value.trim() !== '') p.seed = Math.round(parseFloat(s.value));
+            const f = this.paramInput('format'); if (f && f.value) p.format = f.value;
         }
-        const seedEl = this.paramInput('seed');
-        if (seedEl && seedEl.value.trim() !== '') p.seed = Math.round(parseFloat(seedEl.value));
+        // Style is a UI helper (no engine consumes it directly) — pass it through
+        // for engines/future use; harmless where unread.
+        const style = this.paramInput('style');
+        if (style && style.value) p.style = style.value;
+        // Advanced JSON overrides everything above.
         const adv = this.elAdvParams.value.trim();
         if (adv !== '') {
             let parsed;
@@ -586,17 +749,20 @@ class TabController {
         try { paramsObj = this.buildParams(); }
         catch (e) { toast(e.message, 'err'); return; }
 
+        const schema = this.currentSchema();
         const fd = new FormData();
         fd.append('provider_key', this.state.selectedProviderKey);
         fd.append('prompt', prompt);
         const negative = this.elNegative.value.trim();
-        if (negative) fd.append('negative_prompt', negative);
+        if (negative && (!schema || schema.neg)) fd.append('negative_prompt', negative);
         fd.append('params', JSON.stringify(paramsObj));
 
         const initField = this.name === 'video' ? 'images[]' : 'init_images[]';
+        const allowInit   = this.name === 'video' || !schema || schema.initImage;
+        const allowInpaint = this.name === 'video' || !schema || schema.inpaint;
         for (const entry of this.state.files) {
-            if (entry.role === 'init') fd.append(initField, entry.file, entry.file.name);
-            else if (entry.role === 'mask') fd.append('mask', entry.file, 'mask.png');
+            if (entry.role === 'init' && allowInit) fd.append(initField, entry.file, entry.file.name);
+            else if (entry.role === 'mask' && allowInpaint) fd.append('mask', entry.file, 'mask.png');
         }
         const prevEntry = this.state.files.find(x => x.role === 'init' && x.source === 'prev');
         if (prevEntry && prevEntry.ref) fd.append('prev_ref', JSON.stringify(prevEntry.ref));
@@ -969,5 +1135,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 </script>
+<script src="/js/session-state.js?v=1"></script>
 </body>
 </html>

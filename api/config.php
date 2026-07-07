@@ -260,6 +260,9 @@ set_exception_handler(function (\Throwable $e) {
 
 set_error_handler(function (int $errno, string $errstr, string $errfile, int $errline) {
     if (!(error_reporting() & $errno)) return false; // suppressed via @
+    // 'Command line code' is PHP's filename for `php -r '...'` inline snippets.
+    // These are one-off debugging invocations by operators, not production failures.
+    if ($errfile === 'Command line code') return false;
     // Only escalate the loud ones; notices/strict are too noisy
     $severityMap = [
         E_WARNING        => 'warning',

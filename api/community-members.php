@@ -39,8 +39,17 @@ $where = "WHERE u.user_active_flag = TRUE AND u.user_banned_flag = FALSE AND EXI
 $params = [];
 
 if ($search) {
-    $where .= " AND (u.user_name_display ILIKE ? OR u.user_handle ILIKE ?)";
-    $params[] = '%' . $search . '%';
+    // Match against every piece of text associated with a member:
+    // display name, handle, nickname/display name, first/middle/last/full name,
+    // email address, free-text field, bio, and the login code (holds email/oauth id).
+    $where .= " AND (
+        COALESCE(u.user_name_display,'') || ' ' || COALESCE(u.user_handle,'') || ' ' ||
+        COALESCE(u.user_display_name,'') || ' ' || COALESCE(u.user_name_first,'') || ' ' ||
+        COALESCE(u.user_name_middle,'') || ' ' || COALESCE(u.user_name_last,'') || ' ' ||
+        COALESCE(u.user_name_full,'') || ' ' || COALESCE(u.user_email,'') || ' ' ||
+        COALESCE(u.user_text,'') || ' ' || COALESCE(u.user_bio,'') || ' ' ||
+        COALESCE(u.user_code,'')
+    ) ILIKE ?";
     $params[] = '%' . $search . '%';
 }
 

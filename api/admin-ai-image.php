@@ -24,6 +24,7 @@
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/spawn-helpers.php';
+require_once __DIR__ . '/ai-schema-lib.php';
 
 $user = requireAuth();
 $db   = getDb();
@@ -71,6 +72,10 @@ if ($method === 'GET' && $action === 'list_providers') {
         $r['map_active']          = _flagTrue($r['map_active']);
         $r['sort']                = (int)$r['sort'];
     }
+    unset($r);
+    // Attach each engine's self-described input schema (from /models, cached).
+    $schemas = ai_fetch_param_schemas('t2i', $rows);
+    foreach ($rows as &$r) { $r['param_schema'] = $schemas[$r['model_id']] ?? null; }
     unset($r);
     jsonResponse(['providers' => $rows]);
 }

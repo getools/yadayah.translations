@@ -166,24 +166,35 @@ if ($autoTranscribe) {
     $delStmt->execute([$itemKey]);
     echo "cleared " . $delStmt->rowCount() . " stale transcript rows\n";
 
-    $jobStmt = $db->prepare("INSERT INTO yy_feed_item_transcript_job (feed_item_key, job_status, job_message, user_key) VALUES (?, 'pending', 'CLI finalize triggered transcribe', ?) RETURNING feed_item_transcript_job_key");
-    $jobStmt->execute([$itemKey, $userKey]);
-    $jobKey = (int)$jobStmt->fetchColumn();
-    echo "spawned transcript job #$jobKey\n";
+    // Full self-hosted baseline suite + opt-in → amalgamated (consensus L1-L4)
+    // transcript auto-builds once the baselines land (maybeAutoBuildEditable).
+    require_once __DIR__ . '/transcript-helpers.php';   // autoEnqueueBaselineSuite()
+    $jobKey = autoEnqueueBaselineSuite($db, $itemKey, $userKey);
+    echo "queued baseline suite (first job #$jobKey)\n";
 
     $worker = __DIR__ . '/transcript-worker.php';
-    if (file_exists($worker)) {
+    if ($jobKey && file_exists($worker)) {
         require_once __DIR__ . '/spawn-helpers.php';
-        $logFile = sys_get_temp_dir() . "/transcript_$jobKey.log";
-        $pid = spawnCappedWorker($worker, [(string)$jobKey], $logFile, [
-            'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
-        ]);
-        if ($pid > 0) {
-            $db->prepare("UPDATE yy_feed_item_transcript_job SET job_worker_pid = ? WHERE feed_item_transcript_job_key = ?")
-               ->execute([$pid, $jobKey]);
-            echo "worker pid $pid launched (log: $logFile)\n";
-        } else {
-            echo "WARN: worker launch returned no pid\n";
+        $db->query('SELECT pg_advisory_lock(742001)');
+        try {
+            $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_job WHERE job_status = 'running'")->fetchColumn();
+            if ($running === 0) {
+                $logFile = sys_get_temp_dir() . "/transcript_$jobKey.log";
+                $pid = spawnCappedWorker($worker, [(string)$jobKey], $logFile, [
+                    'cpu_secs' => 2400, 'mem_mb' => 2000, 'nice' => 10,
+                ]);
+                if ($pid > 0) {
+                    $db->prepare("UPDATE yy_feed_item_transcript_job SET job_status = 'running', job_worker_pid = ? WHERE feed_item_transcript_job_key = ? AND job_status = 'pending'")
+                       ->execute([$pid, $jobKey]);
+                    echo "worker pid $pid launched (log: $logFile)\n";
+                } else {
+                    echo "WARN: worker launch returned no pid\n";
+                }
+            } else {
+                echo "worker already running — suite will drain in queue\n";
+            }
+        } finally {
+            $db->query('SELECT pg_advisory_unlock(742001)');
         }
     }
 }

@@ -159,7 +159,10 @@ if ($method === 'POST') {
     $data = json_decode(file_get_contents('php://input'), true) ?: [];
     $action = $data['action'] ?? '';
     $itemKey = (int)($data['item_key'] ?? 0);
-    if (!$itemKey) errorResponse('item_key required');
+    // Snippet actions are library-wide (not tied to a feed item), so they carry
+    // no item_key. Every other POST action operates on a specific transcript.
+    $itemlessActions = ['create_snippet', 'list_snippets', 'get_snippet'];
+    if (!$itemKey && !in_array($action, $itemlessActions, true)) errorResponse('item_key required');
 
     if ($action === 'start') {
         // If there's already an active job for this item, attach to it instead
@@ -261,11 +264,11 @@ if ($method === 'POST') {
         // history on each save and — under READ COMMITTED — could lose a
         // concurrent save's DELETE and duplicate rows. UPDATE-by-key is race-safe
         // and leaves untouched columns (e.g. speaker/diarisation) intact.
-        $existingStmt = $db->prepare("SELECT feed_item_transcript_key AS k, feed_item_transcript_segment::text AS segment, feed_item_transcript_text AS text, feed_item_transcript_sort AS sort FROM yy_feed_item_transcript WHERE feed_item_key = ?");
+        $existingStmt = $db->prepare("SELECT feed_item_transcript_key AS k, feed_item_transcript_segment::text AS segment, feed_item_transcript_text AS text, feed_item_transcript_sort AS sort, feed_item_transcript_speaker AS speaker FROM yy_feed_item_transcript WHERE feed_item_key = ?");
         $existingStmt->execute([$itemKey]);
         $existingByKey = [];
         foreach ($existingStmt->fetchAll() as $r) {
-            $existingByKey[(int)$r['k']] = ['segment' => $r['segment'], 'text' => $r['text'], 'sort' => (int)$r['sort']];
+            $existingByKey[(int)$r['k']] = ['segment' => $r['segment'], 'text' => $r['text'], 'sort' => (int)$r['sort'], 'speaker' => $r['speaker']];
         }
         // Parse "H:M:S(.fff)" / "M:S" / bare seconds to a float so a timestamp
         // edit is detected reliably despite display-vs-interval formatting
@@ -284,12 +287,13 @@ if ($method === 'POST') {
                    SET feed_item_transcript_segment = ?::interval,
                        feed_item_transcript_text    = ?,
                        feed_item_transcript_sort    = ?,
+                       feed_item_transcript_speaker  = ?,
                        feed_item_transcript_revision_user_key = ?,
                        feed_item_transcript_revision_dtime    = NOW()
                  WHERE feed_item_transcript_key = ? AND feed_item_key = ?");
             // New rows only. ON CONFLICT guards uq_transcript_no_dup so a racing
             // insert becomes a no-op instead of a duplicate / aborting error.
-            $insStmt = $db->prepare("INSERT INTO yy_feed_item_transcript (feed_item_key, feed_item_transcript_segment, feed_item_transcript_text, feed_item_transcript_sort, feed_item_transcript_revision_user_key) VALUES (?, ?::interval, ?, ?, ?) ON CONFLICT (feed_item_key, feed_item_transcript_segment, md5(feed_item_transcript_text)) DO NOTHING");
+            $insStmt = $db->prepare("INSERT INTO yy_feed_item_transcript (feed_item_key, feed_item_transcript_segment, feed_item_transcript_text, feed_item_transcript_sort, feed_item_transcript_speaker, feed_item_transcript_revision_user_key) VALUES (?, ?::interval, ?, ?, ?, ?) ON CONFLICT (feed_item_key, feed_item_transcript_segment, md5(feed_item_transcript_text)) DO NOTHING");
             $delStmt = $db->prepare("DELETE FROM yy_feed_item_transcript WHERE feed_item_transcript_key = ? AND feed_item_key = ?");
             $logStmt = $db->prepare("INSERT INTO yy_transcript_edit_log (feed_item_key, edit_segment, edit_original_text, edit_new_text, edit_action, edit_user_key) VALUES (?, ?::interval, ?, ?, ?, ?)");
 
@@ -305,6 +309,12 @@ if ($method === 'POST') {
                 $rowSort  = isset($r['sort']) ? (int)$r['sort'] : $sort;
                 $sort++;
                 $key = (isset($r['key']) && $r['key'] !== null && $r['key'] !== '') ? (int)$r['key'] : null;
+                // Speaker is only touched when the client actually sends the
+                // field — otherwise unsupplied means "leave as-is" so a caller
+                // that doesn't manage speakers can't blank the diarised value.
+                // An empty string is an explicit "no speaker" → stored as NULL.
+                $hasSpk = array_key_exists('speaker', $r);
+                $spkVal = $hasSpk ? (trim((string)$r['speaker']) === '' ? null : mb_substr(trim((string)$r['speaker']), 0, 64)) : null;
 
                 if ($key !== null && isset($existingByKey[$key])) {
                     // Known row → UPDATE in place by primary key. Skip the write
@@ -315,16 +325,31 @@ if ($method === 'POST') {
                     $txtChanged  = $old['text'] !== $textTrim;
                     $segChanged  = abs($segToSec($old['segment']) - $segToSec($segment)) > 0.01;
                     $sortChanged = $old['sort'] !== $rowSort;
-                    if ($txtChanged || $segChanged || $sortChanged) {
-                        $updStmt->execute([$segment, $textTrim, $rowSort, $userKey, $key, $itemKey]);
+                    // Unsupplied speaker → keep the existing value (no change).
+                    $newSpk = $hasSpk ? $spkVal : $old['speaker'];
+                    $spkChanged = $hasSpk && (($old['speaker'] ?? '') !== ($newSpk ?? ''));
+                    if ($txtChanged || $segChanged || $sortChanged || $spkChanged) {
+                        $updStmt->execute([$segment, $textTrim, $rowSort, $newSpk, $userKey, $key, $itemKey]);
                         if ($txtChanged || $segChanged) {
                             $logStmt->execute([$itemKey, $segment, $old['text'], $textTrim, 'edit', $userKey]);
+                        }
+                        // Layer 4: learn from the admin's own segment edits, not
+                        // just find/replace (admin-transcript-replace.php) and
+                        // Smart Captions applies. Every in-place text correction
+                        // feeds the shared wrong→right dictionary so the STT
+                        // pipeline (worker auto-fix + Smart Captions priming)
+                        // stops repeating the same mistakes. autoLearnCorrections
+                        // self-guards: it only records aligned word substitutions
+                        // (same word count, skips case/punctuation-only), so
+                        // rewrites and re-timings add no noise.
+                        if ($txtChanged) {
+                            autoLearnCorrections($db, $old['text'], $textTrim);
                         }
                         $updated++;
                     }
                 } else {
                     // New row (no key, or a key that no longer exists) → INSERT.
-                    $insStmt->execute([$itemKey, $segment, $textTrim, $rowSort, $userKey]);
+                    $insStmt->execute([$itemKey, $segment, $textTrim, $rowSort, $spkVal, $userKey]);
                     $logStmt->execute([$itemKey, $segment, null, $textTrim, 'add', $userKey]);
                     $inserted++;
                 }
@@ -414,7 +439,54 @@ if ($method === 'POST') {
         $upd->execute(array_merge([$to], $itemKeys, [$from]));
         $changed = $upd->rowCount();
         if ($changed > 0) foreach ($itemKeys as $ik) markTranscriptEditing($db, (int)$ik);
+        // Keep captured voice embeddings addressable by the new label so
+        // "save as profile" and auto-match keep working after a rename.
+        if ($to !== null) {
+            $eUp = $db->prepare("UPDATE yy_feed_item_speaker_embedding SET label = ? WHERE feed_item_key IN ($placeholders) AND label = ?");
+            $eUp->execute(array_merge([$to], $itemKeys, [$from]));
+        }
         jsonResponse(['renamed' => $changed, 'from' => $from, 'to' => $to]);
+    }
+
+    if ($action === 'save_speaker_profile') {
+        // Snapshot a named speaker's captured voice embedding into the reusable
+        // profile library so future transcripts can be auto-identified.
+        // POST { action:'save_speaker_profile', item_key:N, label:'Y|Yada|#..', name?:'Yada' }
+        $label = trim((string)($data['label'] ?? ''));
+        if ($label === '') errorResponse('label required');
+        $name = trim((string)($data['name'] ?? ''));
+        if ($name === '') { $p = explode('|', $label); $name = trim($p[1] ?? ($p[0] ?? $label)); }
+        if ($name === '') errorResponse('a speaker name is required to save a profile');
+        $itemKeys = getFeedItemKeyCluster($db, $itemKey);
+        $ph = implode(',', array_fill(0, count($itemKeys), '?'));
+        $eq = $db->prepare("SELECT embedding::text AS e FROM yy_feed_item_speaker_embedding WHERE feed_item_key IN ($ph) AND label = ? ORDER BY captured_dtime DESC LIMIT 1");
+        $eq->execute(array_merge($itemKeys, [$label]));
+        $erow = $eq->fetch(PDO::FETCH_ASSOC);
+        if (!$erow) errorResponse('No voice embedding captured for this speaker yet. Regenerate the WhisperX + speaker-diarization baseline so voice embeddings are stored, then try again.');
+        $newVec = array_map('floatval', explode(',', trim((string)$erow['e'], '[] ')));
+        $l2 = function(array $v) { $n = sqrt(array_sum(array_map(function($x){ return $x*$x; }, $v))); return $n > 0 ? array_map(function($x) use ($n){ return $x/$n; }, $v) : $v; };
+        $pq = $db->prepare("SELECT speaker_profile_key AS k, speaker_profile_embedding::text AS e, speaker_profile_sample_count AS c FROM yy_speaker_profile WHERE lower(speaker_profile_name) = lower(?) AND speaker_profile_feed_key IS NULL LIMIT 1");
+        $pq->execute([$name]);
+        $prof = $pq->fetch(PDO::FETCH_ASSOC);
+        if ($prof) {
+            $old = array_map('floatval', explode(',', trim((string)$prof['e'], '[] ')));
+            $c = max(1, (int)$prof['c']);
+            $merged = [];
+            for ($i = 0; $i < count($newVec); $i++) { $merged[$i] = ((($old[$i] ?? 0.0) * $c) + $newVec[$i]) / ($c + 1); }
+            $vecLit = '[' . implode(',', $l2($merged)) . ']';
+            $db->prepare("UPDATE yy_speaker_profile SET speaker_profile_label=?, speaker_profile_embedding=?::vector, speaker_profile_sample_count=?, speaker_profile_updated_dtime=now() WHERE speaker_profile_key=?")
+               ->execute([$label, $vecLit, $c + 1, $prof['k']]);
+            jsonResponse(['saved' => true, 'profile_key' => (int)$prof['k'], 'name' => $name, 'samples' => $c + 1, 'updated' => true]);
+        }
+        $vecLit = '[' . implode(',', $l2($newVec)) . ']';
+        $ins = $db->prepare("INSERT INTO yy_speaker_profile (speaker_profile_name, speaker_profile_label, speaker_profile_embedding) VALUES (?, ?, ?::vector) RETURNING speaker_profile_key");
+        $ins->execute([$name, $label, $vecLit]);
+        jsonResponse(['saved' => true, 'profile_key' => (int)$ins->fetchColumn(), 'name' => $name, 'samples' => 1, 'updated' => false]);
+    }
+
+    if ($action === 'list_speaker_profiles') {
+        $rows = $db->query("SELECT speaker_profile_key AS key, speaker_profile_name AS name, speaker_profile_label AS label, speaker_profile_sample_count AS samples FROM yy_speaker_profile ORDER BY lower(speaker_profile_name)")->fetchAll(PDO::FETCH_ASSOC);
+        jsonResponse(['profiles' => $rows]);
     }
 
     if ($action === 'apply_corrections_now') {
@@ -432,6 +504,194 @@ if ($method === 'POST') {
         }
         if ($changed > 0) markTranscriptEditing($db, $itemKey);
         jsonResponse(['changed' => $changed]);
+    }
+
+    if ($action === 'fill_speakers') {
+        // Annotate the editable transcript's speaker column from a diarised
+        // baseline, WITHOUT touching text or segmentation. Each live row gets
+        // the speaker whose diarised turn has the greatest overlap with the
+        // row's [start,next-start) span — not merely the turn active at the
+        // start instant, which stamps the previous speaker onto a row whose
+        // boundary precedes the true onset (the one-row speaker lag). Non-destructive: fills only
+        // rows whose speaker is currently NULL unless overwrite=true, so it
+        // never clobbers manually renamed labels — and it works on human-edited
+        // ('Editing') transcripts a full rebuild is not allowed to overwrite.
+        // POST { action:'fill_speakers', item_key:N, overwrite?:bool }
+        $overwrite = !empty($data['overwrite']) ? 1 : 0;
+        $itemKeys = getFeedItemKeyCluster($db, $itemKey);
+        $ph = implode(',', array_fill(0, count($itemKeys), '?'));
+        // Pick the diarised source: prefer whisperx-diarize, else the baseline
+        // (any engine — assemblyai/deepgram also carry speakers) with the most
+        // labelled rows, taken from whichever cluster item actually has it.
+        $srcStmt = $db->prepare("
+            SELECT feed_item_key AS ik, feed_item_transcript_auto_model AS model, COUNT(*) AS c
+              FROM yy_feed_item_transcript_auto
+             WHERE feed_item_key IN ($ph) AND feed_item_transcript_speaker IS NOT NULL
+             GROUP BY feed_item_key, feed_item_transcript_auto_model
+             ORDER BY (feed_item_transcript_auto_model = 'gpu-whisperx-diarize') DESC, COUNT(*) DESC
+             LIMIT 1");
+        $srcStmt->execute($itemKeys);
+        $src = $srcStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$src) errorResponse('No diarised baseline found for this item — generate a WhisperX + speaker-diarization baseline first.');
+        $srcItem  = (int)$src['ik'];
+        $srcModel = (string)$src['model'];
+        $filled = 0;
+        // Overlap-based: build the diarised speaker TURNS [onset, next-onset)
+        // and the live rows' SPANS [start, next-start), then assign each row the
+        // turn whose overlap with its span is largest. Rows with no overlapping
+        // turn (before the first onset) are left untouched.
+        $upd = $db->prepare("
+            WITH turns AS (
+                SELECT feed_item_transcript_speaker AS spk,
+                       extract(epoch FROM feed_item_transcript_segment) AS ts,
+                       COALESCE(extract(epoch FROM lead(feed_item_transcript_segment)
+                                OVER (ORDER BY feed_item_transcript_sort, feed_item_transcript_segment)), 1e9) AS te
+                  FROM yy_feed_item_transcript_auto
+                 WHERE feed_item_key = ? AND feed_item_transcript_auto_model = ?
+                   AND feed_item_transcript_speaker IS NOT NULL
+            ),
+            live AS (
+                SELECT feed_item_transcript_key AS k,
+                       extract(epoch FROM feed_item_transcript_segment) AS s,
+                       COALESCE(extract(epoch FROM lead(feed_item_transcript_segment)
+                                OVER (ORDER BY feed_item_transcript_sort, feed_item_transcript_segment)),
+                                extract(epoch FROM feed_item_transcript_segment) + 5) AS e
+                  FROM yy_feed_item_transcript
+                 WHERE feed_item_key = ?
+            ),
+            best AS (
+                SELECT DISTINCT ON (l.k) l.k AS k, tu.spk AS spk
+                  FROM live l
+                  JOIN turns tu ON least(l.e, tu.te) - greatest(l.s, tu.ts) > 0
+                 ORDER BY l.k, (least(l.e, tu.te) - greatest(l.s, tu.ts)) DESC
+            )
+            UPDATE yy_feed_item_transcript t
+               SET feed_item_transcript_speaker = b.spk
+              FROM best b
+             WHERE t.feed_item_transcript_key = b.k
+               AND (? = 1 OR t.feed_item_transcript_speaker IS NULL)");
+        foreach ($itemKeys as $ik) {
+            $upd->execute([$srcItem, $srcModel, (int)$ik, $overwrite]);
+            $filled += $upd->rowCount();
+        }
+        if ($filled > 0) foreach ($itemKeys as $ik) markTranscriptEditing($db, (int)$ik);
+
+        // Auto-identify: match each still-generic diarised label (SPEAKER_xx)
+        // to the nearest known speaker profile by voice embedding (cosine). A
+        // match at/above threshold renames that label to the profile's label
+        // across the live rows + the embedding store, so recurring people get
+        // named automatically. Unmatched labels stay generic for manual naming.
+        $SIM_THRESHOLD = 0.50;
+        $matched = [];
+        $embStmt = $db->prepare("SELECT DISTINCT label, embedding::text AS emb FROM yy_feed_item_speaker_embedding WHERE feed_item_key = ?");
+        $embStmt->execute([$srcItem]);
+        foreach ($embStmt->fetchAll(PDO::FETCH_ASSOC) as $er) {
+            $lab = (string)$er['label'];
+            if (!preg_match('/^SPEAKER_\d+$/', $lab)) continue;   // only auto-name raw labels
+            $mq = $db->prepare("SELECT speaker_profile_label AS lbl, speaker_profile_name AS nm,
+                                       1 - (speaker_profile_embedding <=> ?::vector) AS sim
+                                  FROM yy_speaker_profile
+                                 ORDER BY speaker_profile_embedding <=> ?::vector LIMIT 1");
+            $mq->execute([$er['emb'], $er['emb']]);
+            $m = $mq->fetch(PDO::FETCH_ASSOC);
+            if ($m && (float)$m['sim'] >= $SIM_THRESHOLD && (string)$m['lbl'] !== $lab) {
+                foreach ($itemKeys as $ik) {
+                    $db->prepare("UPDATE yy_feed_item_transcript SET feed_item_transcript_speaker=? WHERE feed_item_key=? AND feed_item_transcript_speaker=?")->execute([$m['lbl'], (int)$ik, $lab]);
+                    $db->prepare("UPDATE yy_feed_item_speaker_embedding SET label=? WHERE feed_item_key=? AND label=?")->execute([$m['lbl'], (int)$ik, $lab]);
+                }
+                $matched[] = ['from' => $lab, 'to' => $m['lbl'], 'name' => $m['nm'], 'sim' => round((float)$m['sim'], 3)];
+            }
+        }
+
+        // Report the resulting label distribution so the UI can refresh chips.
+        $dist = $db->prepare("SELECT feed_item_transcript_speaker AS spk, COUNT(*) AS c
+                                FROM yy_feed_item_transcript
+                               WHERE feed_item_key = ? AND feed_item_transcript_speaker IS NOT NULL
+                               GROUP BY 1 ORDER BY 2 DESC");
+        $dist->execute([$itemKey]);
+        jsonResponse(['filled' => $filled, 'source_model' => $srcModel, 'matched' => $matched, 'speakers' => $dist->fetchAll(PDO::FETCH_ASSOC)]);
+    }
+
+    // ── Excerpt snippets ─────────────────────────────────────────────────
+    // A "snippet" is a reusable, named group of transcript segments captured
+    // from the editor's Excerpt column. Segment offsets are stored relative to
+    // the first captured segment (which is therefore always offset 0), so a
+    // snippet can be pasted over any point in any transcript later.
+
+    // Create a snippet + its segments. segments[] = [{offset (seconds, float,
+    // relative to the first), speaker, text}, ...] already normalised client-side.
+    if ($action === 'create_snippet') {
+        $label = trim((string)($data['label'] ?? ''));
+        if ($label === '') errorResponse('A snippet title is required');
+        $label = mb_substr($label, 0, 250);
+        $segments = $data['segments'] ?? [];
+        if (!is_array($segments) || !count($segments)) errorResponse('At least one segment must be selected');
+
+        $db->beginTransaction();
+        try {
+            $snipStmt = $db->prepare("INSERT INTO yy_transcript_snippet (transcript_snippet_label, transcript_snippet_revision_user_key)
+                                       VALUES (?, ?) RETURNING transcript_snippet_key");
+            $snipStmt->execute([$label, $userKey]);
+            $snippetKey = (int)$snipStmt->fetchColumn();
+
+            $segStmt = $db->prepare("INSERT INTO yy_transcript_snippet_segment
+                    (transcript_snippet_key, transcript_snippet_segment_speaker, transcript_snippet_segment_offset,
+                     transcript_snippet_segment_text, transcript_snippet_segment_revision_user_key)
+                    VALUES (?, ?, make_interval(secs => ?), ?, ?)");
+            $saved = 0;
+            foreach ($segments as $seg) {
+                $text = trim((string)($seg['text'] ?? ''));
+                if ($text === '') continue;
+                $offset = (float)($seg['offset'] ?? 0);
+                if ($offset < 0) $offset = 0;
+                $spk = trim((string)($seg['speaker'] ?? ''));
+                $spk = ($spk === '') ? null : mb_substr($spk, 0, 64);
+                $segStmt->execute([$snippetKey, $spk, $offset, mb_substr($text, 0, 4000), $userKey]);
+                $saved++;
+            }
+            if ($saved === 0) { $db->rollBack(); errorResponse('No non-empty segments to save'); }
+            $db->commit();
+            jsonResponse(['saved' => true, 'snippet_key' => $snippetKey, 'segments' => $saved]);
+        } catch (Exception $e) {
+            $db->rollBack();
+            errorResponse('Could not create snippet: ' . $e->getMessage());
+        }
+    }
+
+    // List existing snippets (most-recent first) for the popover.
+    if ($action === 'list_snippets') {
+        $stmt = $db->query("SELECT s.transcript_snippet_key, s.transcript_snippet_label,
+                                   s.transcript_snippet_revision_dtime,
+                                   COUNT(seg.transcript_snippet_segment_key) AS segment_count
+                              FROM yy_transcript_snippet s
+                              LEFT JOIN yy_transcript_snippet_segment seg
+                                     ON seg.transcript_snippet_key = s.transcript_snippet_key
+                             GROUP BY s.transcript_snippet_key
+                             ORDER BY s.transcript_snippet_key DESC");
+        jsonResponse(['snippets' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
+    }
+
+    // Fetch one snippet's segments (offsets as seconds) so the client can paste
+    // them over the selected transcript rows.
+    if ($action === 'get_snippet') {
+        $snippetKey = (int)($data['snippet_key'] ?? 0);
+        if (!$snippetKey) errorResponse('snippet_key required');
+        $s = $db->prepare("SELECT transcript_snippet_key, transcript_snippet_label FROM yy_transcript_snippet WHERE transcript_snippet_key = ?");
+        $s->execute([$snippetKey]);
+        $snip = $s->fetch();
+        if (!$snip) errorResponse('Snippet not found', 404);
+        $segStmt = $db->prepare("SELECT transcript_snippet_segment_speaker AS speaker,
+                                        EXTRACT(EPOCH FROM transcript_snippet_segment_offset) AS offset_seconds,
+                                        transcript_snippet_segment_text AS text
+                                   FROM yy_transcript_snippet_segment
+                                  WHERE transcript_snippet_key = ?
+                                  ORDER BY transcript_snippet_segment_offset, transcript_snippet_segment_key");
+        $segStmt->execute([$snippetKey]);
+        jsonResponse([
+            'snippet_key' => (int)$snip['transcript_snippet_key'],
+            'label'       => $snip['transcript_snippet_label'],
+            'segments'    => $segStmt->fetchAll(PDO::FETCH_ASSOC),
+        ]);
     }
 
     errorResponse('Unknown action');

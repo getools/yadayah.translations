@@ -154,6 +154,8 @@ function gpuTranscribe(string $audioPath, array $opts = []): array {
     if (!empty($opts['model'])) $form['model'] = $opts['model'];
     // Optional speaker diarization (whisperx engine). Only sent when requested.
     if (!empty($opts['diarize'])) $form['diarize'] = 'true';
+    // Optional per-speaker voice embeddings (whisperx engine; needs diarize).
+    if (!empty($opts['return_embeddings'])) $form['return_embeddings'] = 'true';
 
     // Gateway path. Defaults to the faster-whisper engine at /stt/transcribe;
     // other self-hosted engines (parakeet, whisperx, canary, …) live behind
@@ -272,6 +274,14 @@ function gpuProviderCatalog(string $provider, int $timeout = 600): array {
  * ['ok'=>true,'body'=>…].
  */
 function gpuSynthesize(array $params, ?string $saveTo = null, int $timeout = 600): array {
+    // The GPU is a single shared device: a book build (batch) must yield it to
+    // interactive auditions/previews so they don't starve behind the queue.
+    // The build worker sets TTS_GPU_PRIORITY=batch; everything else defaults to
+    // interactive priority. The engine's priority-aware synth lock honours this
+    // (older engines ignore the extra field harmlessly).
+    if (!isset($params['priority'])) {
+        $params['priority'] = (getenv('TTS_GPU_PRIORITY') ?: 'normal');
+    }
     $opts = ['json' => $params, 'timeout' => $timeout];
     if ($saveTo !== null) $opts['save_to'] = $saveTo;
     else                  $opts['expect']  = 'raw';

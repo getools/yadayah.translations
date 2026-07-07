@@ -84,10 +84,14 @@ if (trim($data['mode'] ?? '') === 'consensus') {
     $params = [
         'max_chars'      => max(10, (int)($rawP['max_chars'] ?? 42)),
         'max_lines'      => max(1, (int)($rawP['max_lines'] ?? 2)),
+        'preferred_lines'=> max(1, (int)($rawP['preferred_lines'] ?? 1)),
         'max_secs'       => (float)($rawP['max_secs'] ?? 7.0),
         'min_secs'       => (float)($rawP['min_secs'] ?? 1.2),
         'break_punct'    => array_key_exists('break_punct', $rawP) ? !empty($rawP['break_punct']) : true,
-        'break_gap'      => max(0.0, (float)($rawP['break_gap'] ?? 0)),
+        'break_gap'      => max(0.0, (float)($rawP['break_gap'] ?? 0.6)),
+        // Char cap is a target; allow overflow up to this x while hunting for the
+        // next natural boundary so cues break on punctuation/pause, not mid-clause.
+        'soft_overflow'  => max(1.0, (float)($rawP['soft_overflow'] ?? 1.5)),
         'use_boundaries' => !empty($rawP['use_boundaries']),
         // Operator chose to anchor caption breaks on the Primary baseline's
         // segment boundaries (rather than the union of all baselines). The

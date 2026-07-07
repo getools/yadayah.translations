@@ -152,6 +152,83 @@ def log_monitor_event(conn, severity, message, detail):
         pass  # never let monitor logging break the parse
 
 
+def _norm_chapter_name(s):
+    """Normalize a chapter name for case/whitespace-insensitive matching."""
+    return re.sub(r'\s+', ' ', (s or '')).strip().lower()
+
+
+def ensure_chapters_for_boundaries(conn, cur, vol_key, boundaries, page_map):
+    """Make sure a yy_chapter row exists for every detected heading.
+
+    Returns [(para_idx, chapter_key), …] in document order for paragraph
+    assignment. Existing chapters are matched by number (numbered headings)
+    or by normalized name (unnumbered sections) and reused as-is — curated
+    numbers, names and sorts are never overwritten. Only genuinely missing
+    chapters are created, which is what lets unnumbered front/back-matter
+    sections (and any not-yet-seeded numbered chapter) get parsed
+    automatically on upload/reparse.
+    """
+    cur.execute(
+        "SELECT chapter_key, chapter_number, chapter_name, chapter_sort "
+        "FROM yy_chapter WHERE volume_key = %s", (vol_key,))
+    by_number, by_name = {}, {}
+    for ck, cn, nm, st in cur.fetchall():
+        if cn is not None and cn > 0:
+            by_number[cn] = (ck, st)
+        if nm:
+            by_name[_norm_chapter_name(nm)] = (ck, st)
+
+    # Walk headings in document order, tracking the sort of the previous one so
+    # a newly-created section lands immediately AFTER its predecessor (using the
+    # predecessor's real sort, whether that row is curated or freshly made).
+    # Numbered chapters anchor to number*10 (the historical convention).
+    boundary_keys = []
+    created = 0
+    prev_sort = 0
+    for idx, number, name in boundaries:
+        hit = None
+        if number is not None and number > 0:
+            hit = by_number.get(number)
+        if hit is None and name:
+            hit = by_name.get(_norm_chapter_name(name))
+        if hit is not None:
+            ck, st = hit
+            sort = st if st is not None else prev_sort + 1
+        else:
+            sort = number * 10 if (number is not None and number > 0) else prev_sort + 1
+            page = page_map.get(idx) if page_map else None
+            cur.execute(
+                "INSERT INTO yy_chapter "
+                "(volume_key, chapter_number, chapter_name, chapter_sort, chapter_page) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING chapter_key",
+                (vol_key, number if number else 0, name or None, sort, page))
+            ck = cur.fetchone()[0]
+            if number is not None and number > 0:
+                by_number[number] = (ck, sort)
+            if name:
+                by_name[_norm_chapter_name(name)] = (ck, sort)
+            created += 1
+            logging.info(f"  + created chapter {(str(number) if number else '(section)'):>9} "
+                         f"sort={sort:>4} {name!r}")
+        prev_sort = sort
+        boundary_keys.append((idx, ck))
+    if created:
+        conn.commit()
+    logging.info(f"  Chapter rows ensured: {len(boundary_keys)} headings, {created} created")
+    return boundary_keys
+
+
+def chapter_key_for_paragraph(para_num, boundary_keys):
+    """Return chapter_key for a paragraph given ordered (idx, key) boundaries."""
+    ck = None
+    for bidx, key in boundary_keys:
+        if para_num >= bidx:
+            ck = key
+        else:
+            break
+    return ck
+
+
 def reparse_volume(vol_key, verbose=False):
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -212,9 +289,15 @@ def reparse_volume(vol_key, verbose=False):
     )
     logging.info(f"  Extracted {len(paragraphs)} content paragraphs, {len(chapter_boundaries)} chapter boundaries")
 
-    # Map chapter_number → chapter_key for this volume (yy_chapter columns
-    # were renamed yy_chapter_key → chapter_key etc when the rev triggers
-    # were added; the older reparse scripts still use the old names).
+    # Ensure a yy_chapter row exists for every heading the extractor found —
+    # numbered chapters AND unnumbered front/back-matter sections (Prelude,
+    # Afterword, Bibliography…). Missing ones are created so they get parsed
+    # automatically; existing curated rows are reused untouched. Returns the
+    # ordered (para_idx, chapter_key) boundaries used for assignment below.
+    boundary_keys = ensure_chapters_for_boundaries(conn, cur, vol_key, chapter_boundaries, page_map)
+
+    # Also keep a chapter_number → chapter_key map for the translation phase,
+    # which links rows by the numbered chapter they fall under.
     cur.execute("SELECT chapter_key, chapter_number FROM yy_chapter WHERE volume_key = %s",
                 (vol_key,))
     yy_chapter_map = {cn: ck for ck, cn in cur.fetchall()}
@@ -229,8 +312,7 @@ def reparse_volume(vol_key, verbose=False):
     para_rows = []
     for p in paragraphs:
         para_num = p['paragraph_number']
-        ch_num = get_chapter_for_paragraph(para_num, chapter_boundaries)
-        chapter_key = yy_chapter_map.get(ch_num) if ch_num else None
+        chapter_key = chapter_key_for_paragraph(para_num, boundary_keys)
         # extract_paragraphs_from_doc emits 'text_raw' (already JSON-encoded)
         # and 'text_html'. Earlier wrapper read 'raw'/'html'/'text_plain' which
         # this extractor never produces — that's what wiped 99k paragraphs to

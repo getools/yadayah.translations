@@ -171,6 +171,20 @@ def _trigger_pdf_download(page) -> str:
     # shows on top of the ribbon — they block pointer events. Sweep all
     # frames so the privacy dialog is caught regardless of where it renders.
     _dismiss_overlays(frame, page=page)
+    # Press Escape to exit any object selection (image, chart, etc.) that may be
+    # auto-selected on document load — visible when the Picture Format ribbon tab
+    # is shown on load. A selected image/object causes the File tab click to fail
+    # to open the File backstage (coordinate clicks register but backstage doesn't open).
+    try:
+        frame.click("body", timeout=3000)
+        time.sleep(0.3)
+        page.keyboard.press("Escape")
+        time.sleep(0.3)
+        page.keyboard.press("Escape")
+        time.sleep(0.5)
+        sys.stderr.write("[word-online] Escape x2 to exit any image/object selection\n")
+    except Exception:
+        pass
     # The frame itself needs to finish booting — wait for the ribbon to
     # appear (File tab is the universal first ribbon item).
     file_candidates = [
@@ -453,6 +467,11 @@ def _trigger_pdf_download(page) -> str:
             sys.stderr.write("[word-online] trying Alt+F keyboard shortcut for File backstage...\n")
             try:
                 frame.click("body", timeout=3000)
+                time.sleep(0.3)
+                page.keyboard.press("Escape")
+                time.sleep(0.3)
+                page.keyboard.press("Escape")
+                time.sleep(0.5)
             except Exception:
                 pass
             time.sleep(1)

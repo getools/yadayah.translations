@@ -33,7 +33,7 @@ function spawnNextInitWorker(PDO $db): void {
         // workers (if any) finish independently; the 2h reaper clears the rest.
         $running = (int)$db->query("SELECT COUNT(*) FROM yy_feed_item_transcript_init_job WHERE job_status='running' AND job_started IS NOT NULL")->fetchColumn();
         if ($running > 0) return;   // one at a time
-        $next = (int)$db->query("SELECT job_key FROM yy_feed_item_transcript_init_job WHERE job_status='pending' ORDER BY job_key LIMIT 1")->fetchColumn();
+        $next = (int)$db->query("SELECT job_key FROM yy_feed_item_transcript_init_job WHERE job_status='pending' ORDER BY job_priority DESC, job_key LIMIT 1")->fetchColumn();
         if (!$next) return;
         // Use the same reliable detach the STT queue uses (nohup + </dev/null);
         // a bare `setsid … &` child does NOT survive when the spawning process
@@ -41,6 +41,57 @@ function spawnNextInitWorker(PDO $db): void {
         require_once __DIR__ . '/spawn-helpers.php';
         spawnCappedWorker(__DIR__ . '/admin-transcript-init-worker.php', [$next], '/tmp/transcript-init-' . $next . '.log');
     } catch (\Throwable $e) { /* best-effort dispatch */ }
+}
+
+/**
+ * Canonical self-hosted baseline suite for the multi-engine amalgamation. A new
+ * feed item generates ALL of these so maybeAutoBuildEditable() can build a full
+ * consensus: three word-level spines (whisperx/whisper/parakeet) plus segment
+ * refs incl. speaker diarisation. All free/self-hosted (Puget GPU) — no paid API.
+ * Tune the new-item default in one place here.
+ *
+ * ⚠ gpu-canary-1b-flash and gpu-qwen2-audio were REMOVED (2026-07-06): they
+ * hallucinate common words ("Yah" for "the", "Not" for "no", "there'll" for
+ * pauses) and were poisoning the consensus. They are also excluded from the
+ * vote/reconcile at use-time (cfDeniedEngines), so generating them was pure
+ * wasted GPU. See reference_transcript_engine_reliability_and_denylist.
+ */
+const TRANSCRIPT_BASELINE_SUITE = [
+    'gpu-whisperx-word', 'gpu-whisper-large-v3-word', 'gpu-parakeet-tdt-0.6b-v2-word',
+    'gpu-whisperx', 'gpu-parakeet-tdt-0.6b-v2', 'gpu-whisperx-diarize',
+];
+
+/**
+ * Enqueue the full baseline suite for a new feed item and opt it in for the
+ * consensus editable build, so every new item ends up with an AMALGAMATED
+ * transcript (L1-L4) rather than a single-engine one. Idempotent: supersedes
+ * any same-model job still in flight. Returns the FIRST queued job key (for the
+ * caller to spawn/kick the single STT worker, which then chains through the
+ * rest); 0 if nothing was queued. The consensus itself auto-fires from
+ * maybeAutoBuildEditable() in transcript-worker.php once the last baseline lands.
+ */
+function autoEnqueueBaselineSuite(PDO $db, int $itemKey, ?int $userKey = null, int $priority = 1): int {
+    // Opt in for the auto consensus build (default row is optin=false).
+    $db->prepare("INSERT INTO yy_feed_item_editable_optin (feed_item_key, optin, dtime)
+                  VALUES (?, TRUE, now())
+                  ON CONFLICT (feed_item_key) DO UPDATE SET optin = TRUE, dtime = now()")
+       ->execute([$itemKey]);
+    $supersede = $db->prepare("UPDATE yy_feed_item_transcript_job
+                                  SET job_status='cancelled', job_completed_dtime=NOW(),
+                                      job_message='superseded by newer run of same model'
+                                WHERE feed_item_key=? AND job_model=? AND job_status IN ('pending','running')");
+    $ins = $db->prepare("INSERT INTO yy_feed_item_transcript_job
+                             (feed_item_key, job_status, job_message, user_key, job_model, job_priority)
+                         VALUES (?, 'pending', ?, ?, ?, ?)
+                         RETURNING feed_item_transcript_job_key");
+    $firstKey = 0;
+    foreach (TRANSCRIPT_BASELINE_SUITE as $model) {
+        $supersede->execute([$itemKey, $model]);
+        $ins->execute([$itemKey, 'Auto baseline suite (new-item amalgamation)', $userKey, $model, $priority]);
+        $k = (int)$ins->fetchColumn();
+        if (!$firstKey) $firstKey = $k;
+    }
+    return $firstKey;
 }
 
 /**
@@ -90,6 +141,11 @@ function getFeedItemKeyCluster(PDO $db, int $itemKey, bool $confirmedOnly = fals
  *  - punctuation-only changes
  *  - very short (<2 chars) or very long (>60 chars) tokens
  *  - pure case changes (e.g. "yah" → "Yah")
+ *  - pairs whose wrong side is a common English function word (never a real
+ *    correction; a same-length reword can pair one with an unrelated word)
+ *
+ * New pairs are learned INACTIVE and only activate on a second independent
+ * sighting (count >= 2), so a single reword can never poison the live dict.
  */
 function autoLearnCorrections(PDO $db, string $oldText, string $newText): void {
     if ($oldText === $newText) return;
@@ -98,13 +154,38 @@ function autoLearnCorrections(PDO $db, string $oldText, string $newText): void {
     $newWords = preg_split('/(\s+)/u', $newText, -1, PREG_SPLIT_DELIM_CAPTURE);
     if (count($oldWords) !== count($newWords)) return; // structural change, skip
 
+    // Common English function words never legitimately sit on the WRONG side of
+    // a real correction (which is a mishearing → proper noun / Hebrew term).
+    // A positional word-diff of a same-length reword can coincidentally pair one
+    // of these with an unrelated word (e.g. "were" ↔ "ultimately", "No" ↔ "Not")
+    // and — once active — that pair globally rewrites a common word everywhere.
+    // Refuse to learn any pair whose wrong side is one of them.
+    static $stop = [
+        'a'=>1,'an'=>1,'and'=>1,'are'=>1,'as'=>1,'at'=>1,'be'=>1,'been'=>1,'but'=>1,
+        'by'=>1,'can'=>1,'could'=>1,'did'=>1,'do'=>1,'does'=>1,'for'=>1,'from'=>1,
+        'had'=>1,'has'=>1,'have'=>1,'he'=>1,'her'=>1,'him'=>1,'his'=>1,'i'=>1,'in'=>1,
+        'is'=>1,'it'=>1,'its'=>1,'me'=>1,'my'=>1,'no'=>1,'nor'=>1,'not'=>1,'of'=>1,
+        'on'=>1,'or'=>1,'our'=>1,'she'=>1,'so'=>1,'than'=>1,'that'=>1,'the'=>1,
+        'their'=>1,'them'=>1,'then'=>1,'there'=>1,'they'=>1,'this'=>1,'to'=>1,
+        'was'=>1,'we'=>1,'were'=>1,'will'=>1,'with'=>1,'would'=>1,'you'=>1,'your'=>1,
+    ];
+
+    // New pairs are learned INACTIVE and only graduate to active once a SECOND
+    // independent edit makes the SAME change (count >= 2). A single same-length
+    // reword can no longer poison the live dictionary; a genuine recurring fix
+    // still activates on its next sighting.
+    // A rule an admin/audit deliberately killed as bogus is marked
+    // origin='blocked'; it must STAY dead — never let a recurring bad edit
+    // resurrect it via the count>=2 graduation below.
     $upsert = $db->prepare("
-        INSERT INTO yy_transcript_correction (correction_wrong, correction_right)
-        VALUES (?, ?)
+        INSERT INTO yy_transcript_correction (correction_wrong, correction_right, correction_active_flag)
+        VALUES (?, ?, FALSE)
         ON CONFLICT (correction_wrong, correction_right) DO UPDATE
             SET correction_count = yy_transcript_correction.correction_count + 1,
                 correction_last_seen_dtime = NOW(),
-                correction_active_flag = TRUE
+                correction_active_flag = CASE
+                    WHEN yy_transcript_correction.correction_origin = 'blocked' THEN FALSE
+                    ELSE (yy_transcript_correction.correction_count + 1) >= 2 END
     ");
 
     for ($i = 0; $i < count($oldWords); $i++) {
@@ -116,6 +197,8 @@ function autoLearnCorrections(PDO $db, string $oldText, string $newText): void {
         if (mb_strlen($a) > 60 || mb_strlen($b) > 60) continue;
         // Skip pure case changes — capitalization preferences clutter the dictionary
         if (mb_strtolower($a) === mb_strtolower($b)) continue;
+        // Never learn a rule that would globally rewrite a common function word.
+        if (isset($stop[mb_strtolower($a)])) continue;
         $upsert->execute([$a, $b]);
     }
 }
@@ -134,7 +217,12 @@ function autoLearnCorrections(PDO $db, string $oldText, string $newText): void {
 function applyCorrectionDictionary(PDO $db, string $text): string {
     static $cache = null;
     if ($cache === null) {
-        $stmt = $db->query("SELECT correction_wrong, correction_right, correction_case_sensitive, correction_word_boundary FROM yy_transcript_correction WHERE correction_active_flag = TRUE ORDER BY correction_count DESC, length(correction_wrong) DESC");
+        // Only 'human' corrections (deliberate dictionary / "apply to all"
+        // entries) are trusted for blind global replacement. Incidentally
+        // auto-learned ('learned') rules are advisory-only and must never
+        // rewrite text unconditionally — they caused e.g. "were"->"ultimately"
+        // and "it"->"there" corpus-wide. Multi-baseline consensus handles those.
+        $stmt = $db->query("SELECT correction_wrong, correction_right, correction_case_sensitive, correction_word_boundary FROM yy_transcript_correction WHERE correction_active_flag = TRUE AND correction_origin = 'human' ORDER BY correction_count DESC, length(correction_wrong) DESC");
         $cache = $stmt->fetchAll();
     }
     foreach ($cache as $c) {

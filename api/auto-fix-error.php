@@ -57,6 +57,10 @@ if (is_file($PAUSE_FLAG)) {
     if ($age >= 0 && $age < $PAUSE_TTL) {
         $reason = sprintf('Auto-fix paused by dev flag (age %ds < %ds). Skipping.', $age, $PAUSE_TTL);
         echo "[" . date('c') . "] $reason\n";
+        // Heartbeat: cron is alive even during a dev-session pause. Without this,
+        // the "Claude auto-fix cron alive" monitor fires after 5h of continuous
+        // pausing (VS Code sessions re-touch PAUSED every 2h, extending the pause).
+        if ($IS_CRON) @file_put_contents("$STATUS_DIR/last_run.txt", (string)time());
         if ($STATUS_FILE) {
             writeStatus($STATUS_FILE, [
                 'state' => 'paused',
@@ -119,6 +123,7 @@ $afInt = function (string $code, int $default, int $min, int $max) use ($afSetti
 if (($afSettings['paused'] ?? '0') === '1') {
     $reason = 'Auto-fix paused via admin Settings. Skipping.';
     echo "[" . date('c') . "] $reason\n";
+    if ($IS_CRON) @file_put_contents("$STATUS_DIR/last_run.txt", (string)time());
     writeStatus($STATUS_FILE, ['state' => 'paused', 'started' => $STARTED_AT, 'finished' => date('c'), 'total' => 0, 'processed' => 0, 'log_tail' => $reason]);
     exit(0);
 }

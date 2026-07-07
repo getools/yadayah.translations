@@ -254,10 +254,36 @@ process_job() {
     if [ -f "$PDF_DIR/$pdf_name" ] && [ -s "$PDF_DIR/$pdf_name" ] && [ ! "$docx_path" -nt "$PDF_DIR/$pdf_name" ]; then
         log "PDF already on disk — skipping conversion (retry path): $PDF_DIR/$pdf_name"
     else
+        # ── Embed Yada custom fonts (Yada Towrah / Jupiter-Yada / Semitic
+        #    Early) into a transient copy of the docx so Microsoft's
+        #    DOCX→PDF renderers reproduce the paleo-Hebrew glyphs instead of
+        #    substituting a system face. Microsoft renders on its own
+        #    servers, which do not have these fonts; a glyph only survives
+        #    the conversion if the font is physically embedded in the docx.
+        #    Most YY source docs reference these fonts but embed nothing, so
+        #    the Tetragrammaton (HWHY, set in Yada Towrah) renders wrong.
+        #    The original docx is left untouched — the text parser reads it
+        #    separately by volume_key. On embed failure we fall back to the
+        #    original so a font glitch never blocks publication.
+        local conv_docx="$docx_path"
+        local embed_docx="/tmp/_embed-$$-${docx_name}"
+        trap 'rm -f "$embed_docx"' RETURN
+        local embed_output embed_rc=0
+        embed_output=$(python3 /opt/yada-www/parsers/embed_fonts.py \
+            "$docx_path" "$embed_docx" 2>&1) || embed_rc=$?
+        echo "$embed_output" >> /var/log/book-pipeline.log
+        if [ "$embed_rc" -eq 0 ] && [ -s "$embed_docx" ]; then
+            conv_docx="$embed_docx"
+            log "Embedded Yada fonts for $docx_name: $(echo "$embed_output" | grep -i 'fonts embedded' | sed 's/^ *//')"
+        else
+            rm -f "$embed_docx"
+            log "Font embedding failed for $docx_name (rc=$embed_rc) — converting original docx (fonts may substitute)"
+        fi
+
         # 1a. Primary: Microsoft Graph (fast, ~30s, but 60s server-side cap)
         local graph_output graph_rc=0
         graph_output=$(/opt/yada-www/parsers/docx_to_pdf_via_graph.py \
-            --input  "$docx_path" \
+            --input  "$conv_docx" \
             --output "$PDF_DIR/$pdf_name" 2>&1) || graph_rc=$?
         graph_rc=${graph_rc:-0}
         echo "$graph_output" >> /var/log/book-pipeline.log
@@ -289,7 +315,7 @@ process_job() {
             update_status "$volume_key" "running" "$wol_reason — falling back to Word for the Web"
             local wol_output wol_rc=0
             wol_output=$(/opt/yada-www/parsers/docx_to_pdf_via_word_online.py \
-                --input  "$docx_path" \
+                --input  "$conv_docx" \
                 --output "$PDF_DIR/$pdf_name" 2>&1) || wol_rc=$?
             wol_rc=${wol_rc:-0}
             echo "$wol_output" >> /var/log/book-pipeline.log
