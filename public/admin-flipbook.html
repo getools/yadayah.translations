@@ -125,8 +125,10 @@ var SECTIONS = [
     },
     {
         title: 'Audio Player Colors',
-        desc: 'Colors for the TTS audio player that appears at the bottom of every flipbook page — the round speaker & play buttons, their icons, the progress/volume bars, and the read-along text highlights. Changes apply on the next flipbook pageview.',
+        desc: 'Colors and sizing for the TTS audio player that appears at the bottom of every flipbook page — the round speaker & play buttons, their icons, the progress/volume bars, and the read-along text highlights. Changes apply on the next flipbook pageview.',
         fields: [
+            { code: 'player-btn-size',         label: 'Button diameter (px)',    type: 'number', default: '43', min: 20, max: 120 },
+            { code: 'player-btn-border-width', label: 'Circle border width (px)',type: 'number', default: '1',  min: 0,  max: 20 },
             { code: 'player-btn-bg',         label: 'Circle background',        type: 'color', default: '#1f3550' },
             { code: 'player-btn-bg-hover',   label: 'Circle hover background',  type: 'color', default: '#28456a' },
             { code: 'player-btn-border',     label: 'Circle border',            type: 'color', default: '#2a4d70' },
@@ -158,7 +160,8 @@ function render(values) {
             } else if (f.type === 'textarea') {
                 input = '<textarea data-code="' + esc(f.code) + '" rows="3">' + esc(v) + '</textarea>';
             } else if (f.type === 'number') {
-                input = '<input type="number" data-code="' + esc(f.code) + '" value="' + esc(v) + '" min="6" max="200" style="width:120px;">';
+                var mn = (f.min != null) ? f.min : 6, mx = (f.max != null) ? f.max : 200;
+                input = '<input type="number" data-code="' + esc(f.code) + '" value="' + esc(v) + '" min="' + esc(mn) + '" max="' + esc(mx) + '" style="width:120px;">';
             } else {
                 input = '<input type="text" data-code="' + esc(f.code) + '" value="' + esc(v) + '">';
             }

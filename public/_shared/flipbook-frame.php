@@ -27,7 +27,7 @@ if (!isset($FB) || !is_array($FB)) {
 // for every visitor — logged in or anonymous. config.php flips the
 // Content-Type to JSON for API responses; this file is HTML, so re-assert
 // it (same pattern as public/test/page.php).
-require_once __DIR__ . '/../../api/config.php';
+require_once __DIR__ . '/../api/config.php';
 if (!headers_sent()) header('Content-Type: text/html; charset=utf-8');
 
 $PLAYER_VAR_MAP = [
@@ -55,9 +55,22 @@ try {
     $ps->execute();
     $decls = [];
     foreach ($ps->fetchAll() as $r) {
-        $var = $PLAYER_VAR_MAP[$r['setting_code']] ?? null;
         $val = trim((string)($r['setting_value'] ?? ''));
-        if (!$var || $val === '') continue;
+        if ($val === '') continue;
+        // Pixel sizes are unitless integers (consumed as calc(var * 1px) in
+        // flipbook-tts.js), so they're validated/clamped separately from the
+        // color vars below. Range clamps keep the widget usable.
+        $SIZE_VARS = [
+            'player-btn-size'         => ['--fb-tts-btn-size',         20, 120],
+            'player-btn-border-width' => ['--fb-tts-btn-border-width',  0,  20],
+        ];
+        if (isset($SIZE_VARS[$r['setting_code']])) {
+            [$sizeVar, $lo, $hi] = $SIZE_VARS[$r['setting_code']];
+            if (ctype_digit($val)) $decls[] = $sizeVar . ':' . max($lo, min($hi, (int)$val));
+            continue;
+        }
+        $var = $PLAYER_VAR_MAP[$r['setting_code']] ?? null;
+        if (!$var) continue;
         // Only allow plain color literals — never arbitrary CSS (injection guard).
         if (!preg_match('/^(#[0-9a-fA-F]{3,8}|rgba?\([0-9.,\s]+\))$/', $val)) continue;
         $decls[] = $var . ':' . $val;
@@ -92,7 +105,7 @@ $pageRatio = isset($FB['pageRatio']) ? (float)$FB['pageRatio'] : null;
 $JS_V  = [
     'viewer'    => 31,
     'bookmarks' => 21,
-    'tts'       => 40,
+    'tts'       => 41,
 ];
 $CSS_V = 6;
 

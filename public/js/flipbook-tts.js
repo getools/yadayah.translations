@@ -52,7 +52,7 @@
             // currently-visible page width (same horizontal extent as the
             // old standalone progress bar). Inside, left-to-right:
             // [volume slider] [progress scrubber] [play/pause button].
-            '.fb-tts-player { position: fixed; z-index: 12; height: 43px;',
+            '.fb-tts-player { position: fixed; z-index: 12; height: calc(var(--fb-tts-btn-size, 43) * 1px);',
             '                 display: flex; align-items: center; gap: 10px;',
             '                 pointer-events: none; /* children re-enable */ }',
             '.fb-tts-player > * { pointer-events: auto; }',
@@ -61,10 +61,10 @@
             // on outside click. Same circular footprint as the play
             // button so the player widget reads as a tidy three-control
             // strip when collapsed.
-            '.fb-tts-vol-wrap { position: relative; flex: 0 0 43px;',
+            '.fb-tts-vol-wrap { position: relative; flex: 0 0 calc(var(--fb-tts-btn-size, 43) * 1px);',
             '                   display: flex; align-items: center; justify-content: center; }',
-            '.fb-tts-vol-btn { width: 43px; height: 43px; border-radius: 50%;',
-            '                  background: var(--fb-tts-btn-bg, #1f3550); color: var(--fb-tts-icon-color, #cfe1ff); border: 1px solid var(--fb-tts-btn-border, #2a4d70);',
+            '.fb-tts-vol-btn { width: calc(var(--fb-tts-btn-size, 43) * 1px); height: calc(var(--fb-tts-btn-size, 43) * 1px); border-radius: 50%;',
+            '                  background: var(--fb-tts-btn-bg, #1f3550); color: var(--fb-tts-icon-color, #cfe1ff); border: calc(var(--fb-tts-btn-border-width, 1) * 1px) solid var(--fb-tts-btn-border, #2a4d70);',
             '                  display: flex; align-items: center; justify-content: center;',
             '                  cursor: pointer; padding: 0;',
             '                  transition: background 0.15s, transform 0.1s; }',
@@ -102,8 +102,8 @@
             '              background: var(--fb-tts-thumb-bg, #cfe1ff); border: 1px solid var(--fb-tts-btn-border, #2a4d70); cursor: pointer;',
             '              box-shadow: 0 1px 3px rgba(0,0,0,0.4); }',
             // Play/Pause button — flex item, fixed circle on the right.
-            '.fb-tts-btn { flex: 0 0 43px; height: 43px; border-radius: 50%;',
-            '              background: var(--fb-tts-btn-bg, #1f3550); color: var(--fb-tts-icon-color, #cfe1ff); border: 1px solid var(--fb-tts-btn-border, #2a4d70);',
+            '.fb-tts-btn { flex: 0 0 calc(var(--fb-tts-btn-size, 43) * 1px); height: calc(var(--fb-tts-btn-size, 43) * 1px); border-radius: 50%;',
+            '              background: var(--fb-tts-btn-bg, #1f3550); color: var(--fb-tts-icon-color, #cfe1ff); border: calc(var(--fb-tts-btn-border-width, 1) * 1px) solid var(--fb-tts-btn-border, #2a4d70);',
             '              display: flex; align-items: center; justify-content: center;',
             '              cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.35);',
             '              transition: opacity 0.2s, transform 0.1s, background 0.15s; }',
