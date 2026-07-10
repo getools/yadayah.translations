@@ -23,6 +23,16 @@ if (!$audioKey) {
     exit(2);
 }
 
+// Final assembly builds a whole-chapter MP3 in memory-heavy steps (byte-concat
+// + a full ffprobe packet index used to re-derive marker offsets). A multi-hour
+// chapter has ~1M audio packets, so the default 128M PHP memory_limit fataled
+// mid-assembly — AFTER writing the concat but BEFORE remux/completion — leaving
+// the row stuck 'running' at ~97% forever (the watchdog just respawned it into
+// the same fatal). This is a single, GPU-capped background job on a large-RAM
+// host, so give it headroom and no wall-clock cap.
+ini_set('memory_limit', '1024M');
+set_time_limit(0);
+
 // This is a background BATCH job: tell the GPU engine (via gpu-client.php's
 // gpuSynthesize) to yield the single shared GPU to interactive auditions /
 // previews so they never queue behind a whole chapter build. The engine's
@@ -335,6 +345,20 @@ $pStmt = $db->prepare("SELECT paragraph_key, paragraph_number, paragraph_page, p
 $pStmt->execute([$chapterKey]);
 $paragraphs = $pStmt->fetchAll();
 
+// ── Full-chapter paragraph numbering (for the live progress message) ──
+// The Books-tab paragraph panel numbers EVERY paragraph in the chapter
+// 1..N by position (its "#" column) and reports the full count as the
+// total — including the continuations, tables and skip-page rows that the
+// synth loop below coalesces or filters out. Capture that full ordering
+// NOW, before the coalesce/filter shrinks $paragraphs, so the "Paragraph
+// N / M" progress the worker writes lines up exactly with what the admin
+// sees when they expand the chapter (the "working item" indicator jumps to
+// that row by position). $fullParaPos maps paragraph_number → 1-based
+// position across the whole chapter; $fullChapterCount is the total.
+$fullChapterCount = count($paragraphs);
+$fullParaPos = [];
+foreach ($paragraphs as $fi => $fp) { $fullParaPos[(int)$fp['paragraph_number']] = $fi + 1; }
+
 // ── Coalesce page-break continuations ────────────────────────────────
 // A paragraph with paragraph_is_continuation=true is the tail of a
 // single logical paragraph that wrapped across a page break in the
@@ -422,6 +446,17 @@ if ($skipped > 0) {
 }
 $nPara = count($paragraphs);
 if (!$nPara) completeEmpty($db, $audioKey, "No narratable content (bibliography / back-matter / table / skip pages) — nothing to synthesize; chapter_key=$chapterKey, $beforeCount paragraph(s) all filtered.");
+
+// Map a filtered (synth-loop) index to the paragraph's full-chapter
+// position, so progress messages report the same numbering the expanded
+// Books-tab panel shows. Falls back to filtered index + 1 if a number is
+// somehow absent from the map. $paragraphs is the post-filter list here.
+$fullPosOfFiltered = function (int $filteredIdx) use (&$paragraphs, $fullParaPos, $fullChapterCount) {
+    if ($filteredIdx < 0) return 0;
+    if ($filteredIdx >= count($paragraphs)) return $fullChapterCount;
+    $pn = (int)$paragraphs[$filteredIdx]['paragraph_number'];
+    return $fullParaPos[$pn] ?? ($filteredIdx + 1);
+};
 
 // ── Series 07: chapter-intro Islamic-source detection ──────────────────
 // Series 07 books ("God Damn Religion") open every chapter with a bold
@@ -584,6 +619,73 @@ for ($k = 0; $k < $nPara; $k++) {
     $k = $end; // skip past the block so we don't re-detect inside it
 }
 
+// ── Quran multi-translation block detection ────────────────────────────
+// A single Quran verse is sometimes quoted with several named English
+// translations, each on its own line: "Yusuf Ali: …", "Pickthal: …",
+// "Ahmed Ali: …", etc. (Surah 111 in s07v02 p213-214; Al-Ikhlas in
+// several volumes). Each such line is tagged with its per-translator
+// category (a child of 'quran' in ttsCategories) so it reads in that
+// translator's voice, falling back child → quran → islam when the child
+// has no configured voice. The verse-citation line itself ("Quran
+// 111.001") is data-style="quran" and already routes to the Quran voice
+// through segmentParagraph.
+//
+// Runs for ALL series (these blocks also appear in s06). Page-break
+// continuation tails were already merged into their head paragraph by the
+// coalesce pass above, so a translation that wraps a page is one
+// contiguous line here — no continuation handling needed.
+//
+// Rule (verified corpus-wide: 7 blocks / 56 lines, 0 misses / 0 false
+// positives): a translation line is a paragraph whose plain text begins
+// with an optional "The " + a translator name from the CLOSED dictionary
+// below, then ":". A block is a run of >=2 such lines; a verse citation
+// or any other paragraph ends the run. The >=2 requirement stops a stray
+// prose colon ("Muslim: they said…") from hijacking a lone paragraph.
+static $QURAN_TRANSLATORS = [
+    'Yusuf Ali'   => 'yusuf_ali',
+    'Noble Quran' => 'noble_quran',
+    'Pickthal'    => 'pickthal',
+    'Shakir'      => 'shakir',
+    'Ahmed Ali'   => 'ahmed_ali',
+];
+$qtAlt = implode('|', array_map(function ($n) { return preg_quote($n, '/'); },
+    array_keys($QURAN_TRANSLATORS)));
+$qtCat = function (string $plain) use ($qtAlt, $QURAN_TRANSLATORS): ?string {
+    if (preg_match('/^\s*(?:The\s+)?(' . $qtAlt . ')\s*:/u', $plain, $m)) {
+        return $QURAN_TRANSLATORS[$m[1]];
+    }
+    // Verbose Word-by-Word form: "The Quran Word By Word is also mistaken:"
+    if (preg_match('/^\s*(?:The\s+)?(?:Quran\s+)?Word[\s-]?by[\s-]?Word\b[^:]{0,40}:/ui', $plain)) {
+        return 'word_by_word';
+    }
+    return null;
+};
+$qtRun = [];  // pending run: list of [paragraph_index, category]
+$qtFlush = function () use (&$qtRun, &$introOverrides, &$paragraphs) {
+    if (count($qtRun) >= 2) {
+        foreach ($qtRun as $e) {
+            $pn = (int)$paragraphs[$e[0]]['paragraph_number'];
+            // Don't clobber a category an earlier prepass already assigned.
+            if (!isset($introOverrides[$pn])) $introOverrides[$pn] = $e[1];
+        }
+        fwrite(STDERR, sprintf(
+            "quran translations: %d line(s) tagged as per-translator voices (paras %d..%d)\n",
+            count($qtRun),
+            (int)$paragraphs[$qtRun[0][0]]['paragraph_number'],
+            (int)$paragraphs[$qtRun[count($qtRun) - 1][0]]['paragraph_number']
+        ));
+    }
+    $qtRun = [];
+};
+for ($k = 0; $k < $nPara; $k++) {
+    $p = $paragraphs[$k];
+    if (isset($introOverrides[(int)$p['paragraph_number']])) { $qtFlush(); continue; }
+    $cat = $qtCat(trim((string)$p['paragraph_text_plain']));
+    if ($cat !== null) { $qtRun[] = [$k, $cat]; continue; }
+    $qtFlush();
+}
+$qtFlush();
+
 // Clear any stale markers for this audio row — easier than upserting
 // across schema changes and the table is small.
 $db->prepare("DELETE FROM yy_tts_audio_marker WHERE tts_audio_key = ?")->execute([$audioKey]);
@@ -740,7 +842,7 @@ for ($i = 0; $i < $nPara; $i++) {
 if ($startIdx > 0) {
     fwrite(STDERR, "resuming from paragraph $startIdx (found $startIdx contiguous cached parts)\n");
     updateAudio($db, $audioKey, [
-        'tts_audio_message'  => "Resuming at paragraph $startIdx / $nPara",
+        'tts_audio_message'  => 'Resuming at paragraph ' . $fullPosOfFiltered($startIdx) . ' / ' . $fullChapterCount,
         'tts_audio_progress' => (int)floor($startIdx / max(1, $nPara) * 95) + 2,
     ]);
 }
@@ -908,7 +1010,7 @@ foreach ($paragraphs as $idx => $p) {
             $pct = (int)floor(($idx + 1) / max(1, $nPara) * 95) + 2;
             updateAudio($db, $audioKey, [
                 'tts_audio_progress' => min(99, $pct),
-                'tts_audio_message'  => sprintf('Paragraph %d / %d (synthed %d, reused %d, %d fails)', $idx + 1, $nPara, $synthCount, $reusedCount, $failureCount),
+                'tts_audio_message'  => sprintf('Paragraph %d / %d (synthed %d, reused %d, %d fails)', $fullPosOfFiltered($idx), $fullChapterCount, $synthCount, $reusedCount, $failureCount),
             ]);
             continue;
         }
@@ -930,7 +1032,7 @@ foreach ($paragraphs as $idx => $p) {
         $pct = (int)floor($idx / max(1, $nPara) * 95) + 2;
         updateAudio($db, $audioKey, [
             'tts_audio_progress'   => min(99, $pct),
-            'tts_audio_message'    => sprintf('Paused at paragraph %d / %d', $idx, $nPara),
+            'tts_audio_message'    => sprintf('Paused at paragraph %d / %d', $fullPosOfFiltered($idx), $fullChapterCount),
             'tts_audio_worker_pid' => null,
         ]);
         fwrite(STDERR, "paused at idx=$idx — cached " . count(glob($partsDir . '/p*.mp3') ?: []) . " parts\n");
@@ -961,7 +1063,7 @@ foreach ($paragraphs as $idx => $p) {
         updateAudio($db, $audioKey, [
             'tts_audio_status'     => 'pending',
             'tts_audio_progress'   => min(99, $pct),
-            'tts_audio_message'    => sprintf('Yielded at paragraph %d / %d — earlier redo (#%d) jumps ahead', $idx, $nPara, $earlierKey),
+            'tts_audio_message'    => sprintf('Yielded at paragraph %d / %d — earlier redo (#%d) jumps ahead', $fullPosOfFiltered($idx), $fullChapterCount, $earlierKey),
             'tts_audio_worker_pid' => null,
         ]);
         fwrite(STDERR, "yielding at idx=$idx to earlier pending build $earlierKey\n");
@@ -981,46 +1083,63 @@ foreach ($paragraphs as $idx => $p) {
     // "Chapter N <pause> <title> <pause>" line so listeners hear the
     // chapter number announced. The configured __chapter_before__,
     // __chapter_between__, and __chapter_after__ pauses wrap the line.
-    if ($idx === 0 && $chNum > 0) {
-        // Detect which YY structure variant this paragraph follows:
-        //
-        //   (A) Legacy:  idx=0 is JUST the chapter number ("1"), idx=1 is
-        //                the italic title line ("Babel ~ Confusion").
-        //   (B) Newer:   idx=0 merges the number AND the title on one
-        //                line ("1 Babel ~ Confusion"), idx=1 is the
-        //                italic *subtitle* ("Corrupting by Commingling…").
-        //
-        // Found in s02v03 chapter 1: paragraph #44 = "1 Babel ~ Confusion",
-        // paragraph #45 = "Corrupting by Commingling…". The old code path
-        // dropped everything after the number, so the title was never
-        // spoken (idx=1 was the subtitle, not the title — nothing read it).
-        //
-        // Rule: strip the leading "<num><sep>" prefix from the heading
-        // paragraph; if anything alphabetic remains, that's the title
-        // and it gets read after the "Chapter N" announcement. If only
-        // the number was present, the title comes through idx=1 as before.
-        $headingPlain = trim(preg_replace('/\s+/u', ' ', strip_tags($rawHtml)));
-        $remainder    = preg_replace('/^\s*' . preg_quote((string)$chNum, '/') . '\s*[.\-:)]?\s*/u', '', $headingPlain);
-        if ($remainder !== '' && $remainder !== $headingPlain && preg_match('/[\p{L}]/u', $remainder)) {
-            // (B) Newer structure — read "Chapter N" then the merged title.
+    // Chapter heading (idx 0). Which treatment it gets is decided by the
+    // heading's OWN text, not chapter_number:
+    //
+    //   • Heading OPENS WITH A NUMBER → a numbered chapter. Announce
+    //     "Chapter N" using that number. Two sub-structures:
+    //       (A) Legacy:  idx=0 is JUST the number ("6"); the title is idx=1
+    //                    ("A Voice") and the subhead handler wraps it.
+    //       (B) Newer:   idx=0 merges number AND title ("1 Babel ~ Confusion");
+    //                    read "Chapter 1" then "Babel ~ Confusion". (idx=1 is
+    //                    then the subtitle.) Found in s02v03 chapter 1.
+    //   • Heading is NON-NUMERIC ("Afterword", "Topical Appendix",
+    //     "Bibliography") → a NAMED front/back-matter section. Do NOT say
+    //     "Chapter N"; fall through to the normal path so the name is spoken
+    //     verbatim as written.
+    //
+    // Keyed on the heading TEXT (not $chNum) so named sections read correctly
+    // regardless of the ordinal we store for sorting/display.
+    $headingPlain = ($idx === 0) ? trim(preg_replace('/\s+/u', ' ', strip_tags($rawHtml))) : '';
+    if ($idx === 0 && preg_match('/^(\d+)\s*[.\-:)]?\s*(.*)$/u', $headingPlain, $hm)) {
+        $headNum   = $hm[1];
+        $remainder = trim($hm[2]);
+        if ($remainder !== '' && preg_match('/[\p{L}]/u', $remainder)) {
+            // (B) Number AND title on one line — "Chapter N" then the title.
             $headingText =
                   "\x01PAUSE_0_{$pauseChapBefore}\x01"
-                . "Chapter $chNum"
+                . "Chapter $headNum"
                 . "\x01PAUSE_0_{$pauseChapBetween}\x01"
                 . $remainder
                 . "\x01PAUSE_0_{$pauseChapAfter}\x01";
         } else {
-            // (A) Legacy structure — heading paragraph IS just the number;
-            // the title is in idx=1 and will be wrapped by the subhead handler.
+            // (A) Number-only heading — title comes through idx=1.
             $headingText =
                   "\x01PAUSE_0_{$pauseChapBefore}\x01"
-                . "Chapter $chNum"
+                . "Chapter $headNum"
                 . "\x01PAUSE_0_{$pauseChapAfter}\x01";
         }
         // Advance the segmentation carry through the heading's real markup so
         // an open delimiter can't leak into the body (see the introOverride
         // note below). Headings sit at chapter start so this is normally a
         // no-op, but it keeps the carry contract identical across all branches.
+        segmentParagraph($rawHtml, $carryState);
+        $segs = [['category' => 'main', 'text' => $headingText]];
+    } else if ($idx === 0 && $headingPlain !== '') {
+        // Named front/back-matter heading ("AFTERWORD", "TOPICAL APPENDIX",
+        // "BIBLIOGRAPHY"). Read the name verbatim — but normalize an ALL-CAPS
+        // heading to Title Case first, so the engine voices it as a word
+        // ("Afterword") instead of mis-reading the all-caps run and prepending
+        // a spurious letter ("A Afterword"). Mixed-case headings are left
+        // exactly as written. Wrap in the chapter pauses like the numbered
+        // branch for a consistent lead-in / lead-out.
+        $named = (mb_strtoupper($headingPlain, 'UTF-8') === $headingPlain)
+                 ? mb_convert_case($headingPlain, MB_CASE_TITLE, 'UTF-8')
+                 : $headingPlain;
+        $headingText =
+              "\x01PAUSE_0_{$pauseChapBefore}\x01"
+            . $named
+            . "\x01PAUSE_0_{$pauseChapAfter}\x01";
         segmentParagraph($rawHtml, $carryState);
         $segs = [['category' => 'main', 'text' => $headingText]];
     } else if (isset($introOverrides[(int)$p['paragraph_number']])) {
@@ -1212,7 +1331,7 @@ foreach ($paragraphs as $idx => $p) {
     $pct = (int)floor(($idx + 1) / max(1, $nPara) * 95) + 2;
     updateAudio($db, $audioKey, [
         'tts_audio_progress'      => min(99, $pct),
-        'tts_audio_message'       => sprintf('Paragraph %d / %d (synthed %d, reused %d, %d fails)', $idx + 1, $nPara, $synthCount, $reusedCount, $failureCount),
+        'tts_audio_message'       => sprintf('Paragraph %d / %d (synthed %d, reused %d, %d fails)', $fullPosOfFiltered($idx), $fullChapterCount, $synthCount, $reusedCount, $failureCount),
         'tts_audio_chars_billed'  => $charsBilled,
     ]);
 }
@@ -1246,17 +1365,23 @@ fclose($fh);
 // Best-effort: on any failure the loop-derived offsets simply stand.
 $ffprobeForMarkers = trim(shell_exec('which ffprobe 2>/dev/null') ?: '');
 if ($ffprobeForMarkers) {
-    $pkOut = shell_exec(escapeshellcmd($ffprobeForMarkers)
+    // Stream the packet table line-by-line via popen rather than slurping the
+    // whole ~25MB CSV into a string and explode()-ing it into a ~1M-element
+    // array: for a multi-hour chapter that transient array alone blew the old
+    // memory_limit. Streaming keeps only the two parallel index arrays.
+    $pkPos = []; $pkPts = [];
+    $pkPipe = popen(escapeshellcmd($ffprobeForMarkers)
         . ' -v error -select_streams a:0 -show_entries packet=pts_time,pos -of csv=p=0 '
-        . escapeshellarg($finalPath) . ' 2>/dev/null');
-    if ($pkOut) {
-        $pkPos = []; $pkPts = [];
-        foreach (explode("\n", $pkOut) as $ln) {
+        . escapeshellarg($finalPath) . ' 2>/dev/null', 'r');
+    if ($pkPipe) {
+        while (($ln = fgets($pkPipe)) !== false) {
+            $ln = rtrim($ln, "\r\n");
             if ($ln === '') continue;
             $c = explode(',', $ln);
             if (count($c) < 2 || !is_numeric($c[0]) || !is_numeric($c[1])) continue;
             $pkPts[] = (float)$c[0]; $pkPos[] = (int)$c[1];
         }
+        pclose($pkPipe);
         $nPk = count($pkPos);
         if ($nPk) {
             $timeAtByte = function ($byte) use ($pkPos, $pkPts, $nPk) {

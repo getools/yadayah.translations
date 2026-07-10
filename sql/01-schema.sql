@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS yy_volume (
     yy_volume_page_count SMALLINT NULL,
     yy_volume_paragraph_count SMALLINT NULL,
     yy_volume_sort SMALLINT DEFAULT 0,
-    volume_active_flag BOOLEAN NOT NULL DEFAULT TRUE,
     PRIMARY KEY (yy_volume_key),
     INDEX idx_yy_volume_series (yy_series_key),
     FOREIGN KEY (yy_series_key) REFERENCES yy_series(yy_series_key)

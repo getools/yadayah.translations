@@ -296,10 +296,14 @@ try {
     }
 
     // Check disk usage (table bloat indicator)
-    // Threshold 50000 + skip tables autovacuum handled in last 2h (those are fine)
+    // Threshold: >50000 dead rows AND >5% of live rows AND autovacuum not run in last 2h.
+    // The percentage guard prevents false positives on large tables (e.g. 7M-row tables
+    // where autovacuum's own 20% scale-factor threshold hasn't been reached yet).
     $deadRows = $db->query("
         SELECT relname, n_dead_tup FROM pg_stat_user_tables
         WHERE n_dead_tup > 50000
+          AND n_live_tup > 0
+          AND (n_dead_tup::float / n_live_tup) > 0.05
           AND (last_autovacuum IS NULL OR last_autovacuum < NOW() - interval '2 hours')
         ORDER BY n_dead_tup DESC LIMIT 5
     ")->fetchAll();

@@ -81,6 +81,38 @@ $data = $raw ? (json_decode($raw, true) ?: []) : [];
 $action = $data['action'] ?? ($_GET['action'] ?? '');
 $itemKey = (int)($data['item_key'] ?? $_GET['item_key'] ?? 0);
 
+// ── Auto-Fix scoping ─────────────────────────────────────────────────────────
+// The "Auto-Fix" button (formerly "Smart Captions") runs on only the segments
+// the operator ticked in the transcript grid's Excerpt column. The frontend
+// sends their feed_item_transcript_key values as scope_keys; an empty/absent
+// list means the whole transcript (the operator confirmed a full-transcript
+// run at the button). The Excerpt selection is always a contiguous run, so the
+// scoped rows form a single time window.
+function cfParseScope(array $data): array {
+    $out = [];
+    $raw = $data['scope_keys'] ?? null;
+    if (is_array($raw)) {
+        foreach ($raw as $k) { $k = (int)$k; if ($k > 0) $out[$k] = true; }
+    }
+    return array_keys($out);
+}
+// Given the full live rows and the ticked scope keys, return
+// [selectedRows, windowStartSecs, windowEndSecs]. The end is the start of the
+// first live row AFTER the last selected one (INF when the selection reaches
+// the end) so a timing-source re-flow can be clipped to exactly the span.
+function cfSelectScope(array $live, array $scopeKeys): array {
+    $set = array_flip(array_map('intval', $scopeKeys));
+    $sel = []; $lastIdx = -1;
+    foreach ($live as $i => $r) {
+        if (isset($set[(int)$r['key']])) { $sel[] = $r; $lastIdx = $i; }
+    }
+    if (!$sel) return [[], null, null];
+    $t0 = (float)$sel[0]['secs'];
+    $t1 = isset($live[$lastIdx + 1]) ? (float)$live[$lastIdx + 1]['secs'] : INF;
+    return [$sel, $t0, $t1];
+}
+$scopeKeys = cfParseScope($data);   // ticked Excerpt rows; [] = whole transcript
+
 // ── DB helpers ───────────────────────────────────────────────────────────────
 
 // DB + alignment + prompt helpers (cfLoadLive … cfBuildMessages) now live in
@@ -128,11 +160,23 @@ if ($action === 'fit_preview') {
     // speaker-turn onsets into cfReflow's boundary set. Opt-in, default off.
     $breakSpeaker = array_key_exists('break_speaker', $data) ? (bool)$data['break_speaker'] : false;
 
-    $rows = ($source === 'current') ? cfLoadLive($db, $itemKey) : cfLoadAuto($db, $itemKey, $source);
+    // Scope to the ticked Excerpt segments when present. cfSelectScope gives the
+    // selected live rows and their [start,end) time window; a timing-source
+    // (auto) re-flow is clipped to that window so only the selection is re-sized.
+    $liveAll = cfLoadLive($db, $itemKey);
+    $win = $scopeKeys ? cfSelectScope($liveAll, $scopeKeys) : null;
+    if ($win !== null && !$win[0]) errorResponse('none of the selected segments were found');
+    if ($source === 'current') {
+        $rows = $win ? $win[0] : $liveAll;
+    } else {
+        $rows = cfLoadAuto($db, $itemKey, $source);
+        if ($win) $rows = array_values(array_filter($rows,
+            fn($r) => (float)$r['secs'] >= $win[1] && (float)$r['secs'] < $win[2]));
+    }
     if (!$rows) errorResponse('no rows for source: ' . $source);
     // Speaker labels always live on the editable rows, so build the timeline
-    // from the live transcript regardless of which timing source feeds re-flow.
-    $liveRows = ($source === 'current') ? $rows : cfLoadLive($db, $itemKey);
+    // from the live rows in scope (the whole transcript when unscoped).
+    $liveRows = $win ? $win[0] : $liveAll;
     $spkTl    = cfSpeakerTimeline($liveRows);
     if ($breakSpeaker && $spkTl) {
         $bset = []; $prev = null;
@@ -176,7 +220,6 @@ if ($action === 'fit_apply') {
     if (!$itemKey) errorResponse('item_key required');
     $cues = $data['cues'] ?? [];
     if (!is_array($cues) || !$cues) errorResponse('cues required');
-    $snap = cfSnapshot($db, $itemKey, (int)$user['user_key'], 'before caption re-flow');
     $clean = [];
     foreach ($cues as $c) {
         if (!isset($c['segment'], $c['text'])) continue;
@@ -184,6 +227,30 @@ if ($action === 'fit_apply') {
              ? (string)$c['speaker'] : null;
         $clean[] = ['segment' => (string)$c['segment'], 'text' => (string)$c['text'], 'speaker' => $spk];
     }
+    if ($scopeKeys) {
+        // Scoped re-flow: replace ONLY the selected rows with the new cues and
+        // keep the rest of the transcript. Rebuild the full row set (kept rows +
+        // new cues, ordered by time) and hand it to cfReplaceLive so the sort
+        // sequence and de-dup guard stay identical to a whole-transcript apply.
+        $liveAll = cfLoadLive($db, $itemKey);
+        $set = array_flip(array_map('intval', $scopeKeys));
+        $merged = [];
+        foreach ($liveAll as $r) {
+            if (isset($set[(int)$r['key']])) continue;          // dropped — re-flowed below
+            $merged[] = ['segment' => $r['segment'], 'text' => $r['text'],
+                         'speaker' => $r['speaker'], '_secs' => (float)$r['secs']];
+        }
+        foreach ($clean as $c) {
+            $merged[] = $c + ['_secs' => cfIntervalToSecs((string)$c['segment'])];
+        }
+        usort($merged, fn($a, $b) => $a['_secs'] <=> $b['_secs']);
+        $final = array_map(fn($c) => ['segment' => $c['segment'], 'text' => $c['text'],
+                                      'speaker' => $c['speaker'] ?? null], $merged);
+        $snap = cfSnapshot($db, $itemKey, (int)$user['user_key'], 'before caption re-flow (selected segments)');
+        $inserted = cfReplaceLive($db, $itemKey, $final);
+        jsonResponse(['inserted' => $inserted, 'snapshot_key' => $snap, 'scoped' => count($scopeKeys)]);
+    }
+    $snap = cfSnapshot($db, $itemKey, (int)$user['user_key'], 'before caption re-flow');
     $inserted = cfReplaceLive($db, $itemKey, $clean);
     jsonResponse(['inserted' => $inserted, 'snapshot_key' => $snap]);
 }
@@ -268,6 +335,11 @@ if ($action === 'ai_chunk') {
     ));
 
     $live = cfLoadLive($db, $itemKey);
+    // Scope to the ticked Excerpt segments when present — the chunk loop then
+    // walks only the selection (baseline alignment re-indexes against it).
+    if ($scopeKeys) {
+        $live = array_values(array_filter($live, fn($r) => in_array((int)$r['key'], $scopeKeys, true)));
+    }
     $total = count($live);
     $slice = array_slice($live, $offset, $limit);
     if (!$slice) jsonResponse(['results' => [], 'total' => $total, 'next' => null, 'done' => true]);

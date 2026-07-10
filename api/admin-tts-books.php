@@ -153,4 +153,29 @@ if ($action === 'chapter_paragraph_counts') {
     jsonResponse(['volume_key' => $volumeKey, 'counts' => $out]);
 }
 
+// Currently-processing chapter, for the Books-tab "now building" indicator.
+// The GPU build worker runs one chapter at a time (cap = 1), so there is at
+// most one 'running' row system-wide. Returns the series/volume/chapter
+// numbers plus the raw progress message (which carries "Paragraph N / M");
+// the client formats it as "s##v## ch## · ¶N/M". Null when nothing is
+// building — the client shows "Idle".
+if ($action === 'processing') {
+    $ttsKey = (int)($_GET['tts_key'] ?? 0);
+    $sql = "
+        SELECT a.tts_audio_key, a.tts_audio_status, a.tts_audio_progress, a.tts_audio_message,
+               s.series_number, v.volume_number, c.chapter_number,
+               v.volume_key, c.chapter_key
+          FROM yy_tts_audio a
+          JOIN yy_chapter c ON c.chapter_key = a.chapter_key
+          JOIN yy_volume  v ON v.volume_key  = a.volume_key
+          JOIN yy_series  s ON s.series_key  = v.series_key
+         WHERE a.tts_audio_status = 'running'
+           AND a.chapter_key IS NOT NULL
+           AND ($ttsKey = 0 OR a.tts_key = $ttsKey)
+         ORDER BY a.tts_audio_started_dtime DESC NULLS LAST, a.tts_audio_key DESC
+         LIMIT 1
+    ";
+    jsonResponse(['processing' => $db->query($sql)->fetch() ?: null]);
+}
+
 errorResponse('Unknown action');

@@ -367,12 +367,14 @@ if ($action === 'save_category_voice') {
             tts_category_voice_read_flag = EXCLUDED.tts_category_voice_read_flag,
             tts_category_voice_revision_dtime = NOW()
     ");
+    $pitchSt    = max(-99.99, min(99.99, (float)($data['pitch_st']     ?? 0)));
+    $styleDeg   = max(0,      min(9.99,  (float)($data['style_degree'] ?? 1.0)));
     $stmt->execute([
         $ttsKey, $profileKey, $category, $voice,
         $data['style'] ?? null,
-        $data['style_degree'] ?? 1.0,
+        $styleDeg,
         (int)($data['rate_pct'] ?? 0),
-        (float)($data['pitch_st'] ?? 0),
+        $pitchSt,
         (int)($data['volume'] ?? 100),
         (int)$readFlag,
     ]);

@@ -8,6 +8,7 @@
  * POST {type:'glossary', action:'toggle', key} — toggle active
  * POST {type:'glossary', action:'delete', key}
  * POST {type:'corrections', action:'add', wrong, right, case_sensitive, word_boundary}
+ * POST {type:'corrections', action:'edit', key, wrong, right, case_sensitive, word_boundary} — edit an existing rule (promotes to origin='human')
  * POST {type:'corrections', action:'toggle', key}
  * POST {type:'corrections', action:'delete', key}
  * POST {type:'corrections', action:'preview_prompt'} — returns the actual prompt that will be sent to Whisper
@@ -91,6 +92,34 @@ if ($method === 'POST') {
                         correction_case_sensitive = EXCLUDED.correction_case_sensitive,
                         correction_word_boundary = EXCLUDED.correction_word_boundary
             ")->execute([$wrong, $right, (int)!empty($data['case_sensitive']), (int)!empty($data['word_boundary'])]);
+            jsonResponse(['ok' => true]);
+        }
+        if ($action === 'edit') {
+            // Deliberate human edit of an existing rule → wrong/right/flags all
+            // re-settable, and the rule is promoted to origin='human' (an edited
+            // learned rule has now been vetted by a person). The unique index is
+            // (correction_wrong, correction_right); editing into an existing pair
+            // would violate it, so report that back instead of 500-ing.
+            $key = (int)($data['key'] ?? 0);
+            $wrong = trim($data['wrong'] ?? '');
+            $right = trim($data['right'] ?? '');
+            if (!$key) errorResponse('key required');
+            if (!$wrong || !$right) errorResponse('wrong and right required');
+            try {
+                $stmt = $db->prepare("
+                    UPDATE yy_transcript_correction
+                       SET correction_wrong = ?,
+                           correction_right = ?,
+                           correction_case_sensitive = ?,
+                           correction_word_boundary = ?,
+                           correction_origin = 'human'
+                     WHERE correction_key = ?
+                ");
+                $stmt->execute([$wrong, $right, (int)!empty($data['case_sensitive']), (int)!empty($data['word_boundary']), $key]);
+            } catch (\PDOException $e) {
+                errorResponse('That wrong→right pair already exists.', 409);
+            }
+            if ($stmt->rowCount() === 0) errorResponse('Correction not found', 404);
             jsonResponse(['ok' => true]);
         }
         if ($action === 'toggle') {

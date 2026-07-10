@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1783346404">
+    <meta name="page-version" content="1783717754">
     <meta charset="UTF-8">
     <title>AI — Yada Admin</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -468,8 +468,29 @@ class TabController {
         }
         this.loadProviders();
         this.refreshJobs();
-        setInterval(() => this.refreshJobs(), 4000);
+        this.startJobStream();
     }
+
+    // ── Job updates: push via SSE (admin-job-sse.php), NOT a 4s poll. ──
+    // The yy_job_notify trigger fires on insert / status / progress change;
+    // each push just triggers a refreshJobs() (which diffs rows surgically).
+    // A slow 15s fallback poll runs ONLY while the SSE is unavailable/broken.
+    startJobStream() {
+        const channel = this.name === 'video' ? 'ai_i2v_job' : 'ai_t2i_job';
+        if (!window.EventSource) { this._startJobFallback(); return; }
+        const open = () => {
+            try { this._jobEs = new EventSource('/api/admin-job-sse.php?channel=' + channel); }
+            catch (e) { this._startJobFallback(); return; }
+            this._jobEs.addEventListener('ready', () => this._stopJobFallback());   // push live → drop poll
+            this._jobEs.addEventListener('job',   () => this.refreshJobs());
+            this._jobEs.addEventListener('reconnect', () => { this._closeJobEs(); setTimeout(open, 1500); });
+            this._jobEs.onerror = () => { this._closeJobEs(); this._startJobFallback(); setTimeout(open, 5000); };
+        };
+        open();
+    }
+    _startJobFallback() { if (!this._jobFallback) this._jobFallback = setInterval(() => this.refreshJobs(), 15000); }
+    _stopJobFallback()  { if (this._jobFallback) { clearInterval(this._jobFallback); this._jobFallback = null; } }
+    _closeJobEs()       { if (this._jobEs) { try { this._jobEs.close(); } catch (e) {} this._jobEs = null; } }
 
     async loadProviders() {
         try {

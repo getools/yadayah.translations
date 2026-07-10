@@ -196,7 +196,28 @@ try {
             $aq = $db->prepare("SELECT DISTINCT feed_item_transcript_auto_model FROM yy_feed_item_transcript_auto WHERE feed_item_key = ? AND feed_item_transcript_auto_model IN ($aph)");
             $aq->execute(array_merge([$itemKey], $baselines));
             $baselines = array_values(array_intersect($baselines, $aq->fetchAll(PDO::FETCH_COLUMN)));
-            if (!$baselines) throw new Exception('consensus: no baselines available after waiting');
+            if (!$baselines) {
+                // Design fallback: EVERY requested baseline failed to land (e.g.
+                // GPU STT rejected truncated audio, or a YouTube bot-block killed
+                // the yt-dlp fallback), but another source — most often the
+                // YouTube caption track — may already be sitting in _auto. The
+                // operator asked us to build the editable transcript, so honour
+                // that intent by degrading to WHATEVER did land instead of
+                // erroring out and leaving the item stuck "builds when baselines
+                // finish". The result is Pending/rebuildable, so a real build can
+                // replace it once proper baselines exist. Only genuinely nothing
+                // in _auto is a hard error.
+                $anyq = $db->prepare("SELECT DISTINCT feed_item_transcript_auto_model FROM yy_feed_item_transcript_auto WHERE feed_item_key = ?");
+                $anyq->execute([$itemKey]);
+                $baselines = array_values(array_filter($anyq->fetchAll(PDO::FETCH_COLUMN)));
+                if (!$baselines) throw new Exception('consensus: no baselines available after waiting');
+                $fbWarn = 'Editable transcript built from FALLBACK source(s) [' . implode(',', $baselines)
+                        . '] — every requested baseline failed to produce audio-based text (likely missing/partial audio or a YouTube bot-block). Quality is limited; re-run once real baselines land.';
+                error_log("consensus: FALLBACK build item=$itemKey — $fbWarn");
+                $notify('warn:' . $fbWarn);
+                try { $db->prepare("UPDATE yy_feed_item_transcript_init_job SET job_error = ? WHERE job_key = ?")
+                         ->execute([$fbWarn, $jobKey]); } catch (\Throwable $e) {}
+            }
         }
         // Exclude low-reliability engines from the vote. gpu-canary-1b-flash and
         // gpu-qwen2-audio systematically hallucinate common words ("Yah" for "the",
@@ -223,6 +244,15 @@ try {
         $primary = trim((string)($jp['primary'] ?? ''));
         if ($primary !== '' && in_array($primary, $baselines, true)) $spine = $primary;
         $refs = array_values(array_diff($baselines, [$spine]));
+        // Edit-weighted consensus: per-engine weights learned from how closely
+        // each baseline tracks past HUMAN-EDITED finals (transcript-engine-grade.php
+        // → yy_transcript_engine_edit_grade). Empty/thin data → [] → every
+        // downstream weight defaults to 1.0 (byte-identical to the old unweighted
+        // vote). Fed into the coverage-union gap-fill, the majority vote, and the
+        // LLM-reconcile alternate ordering below. ⚠ NOT a denylist replacement:
+        // canary/qwen2 grade mid-pack here (their artifacts are a small % of
+        // tokens), so cfDeniedEngines still removes them upstream.
+        $weights = cfEngineWeights($db);
         // Layer 2: if we ended up building from fewer baselines than requested —
         // especially without the operator's chosen primary or a word-level spine
         // candidate — that is a quality risk (this is exactly how a VAD-dropped
@@ -266,7 +296,7 @@ try {
         if (!array_key_exists('fill_gaps', $params) || $params['fill_gaps']) {
             $filled = [];
             $minGap = (float)($params['fill_gap_secs'] ?? 8.0);
-            $spineWords = unionSpineWords($db, $itemKey, $spine, $baselines, $filled, $minGap);
+            $spineWords = unionSpineWords($db, $itemKey, $spine, $baselines, $filled, $minGap, 3, null, $weights);
             if ($filled) {
                 $tot   = array_sum(array_map(fn($f) => $f['words'], $filled));
                 $spans = implode(', ', array_map(
@@ -277,7 +307,7 @@ try {
                 $notify('union-fill:' . count($filled) . ':' . $tot);
             }
         }
-        $cmp = buildComparison($db, $itemKey, $spine, $refs, $spineWords);
+        $cmp = buildComparison($db, $itemKey, $spine, $refs, $spineWords, $weights);
         if (isset($cmp['error'])) throw new Exception('consensus: ' . $cmp['error']);
         $stream = [];
         foreach ($cmp['slots'] as $sl) { $w = trim((string)$sl['consensus']); if ($w !== '') $stream[] = ['t' => $sl['t'], 'w' => $w]; }
@@ -454,7 +484,14 @@ try {
             require_once __DIR__ . '/transcript-caption-lib.php';
             $llmModel = trim((string)($params['llm_model'] ?? 'qwen2.5:72b')) ?: 'qwen2.5:72b';
             $notify('llm-reconcile:start');
-            $rc = llmReconcileTranscript($db, $itemKey, $baselines, $llmModel, $notify);
+            // Present the highest edit-weight engines to the LLM FIRST, so its
+            // "primary evidence" alternates lead with the most-trusted readings.
+            // Stable order when weights are absent (all 1.0).
+            $llmBaselines = $baselines;
+            if (!empty($weights)) {
+                usort($llmBaselines, fn($a, $b) => ($weights[$b] ?? 1.0) <=> ($weights[$a] ?? 1.0));
+            }
+            $rc = llmReconcileTranscript($db, $itemKey, $llmBaselines, $llmModel, $notify);
             if (!empty($rc['ok'])) {
                 error_log(sprintf('consensus: LLM reconcile item=%d model=%s changed=%d chunks=%d',
                     $itemKey, $llmModel, (int)($rc['changed'] ?? 0), (int)($rc['chunks'] ?? 0)));
@@ -484,6 +521,21 @@ try {
         }
     } catch (\Throwable $e) {
         error_log('consensus: loop-block guard threw item=' . $itemKey . ' — ' . $e->getMessage());
+    }
+
+    // Auto-name recurring speakers: match this build's raw SPEAKER_xx voices
+    // against the saved global profiles and rename the confident ones in place,
+    // so a freshly built diarised transcript arrives pre-named. FAIL-OPEN — the
+    // transcript is already durable; a match hiccup only logs. Near-miss
+    // suggestions are left for the editor to offer interactively on open.
+    try {
+        $named = autoNameSpeakersFromProfiles($db, $itemKey);
+        if ($named > 0) {
+            error_log(sprintf('consensus: auto-named %d speaker(s) from profiles item=%d', $named, $itemKey));
+            $notify('speaker-autoname:' . $named);
+        }
+    } catch (\Throwable $e) {
+        error_log('consensus: speaker auto-name threw item=' . $itemKey . ' — ' . $e->getMessage());
     }
 
     $db->prepare("UPDATE yy_feed_item_transcript_init_job SET job_status='done', job_rows_written=?, job_completed=now() WHERE job_key=?")

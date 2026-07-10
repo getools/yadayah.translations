@@ -46,6 +46,9 @@ function markTranscriptEditing(PDO $db, int $itemKey): void {
     } catch (\Throwable $e) { /* status is advisory — don't fail the edit */ }
 }
 
+// matchSpeakerProfilesForItem() now lives in transcript-helpers.php (required
+// above) so the build workers can auto-name speakers at build time too.
+
 // ── GET: load transcript + job status ──
 if ($method === 'GET') {
     $itemKey = (int)($_GET['item_key'] ?? 0);
@@ -161,7 +164,10 @@ if ($method === 'POST') {
     $itemKey = (int)($data['item_key'] ?? 0);
     // Snippet actions are library-wide (not tied to a feed item), so they carry
     // no item_key. Every other POST action operates on a specific transcript.
-    $itemlessActions = ['create_snippet', 'list_snippets', 'get_snippet'];
+    $itemlessActions = ['create_snippet', 'list_snippets', 'get_snippet',
+                        'rename_snippet', 'delete_snippet',
+                        'list_speaker_profiles', 'rename_speaker_profile',
+                        'delete_speaker_profile', 'merge_speaker_profiles'];
     if (!$itemKey && !in_array($action, $itemlessActions, true)) errorResponse('item_key required');
 
     if ($action === 'start') {
@@ -298,8 +304,30 @@ if ($method === 'POST') {
             $logStmt = $db->prepare("INSERT INTO yy_transcript_edit_log (feed_item_key, edit_segment, edit_original_text, edit_new_text, edit_action, edit_user_key) VALUES (?, ?::interval, ?, ?, ?, ?)");
 
             $sort = 0;
-            $keptKeys = [];
             $inserted = 0; $deleted = 0; $updated = 0;
+            // Which existing keys the post still carries (non-empty text only —
+            // a blanked row is dropped, mirroring the `if ($text === '') continue`
+            // skip below). Computed up front so the DELETE pass can run BEFORE the
+            // INSERTs: a replacement row that reuses a removed row's
+            // (segment, md5(text)) would otherwise hit ON CONFLICT DO NOTHING
+            // against the not-yet-deleted original and be silently dropped. That
+            // is exactly how the first segment of an inserted snippet (offset 0 →
+            // it lands on the first replaced row's timestamp) went missing.
+            $keptKeys = [];
+            foreach ($rows as $r) {
+                if (trim((string)($r['text'] ?? '')) === '') continue;
+                $k = (isset($r['key']) && $r['key'] !== null && $r['key'] !== '') ? (int)$r['key'] : null;
+                if ($k !== null && isset($existingByKey[$k])) $keptKeys[$k] = true;
+            }
+            // DELETE rows the editor dropped (existing key absent from the post)
+            // FIRST, so their (segment, text) frees up before any INSERT reuses it.
+            foreach ($existingByKey as $key => $old) {
+                if (!isset($keptKeys[$key])) {
+                    $delStmt->execute([$key, $itemKey]);
+                    $logStmt->execute([$itemKey, $old['segment'], $old['text'], null, 'delete', $userKey]);
+                    $deleted++;
+                }
+            }
             foreach ($rows as $r) {
                 $segment = trim($r['segment'] ?? '00:00:00');
                 $text    = trim($r['text'] ?? '');
@@ -352,14 +380,6 @@ if ($method === 'POST') {
                     $insStmt->execute([$itemKey, $segment, $textTrim, $rowSort, $spkVal, $userKey]);
                     $logStmt->execute([$itemKey, $segment, null, $textTrim, 'add', $userKey]);
                     $inserted++;
-                }
-            }
-            // DELETE rows the editor dropped (existing key absent from the post).
-            foreach ($existingByKey as $key => $old) {
-                if (!isset($keptKeys[$key])) {
-                    $delStmt->execute([$key, $itemKey]);
-                    $logStmt->execute([$itemKey, $old['segment'], $old['text'], null, 'delete', $userKey]);
-                    $deleted++;
                 }
             }
             $db->commit();
@@ -442,8 +462,22 @@ if ($method === 'POST') {
         // Keep captured voice embeddings addressable by the new label so
         // "save as profile" and auto-match keep working after a rename.
         if ($to !== null) {
-            $eUp = $db->prepare("UPDATE yy_feed_item_speaker_embedding SET label = ? WHERE feed_item_key IN ($placeholders) AND label = ?");
-            $eUp->execute(array_merge([$to], $itemKeys, [$from]));
+            // The embedding table is keyed (feed_item_key, model, label). If the
+            // target label already has an embedding on the same item+model,
+            // renaming the source into it violates the primary key. Drop the
+            // colliding source rows first (the target keeps its sample), then
+            // rename the remainder. Without this, merging two speakers that both
+            // carry embeddings throws AFTER the transcript rows are already
+            // updated, so the client sees an error and treats the merge as
+            // failed even though the segments changed.
+            $eDel = $db->prepare("DELETE FROM yy_feed_item_speaker_embedding s
+                                   WHERE s.feed_item_key IN ($placeholders) AND s.label = ?
+                                     AND EXISTS (SELECT 1 FROM yy_feed_item_speaker_embedding t
+                                                  WHERE t.feed_item_key = s.feed_item_key
+                                                    AND t.model = s.model AND t.label = ?)");
+            $eDel->execute(array_merge($itemKeys, [$from, $to]));
+            $eUp = $db->prepare("UPDATE yy_feed_item_speaker_embedding SET label = ? WHERE feed_item_key IN ($placeholders) AND label = ? AND NOT EXISTS (SELECT 1 FROM yy_feed_item_speaker_embedding ex WHERE ex.feed_item_key = yy_feed_item_speaker_embedding.feed_item_key AND ex.model = yy_feed_item_speaker_embedding.model AND ex.label = ?)");
+            $eUp->execute(array_merge([$to], $itemKeys, [$from, $to]));
         }
         jsonResponse(['renamed' => $changed, 'from' => $from, 'to' => $to]);
     }
@@ -577,31 +611,12 @@ if ($method === 'POST') {
         if ($filled > 0) foreach ($itemKeys as $ik) markTranscriptEditing($db, (int)$ik);
 
         // Auto-identify: match each still-generic diarised label (SPEAKER_xx)
-        // to the nearest known speaker profile by voice embedding (cosine). A
-        // match at/above threshold renames that label to the profile's label
-        // across the live rows + the embedding store, so recurring people get
-        // named automatically. Unmatched labels stay generic for manual naming.
-        $SIM_THRESHOLD = 0.50;
-        $matched = [];
-        $embStmt = $db->prepare("SELECT DISTINCT label, embedding::text AS emb FROM yy_feed_item_speaker_embedding WHERE feed_item_key = ?");
-        $embStmt->execute([$srcItem]);
-        foreach ($embStmt->fetchAll(PDO::FETCH_ASSOC) as $er) {
-            $lab = (string)$er['label'];
-            if (!preg_match('/^SPEAKER_\d+$/', $lab)) continue;   // only auto-name raw labels
-            $mq = $db->prepare("SELECT speaker_profile_label AS lbl, speaker_profile_name AS nm,
-                                       1 - (speaker_profile_embedding <=> ?::vector) AS sim
-                                  FROM yy_speaker_profile
-                                 ORDER BY speaker_profile_embedding <=> ?::vector LIMIT 1");
-            $mq->execute([$er['emb'], $er['emb']]);
-            $m = $mq->fetch(PDO::FETCH_ASSOC);
-            if ($m && (float)$m['sim'] >= $SIM_THRESHOLD && (string)$m['lbl'] !== $lab) {
-                foreach ($itemKeys as $ik) {
-                    $db->prepare("UPDATE yy_feed_item_transcript SET feed_item_transcript_speaker=? WHERE feed_item_key=? AND feed_item_transcript_speaker=?")->execute([$m['lbl'], (int)$ik, $lab]);
-                    $db->prepare("UPDATE yy_feed_item_speaker_embedding SET label=? WHERE feed_item_key=? AND label=?")->execute([$m['lbl'], (int)$ik, $lab]);
-                }
-                $matched[] = ['from' => $lab, 'to' => $m['lbl'], 'name' => $m['nm'], 'sim' => round((float)$m['sim'], 3)];
-            }
-        }
+        // against the saved global voice profiles. Strong matches are renamed in
+        // place; near-misses come back as suggestions the UI offers one-click.
+        $match = matchSpeakerProfilesForItem($db, $srcItem, $itemKeys);
+        $matched = $match['matched'];
+        $suggestions = $match['suggestions'];
+        if ($matched) foreach ($itemKeys as $ik) markTranscriptEditing($db, (int)$ik);
 
         // Report the resulting label distribution so the UI can refresh chips.
         $dist = $db->prepare("SELECT feed_item_transcript_speaker AS spk, COUNT(*) AS c
@@ -609,7 +624,113 @@ if ($method === 'POST') {
                                WHERE feed_item_key = ? AND feed_item_transcript_speaker IS NOT NULL
                                GROUP BY 1 ORDER BY 2 DESC");
         $dist->execute([$itemKey]);
-        jsonResponse(['filled' => $filled, 'source_model' => $srcModel, 'matched' => $matched, 'speakers' => $dist->fetchAll(PDO::FETCH_ASSOC)]);
+        jsonResponse(['filled' => $filled, 'source_model' => $srcModel, 'matched' => $matched,
+                      'suggestions' => $suggestions, 'speakers' => $dist->fetchAll(PDO::FETCH_ASSOC)]);
+    }
+
+    // Match this item's raw SPEAKER_xx labels against the saved global profiles
+    // WITHOUT first re-filling from the diarised baseline — used both on-demand
+    // ("Match against saved speakers") and automatically when the editor opens a
+    // transcript that still has generic labels. Applies strong matches, returns
+    // near-miss suggestions. No diarised baseline / no embeddings → no-op.
+    if ($action === 'match_speaker_profiles') {
+        $itemKeys = getFeedItemKeyCluster($db, $itemKey);
+        // Voice embeddings can live on any cluster item; match each that has them.
+        $embItems = $db->prepare("SELECT DISTINCT feed_item_key FROM yy_feed_item_speaker_embedding WHERE feed_item_key IN (" . implode(',', array_fill(0, count($itemKeys), '?')) . ")");
+        $embItems->execute($itemKeys);
+        $matched = [];
+        $suggestions = [];
+        foreach ($embItems->fetchAll(PDO::FETCH_COLUMN) as $srcItem) {
+            $r = matchSpeakerProfilesForItem($db, (int)$srcItem, $itemKeys);
+            $matched = array_merge($matched, $r['matched']);
+            $suggestions = array_merge($suggestions, $r['suggestions']);
+        }
+        if ($matched) foreach ($itemKeys as $ik) markTranscriptEditing($db, (int)$ik);
+        // De-dup suggestions by source label (nearest profile already picked).
+        $seen = [];
+        $suggestions = array_values(array_filter($suggestions, function($s) use (&$seen) {
+            if (isset($seen[$s['from']])) return false; $seen[$s['from']] = true; return true;
+        }));
+        jsonResponse(['matched' => $matched, 'suggestions' => $suggestions]);
+    }
+
+    // Apply a specific saved global profile to one raw label in this item —
+    // powers the one-click "Assign <name>?" suggestion chip and manual
+    // assignment. Renames the label to the profile's label across the live
+    // rows + embedding store of every cluster item.
+    if ($action === 'assign_speaker_profile') {
+        $fromLabel = trim((string)($data['from_label'] ?? ''));
+        $profileKey = (int)($data['profile_key'] ?? 0);
+        if ($fromLabel === '' || !$profileKey) errorResponse('from_label and profile_key required');
+        $pq = $db->prepare("SELECT speaker_profile_label AS lbl, speaker_profile_name AS nm FROM yy_speaker_profile WHERE speaker_profile_key = ?");
+        $pq->execute([$profileKey]);
+        $prof = $pq->fetch(PDO::FETCH_ASSOC);
+        if (!$prof) errorResponse('Speaker profile not found', 404);
+        $toLabel = (string)$prof['lbl'];
+        $itemKeys = getFeedItemKeyCluster($db, $itemKey);
+        $changed = 0;
+        foreach ($itemKeys as $ik) {
+            $u = $db->prepare("UPDATE yy_feed_item_transcript SET feed_item_transcript_speaker=? WHERE feed_item_key=? AND feed_item_transcript_speaker=?");
+            $u->execute([$toLabel, (int)$ik, $fromLabel]);
+            $changed += $u->rowCount();
+            // Drop embedding rows that would collide with the target label
+            // (feed_item_key, model, label unique), then rename the rest.
+            $db->prepare("DELETE FROM yy_feed_item_speaker_embedding a WHERE a.feed_item_key=? AND a.label=? AND EXISTS (SELECT 1 FROM yy_feed_item_speaker_embedding b WHERE b.feed_item_key=a.feed_item_key AND b.model=a.model AND b.label=?)")->execute([(int)$ik, $fromLabel, $toLabel]);
+            $db->prepare("UPDATE yy_feed_item_speaker_embedding SET label=? WHERE feed_item_key=? AND label=? AND NOT EXISTS (SELECT 1 FROM yy_feed_item_speaker_embedding ex WHERE ex.feed_item_key = yy_feed_item_speaker_embedding.feed_item_key AND ex.model = yy_feed_item_speaker_embedding.model AND ex.label = ?)")->execute([$toLabel, (int)$ik, $fromLabel, $toLabel]);
+        }
+        if ($changed > 0) foreach ($itemKeys as $ik) markTranscriptEditing($db, (int)$ik);
+        jsonResponse(['assigned' => true, 'from' => $fromLabel, 'to' => $toLabel, 'name' => $prof['nm'], 'changed' => $changed]);
+    }
+
+    // ── Global speaker-profile management (itemless) ─────────────────────
+    // Rename a saved profile (its display name and/or its stored label).
+    if ($action === 'rename_speaker_profile') {
+        $profileKey = (int)($data['profile_key'] ?? 0);
+        if (!$profileKey) errorResponse('profile_key required');
+        $name = trim((string)($data['name'] ?? ''));
+        if ($name === '') errorResponse('a name is required');
+        $label = trim((string)($data['label'] ?? ''));
+        if ($label === '') $label = $name . '|' . $name;
+        $db->prepare("UPDATE yy_speaker_profile SET speaker_profile_name=?, speaker_profile_label=?, speaker_profile_updated_dtime=now() WHERE speaker_profile_key=?")
+           ->execute([$name, $label, $profileKey]);
+        jsonResponse(['renamed' => true, 'profile_key' => $profileKey, 'name' => $name, 'label' => $label]);
+    }
+
+    // Delete a saved profile. Existing transcript labels are untouched (they
+    // keep the name already stamped on their rows) — only the reusable voice
+    // template is removed, so it stops auto-matching future transcripts.
+    if ($action === 'delete_speaker_profile') {
+        $profileKey = (int)($data['profile_key'] ?? 0);
+        if (!$profileKey) errorResponse('profile_key required');
+        $db->prepare("DELETE FROM yy_speaker_profile WHERE speaker_profile_key=?")->execute([$profileKey]);
+        jsonResponse(['deleted' => true, 'profile_key' => $profileKey]);
+    }
+
+    // Merge one profile into another (e.g. an accidental double-save). The
+    // survivor's embedding becomes the sample-count-weighted average of both,
+    // its sample_count sums, and the merged-away row is deleted.
+    if ($action === 'merge_speaker_profiles') {
+        $fromKey = (int)($data['from_key'] ?? 0);
+        $intoKey = (int)($data['into_key'] ?? 0);
+        if (!$fromKey || !$intoKey || $fromKey === $intoKey) errorResponse('distinct from_key and into_key required');
+        $q = $db->prepare("SELECT speaker_profile_key AS k, speaker_profile_embedding::text AS e, speaker_profile_sample_count AS c FROM yy_speaker_profile WHERE speaker_profile_key IN (?, ?)");
+        $q->execute([$fromKey, $intoKey]);
+        $rows = [];
+        foreach ($q->fetchAll(PDO::FETCH_ASSOC) as $r) $rows[(int)$r['k']] = $r;
+        if (!isset($rows[$fromKey], $rows[$intoKey])) errorResponse('one or both profiles not found', 404);
+        $va = array_map('floatval', explode(',', trim((string)$rows[$fromKey]['e'], '[] ')));
+        $vb = array_map('floatval', explode(',', trim((string)$rows[$intoKey]['e'], '[] ')));
+        $ca = max(1, (int)$rows[$fromKey]['c']);
+        $cb = max(1, (int)$rows[$intoKey]['c']);
+        $merged = [];
+        for ($i = 0; $i < count($vb); $i++) { $merged[$i] = ((($va[$i] ?? 0.0) * $ca) + (($vb[$i] ?? 0.0) * $cb)) / ($ca + $cb); }
+        $n = sqrt(array_sum(array_map(function($x){ return $x*$x; }, $merged)));
+        if ($n > 0) $merged = array_map(function($x) use ($n){ return $x/$n; }, $merged);
+        $vecLit = '[' . implode(',', $merged) . ']';
+        $db->prepare("UPDATE yy_speaker_profile SET speaker_profile_embedding=?::vector, speaker_profile_sample_count=?, speaker_profile_updated_dtime=now() WHERE speaker_profile_key=?")
+           ->execute([$vecLit, $ca + $cb, $intoKey]);
+        $db->prepare("DELETE FROM yy_speaker_profile WHERE speaker_profile_key=?")->execute([$fromKey]);
+        jsonResponse(['merged' => true, 'from_key' => $fromKey, 'into_key' => $intoKey, 'samples' => $ca + $cb]);
     }
 
     // ── Excerpt snippets ─────────────────────────────────────────────────
@@ -692,6 +813,36 @@ if ($method === 'POST') {
             'label'       => $snip['transcript_snippet_label'],
             'segments'    => $segStmt->fetchAll(PDO::FETCH_ASSOC),
         ]);
+    }
+
+    // Rename a saved snippet (library-wide). Only the label changes; the
+    // segments are untouched, so already-inserted copies are unaffected.
+    if ($action === 'rename_snippet') {
+        $snippetKey = (int)($data['snippet_key'] ?? 0);
+        if (!$snippetKey) errorResponse('snippet_key required');
+        $label = trim((string)($data['label'] ?? ''));
+        if ($label === '') errorResponse('A snippet title is required');
+        $label = mb_substr($label, 0, 250);
+        $upd = $db->prepare("UPDATE yy_transcript_snippet
+                                SET transcript_snippet_label = ?,
+                                    transcript_snippet_revision_user_key = ?,
+                                    transcript_snippet_revision_dtime = now()
+                              WHERE transcript_snippet_key = ?");
+        $upd->execute([$label, $userKey, $snippetKey]);
+        if (!$upd->rowCount()) errorResponse('Snippet not found', 404);
+        jsonResponse(['renamed' => true, 'snippet_key' => $snippetKey, 'label' => $label]);
+    }
+
+    // Delete a saved snippet. Its segments go with it via the segment table's
+    // ON DELETE CASCADE FK. Transcripts that already had the snippet inserted
+    // keep their rows — only the reusable template is removed.
+    if ($action === 'delete_snippet') {
+        $snippetKey = (int)($data['snippet_key'] ?? 0);
+        if (!$snippetKey) errorResponse('snippet_key required');
+        $del = $db->prepare("DELETE FROM yy_transcript_snippet WHERE transcript_snippet_key = ?");
+        $del->execute([$snippetKey]);
+        if (!$del->rowCount()) errorResponse('Snippet not found', 404);
+        jsonResponse(['deleted' => true, 'snippet_key' => $snippetKey]);
     }
 
     errorResponse('Unknown action');

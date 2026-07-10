@@ -33,6 +33,12 @@ rsync -a --delete "$DEPLOY_DIR/api/" "$GIT_DIR/api/" \
     --include='yt-dlp-plugin' \
     --include='*/' --exclude='*'
 
+# Sync SQL migrations (schema + trigger definitions) so DB changes are
+# version-controlled alongside the code that depends on them.
+mkdir -p "$GIT_DIR/sql"
+rsync -a "$DEPLOY_DIR/sql/" "$GIT_DIR/sql/" \
+    --include='*.sql' --include='*/' --exclude='*'
+
 # Sync only specific public subdirectories that contain code
 rsync -a "$DEPLOY_DIR/public/css/" "$GIT_DIR/public/css/" \
     --include='*.css' --include='*/' --exclude='*'

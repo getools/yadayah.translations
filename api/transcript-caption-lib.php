@@ -532,23 +532,31 @@ function cfCorrectionContext(PDO $db, int $maxCorr = 60, int $maxGloss = 60): ar
 }
 
 /**
- * Engines EXCLUDED from consensus voting + LLM reconcile.
+ * Engines EXCLUDED from consensus voting + LLM reconcile — now a THIN VIEW over
+ * the unified weighting system: an engine is "denied" iff its effective weight
+ * (cfEngineWeights) is ≤ CF_ENGINE_DENY_EPS. There is no separate binary
+ * denylist any more; a zero weight IS the denial.
  *
- * These two engines hallucinate high-frequency common words at 50–1000× the rate
- * of every other engine — gpu-canary-1b-flash / gpu-qwen2-audio emit "Yah" for
- * "the", "Not" for "no", and "there'll" for pauses — which poisons the majority
- * vote and the LLM's "alternate evidence". This is NOT visible in an overall
- * accuracy grade (the artifacts are a small fraction of tokens, so their content
- * grade is ~0.74–0.79, mid-pack); it only shows in the per-artifact confusion
- * rate. So the denylist is targeted, curated from that per-engine artifact
- * analysis (2026-07-06), rather than a blunt grade threshold that would wrongly
- * drop useful-but-noisy engines (youtube) and miss these two.
- *
- * Optional data-driven extension: a row in yy_transcript_engine_deny (engine text)
- * adds further engines as new artifact-producers are profiled, without a redeploy.
+ * How an engine reaches weight 0: cfEngineWeights lets the *automated* edit-grade
+ * only move an engine within [0.5,1.5] (a thin-data fluke can never nuke one), so
+ * a true deny requires an explicit row in yy_transcript_engine_weight_override
+ * (weight 0) — which is where the old hardcoded pair now lives, seeded from the
+ * 2026-07-06 artifact analysis. ⚠ Why they still need an override rather than
+ * falling out on grade: gpu-canary-1b-flash / gpu-qwen2-audio hallucinate
+ * high-frequency common words (the→Yah, no→Not), but that damage is a small % of
+ * tokens, so their whole-transcript edit-grade sits mid-pack (~0.85–0.90) and
+ * even a per-confusion sweep over the current edited corpus can't isolate them.
+ * When the grade can justify an engine on its own the override is simply removed
+ * and the exclusion lifts automatically. The legacy yy_transcript_engine_deny
+ * table is still honoured (treated as weight 0) for backward compatibility.
  */
+if (!defined('CF_ENGINE_DENY_EPS')) define('CF_ENGINE_DENY_EPS', 0.05);
 function cfDeniedEngines(PDO $db): array {
-    $deny = ['gpu-canary-1b-flash' => true, 'gpu-qwen2-audio' => true];
+    $deny = [];
+    foreach (cfEngineWeights($db) as $engine => $wt) {
+        if ((float)$wt <= CF_ENGINE_DENY_EPS) $deny[(string)$engine] = true;
+    }
+    // Legacy runtime denylist table = weight-0 override (belt-and-suspenders).
     try {
         foreach ($db->query("SELECT engine FROM yy_transcript_engine_deny")->fetchAll(PDO::FETCH_COLUMN) as $e)
             $deny[(string)$e] = true;
@@ -866,4 +874,164 @@ function transcriptCollapseLoopBlocks(PDO $db, int $fik, array $opts = []): arra
     }
 
     return ['blocks' => count($plan), 'removed' => $removed, 'reattached' => $reattached, 'plan' => $plan];
+}
+
+// ── Edit-weighted engine grading (learn-from-edits reliability) ──────────────
+//   The system already knew which engines to DISTRUST via a hardcoded denylist
+//   and a self-supervised cross-engine agreement grade. This adds the missing
+//   signal the operator asked for: grade every baseline by how closely it
+//   matches the HUMAN-EDITED final transcript (the ideal), accumulate that over
+//   every edited item, and expose it as a per-engine weight the consensus build
+//   uses to trust the closest engines more. Two tables:
+//     yy_transcript_engine_edit_grade_item  — idempotent per-item ledger
+//                                              (samples/agree per engine×category)
+//     yy_transcript_engine_edit_grade        — rolled-up cache read at build time
+//   Fail-open + backward-compatible: when the cache is empty cfEngineWeights()
+//   returns [] and every downstream weight defaults to 1.0 → byte-identical to
+//   the old unweighted vote. See transcript-engine-grade.php (the sweep CLI).
+
+/** Bucket a raw display token for per-category grading. 'all' is tracked too. */
+function cfCategorizeToken(string $rawTok): string {
+    $n = mb_strtolower(trim($rawTok));
+    $n = preg_replace('/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/u', '', $n) ?? '';
+    if ($n === '') return 'punct';
+    if (preg_match('/\d/u', $n)) return 'number';
+    static $stop = [
+        'a'=>1,'an'=>1,'and'=>1,'are'=>1,'as'=>1,'at'=>1,'be'=>1,'been'=>1,'but'=>1,
+        'by'=>1,'can'=>1,'could'=>1,'did'=>1,'do'=>1,'does'=>1,'for'=>1,'from'=>1,
+        'had'=>1,'has'=>1,'have'=>1,'he'=>1,'her'=>1,'him'=>1,'his'=>1,'i'=>1,'in'=>1,
+        'is'=>1,'it'=>1,'its'=>1,'me'=>1,'my'=>1,'no'=>1,'nor'=>1,'not'=>1,'of'=>1,
+        'on'=>1,'or'=>1,'our'=>1,'she'=>1,'so'=>1,'than'=>1,'that'=>1,'the'=>1,
+        'their'=>1,'them'=>1,'then'=>1,'there'=>1,'they'=>1,'this'=>1,'to'=>1,
+        'was'=>1,'we'=>1,'were'=>1,'will'=>1,'with'=>1,'would'=>1,'you'=>1,'your'=>1,
+    ];
+    if (isset($stop[$n])) return 'function';
+    // Proper-noun proxy (no sentence context here): internal caps (YHWH, McX) or
+    // a leading capital. Over-counts sentence-initial words as names, but that
+    // only affects the per-category split — the 'all' bucket used for weighting
+    // is unaffected.
+    if (preg_match('/^\p{Lu}/u', $rawTok) || preg_match('/\p{Lu}/u', mb_substr($rawTok, 1))) return 'name';
+    return 'content';
+}
+
+/**
+ * Grade every baseline in _auto for $itemKey against that item's human-edited
+ * FINAL live transcript, writing the per-item ledger (replace-in-place so a
+ * re-grade after further edits is idempotent). Each engine's token stream is
+ * content-aligned to the final (alignSequence — timing-independent, the same
+ * aligner the consensus vote uses), then agreement is counted per category.
+ * Returns [engine => [category => ['s'=>samples,'a'=>agree]]].
+ */
+function cfGradeItemAgainstEdits(PDO $db, int $itemKey): array {
+    require_once __DIR__ . '/transcript-compare-lib.php';
+    $rs = $db->prepare("SELECT feed_item_transcript_text txt
+                          FROM yy_feed_item_transcript
+                         WHERE feed_item_key = ?
+                      ORDER BY feed_item_transcript_sort, feed_item_transcript_segment");
+    $rs->execute([$itemKey]);
+    $refRaw = [];
+    foreach ($rs->fetchAll(PDO::FETCH_COLUMN) as $txt) {
+        foreach (tokenize((string)$txt) as $t) $refRaw[] = $t;
+    }
+    $nRef = count($refRaw);
+    if ($nRef < 50) return ['skipped' => 'reference transcript too short (' . $nRef . ' tokens)'];
+    $refNorm = array_map('normTok', $refRaw);
+    $refCat  = array_map('cfCategorizeToken', $refRaw);
+
+    $eq = $db->prepare("SELECT DISTINCT feed_item_transcript_auto_model m
+                          FROM yy_feed_item_transcript_auto WHERE feed_item_key = ?");
+    $eq->execute([$itemKey]);
+    $out = [];
+    foreach ($eq->fetchAll(PDO::FETCH_COLUMN) as $code) {
+        $eRaw = [];
+        foreach (loadCompareRows($db, $itemKey, (string)$code) as $r) {
+            foreach (tokenize((string)$r['txt']) as $t) $eRaw[] = $t;
+        }
+        if (!$eRaw) continue;
+        $eNorm = array_map('normTok', $eRaw);
+        // For each FINAL token, what did this engine say there ('' = engine gap).
+        $aligned = alignSequence($refNorm, $eNorm, $eRaw);
+        $stats = [];
+        for ($i = 0; $i < $nRef; $i++) {
+            if ($refNorm[$i] === '') continue;             // punctuation-only ref token
+            $cat = $refCat[$i];
+            $hit = (normTok($aligned[$i] ?? '') === $refNorm[$i]) ? 1 : 0;
+            foreach ([$cat, 'all'] as $c) {
+                if (!isset($stats[$c])) $stats[$c] = ['s' => 0, 'a' => 0];
+                $stats[$c]['s']++; $stats[$c]['a'] += $hit;
+            }
+        }
+        if ($stats) $out[(string)$code] = $stats;
+    }
+
+    $ownTx = !$db->inTransaction();
+    if ($ownTx) $db->beginTransaction();
+    try {
+        $db->prepare("DELETE FROM yy_transcript_engine_edit_grade_item WHERE feed_item_key = ?")->execute([$itemKey]);
+        $ins = $db->prepare("INSERT INTO yy_transcript_engine_edit_grade_item
+                                 (feed_item_key, engine, category, samples, agree, graded)
+                             VALUES (?, ?, ?, ?, ?, now())");
+        foreach ($out as $code => $stats) {
+            foreach ($stats as $cat => $sa) $ins->execute([$itemKey, $code, $cat, $sa['s'], $sa['a']]);
+        }
+        if ($ownTx) $db->commit();
+    } catch (\Throwable $e) {
+        if ($ownTx && $db->inTransaction()) $db->rollBack();
+        throw $e;
+    }
+    return $out;
+}
+
+/** Roll the per-item ledger up into the read-at-build-time cache table. */
+function cfRecomputeEngineEditGradeCache(PDO $db): void {
+    $db->exec("DELETE FROM yy_transcript_engine_edit_grade");
+    $db->exec("INSERT INTO yy_transcript_engine_edit_grade (engine, category, samples, agree, grade, items, updated)
+               SELECT engine, category, SUM(samples), SUM(agree),
+                      CASE WHEN SUM(samples) > 0 THEN SUM(agree)::float / SUM(samples) ELSE NULL END,
+                      COUNT(DISTINCT feed_item_key), now()
+                 FROM yy_transcript_engine_edit_grade_item
+             GROUP BY engine, category");
+}
+
+/**
+ * Per-engine consensus weight from the learned grades (category 'all').
+ * weight = grade / corpus-mean-grade, clamped to [$floor,$ceil]; engines below
+ * $minSamples (thin evidence) stay neutral at 1.0. Returns engine=>weight, or []
+ * when there isn't enough graded data yet (→ callers fall back to unweighted).
+ */
+function cfEngineWeights(PDO $db, float $floor = 0.5, float $ceil = 1.5, int $minSamples = 3000): array {
+    $w = [];
+    // 1) Automated edit-grade weights (only when there's enough graded spread to
+    //    weight against). These are CLAMPED to [$floor,$ceil] — the automated
+    //    signal can nudge trust but can NEVER deny an engine (drive it to 0); a
+    //    thin-data fluke must not silently remove a whole engine from the vote.
+    try {
+        $rows = $db->query("SELECT engine, samples, grade FROM yy_transcript_engine_edit_grade WHERE category = 'all'")
+                   ->fetchAll(PDO::FETCH_ASSOC);
+    } catch (\Throwable $e) { $rows = []; }
+    if ($rows) {
+        $trusted = [];
+        foreach ($rows as $r) {
+            if ((int)$r['samples'] >= $minSamples && $r['grade'] !== null) $trusted[] = (float)$r['grade'];
+        }
+        if (count($trusted) >= 2) {
+            $mean = array_sum($trusted) / count($trusted);
+            if ($mean > 0) {
+                foreach ($rows as $r) {
+                    if ((int)$r['samples'] < $minSamples || $r['grade'] === null) { $w[(string)$r['engine']] = 1.0; continue; }
+                    $w[(string)$r['engine']] = max($floor, min($ceil, (float)$r['grade'] / $mean));
+                }
+            }
+        }
+    }
+    // 2) Explicit effective-weight overrides (analysis/operator-set) applied LAST
+    //    and NOT floored: this is the ONLY path to a 0 weight = a full deny within
+    //    the unified system. Seeded with the former hardcoded denylist
+    //    (canary/qwen2 = 0). See cfDeniedEngines() + yy_transcript_engine_weight_override.
+    try {
+        foreach ($db->query("SELECT engine, weight FROM yy_transcript_engine_weight_override")->fetchAll(PDO::FETCH_ASSOC) as $o) {
+            $w[(string)$o['engine']] = max(0.0, (float)$o['weight']);
+        }
+    } catch (\Throwable $e) { /* table optional */ }
+    return $w;
 }

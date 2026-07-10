@@ -947,6 +947,12 @@ if (!$rows) {
     logMonitorEvent('transcript_worker', 'error',
         'Transcription failed for item ' . $itemKey,
         $detail);
+    // Fire the editable-build hook on SETTLE, not just success: if this FAILED
+    // baseline was the last one in flight, an opted-in item should still get its
+    // editable transcript built from whatever DID land (e.g. YouTube captions)
+    // instead of hanging forever at "builds when baselines finish". Best-effort;
+    // the consensus worker falls back to any available _auto source.
+    maybeAutoBuildEditable($db, $itemKey, $jobKey);
     exit(1);
 }
 
@@ -1024,6 +1030,9 @@ try {
         'job_error' => $e->getMessage(),
         'job_completed_dtime' => date('c'),
     ]);
+    // Settle-not-just-success: if this was the last baseline in flight, still let
+    // an opted-in item build its editable transcript from whatever landed.
+    maybeAutoBuildEditable($db, $itemKey, $jobKey);
     exit(1);
 }
 

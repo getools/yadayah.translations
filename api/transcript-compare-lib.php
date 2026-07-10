@@ -246,7 +246,7 @@ function findAnchor(array $primNorm, array $refNorm, int $pLo, int $pHi, int $rL
  */
 function unionSpineWords(PDO $db, int $itemKey, string $spineCode, array $baselineCodes,
                          array &$filled = [], float $minGapSecs = 8.0, int $minWords = 3,
-                         ?callable $soundGate = null): array {
+                         ?callable $soundGate = null, ?array $weights = null): array {
     $spineRows = loadCompareRows($db, $itemKey, $spineCode);
     $pWords = primaryWords($spineRows);
     $filled = [];
@@ -286,10 +286,16 @@ function unionSpineWords(PDO $db, int $itemKey, string $spineCode, array $baseli
             if (count($ws) < $minWords) continue;
             $tier = in_array($c, ['gpu-canary-1b-flash', 'gpu-qwen2-audio'], true) ? 1
                   : (str_ends_with($c, '-word') ? 3 : 2);
-            $scored[] = ['code' => $c, 'tier' => $tier, 'words' => $ws];
+            // Learned edit-weight (1.0 = neutral / no data) decides between
+            // candidates of the SAME tier: the engine that historically lands
+            // closest to the human-edited final fills the gap. Null $weights →
+            // every w=1.0 → sort falls through to tier+count = old behaviour.
+            $gw = ($weights && isset($weights[$c])) ? (float)$weights[$c] : 1.0;
+            $scored[] = ['code' => $c, 'tier' => $tier, 'words' => $ws, 'w' => $gw];
         }
         if ($scored) {
-            usort($scored, fn($a, $b) => [$b['tier'], count($b['words'])] <=> [$a['tier'], count($a['words'])]);
+            usort($scored, fn($a, $b) => [$b['tier'], round($b['w'], 3), count($b['words'])]
+                                     <=> [$a['tier'], round($a['w'], 3), count($a['words'])]);
             $pick = $scored[0];
             $inserts[] = ['start' => $gapStart, 'end' => $gapEnd, 'code' => $pick['code'], 'words' => $pick['words']];
         }
@@ -308,7 +314,7 @@ function unionSpineWords(PDO $db, int $itemKey, string $spineCode, array $baseli
     return $merged;
 }
 
-function buildComparison(PDO $db, int $itemKey, string $primary, array $refs, ?array $spineWords = null): array {
+function buildComparison(PDO $db, int $itemKey, string $primary, array $refs, ?array $spineWords = null, ?array $weights = null): array {
     // $spineWords (optional): a prebuilt primaryWords()-shaped spine, used by the
     // coverage-union path so voting can run over a spine whose gaps were filled
     // from other baselines. When null, the spine is loaded from $primary's rows
@@ -348,15 +354,22 @@ function buildComparison(PDO $db, int $itemKey, string $primary, array $refs, ?a
         $pn = $pNorm[$i];
         $rowRefs = [];
         $votes = [];
-        if ($pn !== '') $votes[$pn] = ['count' => 1, 'display' => $w['word']];
+        // Weighted majority vote: each engine casts its learned edit-weight
+        // (how closely it tracks the human-edited final), not a flat 1. The
+        // spine votes its own weight; refs add theirs. Null $weights → every
+        // weight is 1.0 → identical to the old flat count. The spine is seeded
+        // FIRST so an exact tie still resolves to the spine word (stable).
+        $spineW = ($weights && isset($weights[$primary])) ? (float)$weights[$primary] : 1.0;
+        if ($pn !== '') $votes[$pn] = ['count' => $spineW, 'display' => $w['word']];
         $agree = true;
         foreach ($refAligned as $code => $arr) {
             $rv = $arr[$i] ?? '';
             $rowRefs[$code] = $rv;
             $rn = normTok($rv);
             if ($rv !== '') {
+                $rWt = ($weights && isset($weights[$code])) ? (float)$weights[$code] : 1.0;
                 if (!isset($votes[$rn])) $votes[$rn] = ['count' => 0, 'display' => $rv];
-                $votes[$rn]['count']++;
+                $votes[$rn]['count'] += $rWt;
             }
             if ($rn !== $pn) $agree = false;
         }

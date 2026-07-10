@@ -690,7 +690,7 @@
             .then(function (res) { fillBooksSection(res.data, res.secs); });
         fetchTimed('/api/search-transcripts.php?q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(mode) + '&limit=' + lim)
             .then(function (res) { fillVideoSection(q, mode, res.data, res.secs); });
-        fetchTimed('/api/community-search.php?q=' + encodeURIComponent(q))
+        fetchTimed('/api/community-search.php?q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(mode))
             .then(function (res) { fillChatSection(res.data, res.secs); });
     }
     function setCount(key, txt)   { var el = $('sscount-' + key);   if (el) el.textContent = txt; }
@@ -777,7 +777,8 @@
     function searchChat(q) {
         var area = $('ss-results');
         area.innerHTML = '<div class="ss-loading">Searching chat…</div>';
-        return fetchTimed('/api/community-search.php?q=' + encodeURIComponent(q))
+        var mode = getSearchMode();
+        return fetchTimed('/api/community-search.php?q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(mode))
             .then(function (res) { renderChatResults(q, res.data, res.secs); });
     }
     function renderChatResults(q, data, secs) {

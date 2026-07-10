@@ -220,19 +220,190 @@ function rewriteBibleCitations(string $text, array $bookNames): string {
  *   "Quran 005:033"  -> "Quran 5, 33"
  *   "Quran 003.150"  -> "Quran 3, 150"
  *   "Quran 9:5-7"    -> "Quran 9, 5 to 7"
- * Only the Quran uses the chapter:verse form in the YY corpus; the
- * Bukhari/Ishaq/Tabari citations are page/hadith codes and are left
- * untouched. Runs alongside rewriteBibleCitations (before applyTunes)
- * on every segment-builder path so the number reads the same on Azure
- * and on the self-hosted engines.
+ *
+ * Ishaq citations are single page references in the colon-glued form
+ * "Ishaq:315" (no space). Left raw, the colon glues the word to the
+ * number and the engine mangles it ("Ishaq:315" was heard as "Ishaq
+ * thousand three five"). Replace the colon with ", " so the page number
+ * stands alone and the voice pauses first: "Ishaq:315" -> "Ishaq, 315"
+ * ("Ishaq, three hundred fifteen"); abbreviated page ranges too:
+ * "Ishaq:132-3" -> "Ishaq, 132 to 3". Only fires when a digit follows
+ * the colon, so ordinary prose ("Ishaq reports:", "Ishaq agrees") and
+ * the bare-word "Ishaq" are untouched.
+ *
+ * Tabari citations are "Tabari <Roman volume>:<page>" (e.g. "Tabari
+ * IX:69"). The colon glues the volume to the page and the engine mangles
+ * both; convert the Roman numeral to an integer and comma-separate:
+ * "Tabari IX:69" -> "Tabari, 9, 69" ("Tabari, nine, sixty-nine").
+ *
+ * Bukhari/Muslim citations are Volume/Book/Number hadith codes
+ * ("Bukhari:V9B87N127", "Muslim:C34B20N4668"). Split each letter+number
+ * group and comma-separate so each is spoken on its own:
+ * "Muslim:C34B20N4668" -> "Muslim, C 34, B 20, N 4668" ("Muslim, C
+ * thirty-four, B twenty, N four thousand six hundred sixty-eight"). The
+ * rarer "Muslim 37:6676" book:number form is comma-split too. All fire
+ * only on a genuine citation shape (colon+code, or digit[:.]digit) so
+ * ordinary prose ("Muslim Arabs", "Bukhari Hadith") is untouched.
+ *
+ * Runs alongside rewriteBibleCitations (before applyTunes) on every
+ * segment-builder path so the number reads the same on Azure and the
+ * self-hosted engines.
  */
-function rewriteIslamicCitations(string $text): string {
-    return preg_replace_callback(
+function romanToInt(string $r): int {
+    static $map = ['I'=>1,'V'=>5,'X'=>10,'L'=>50,'C'=>100,'D'=>500,'M'=>1000];
+    $r = strtoupper($r);
+    $total = 0; $prev = 0;
+    for ($i = strlen($r) - 1; $i >= 0; $i--) {
+        $v = $map[$r[$i]] ?? 0;
+        if ($v < $prev) { $total -= $v; }
+        else            { $total += $v; $prev = $v; }
+    }
+    return $total;
+}
+
+/**
+ * Duration (ms) of the extra pause inserted between the parts of a scripture
+ * citation (source name / chapter / verse). Read from the '__cite_pause__'
+ * sentinel row in the Pause tab — same mechanism as '__new_chapter__' — so an
+ * admin can tune or disable it without a code change. 0 (or no row) = comma
+ * only (the engine's own prosodic pause). MAX across rows so a duplicate row
+ * doesn't zero it out. Clamped to Azure's 0..5000 <break> range.
+ */
+function ttsCitePauseMs(array $cfg): int {
+    $ms = 0;
+    foreach ($cfg['pauses'] ?? [] as $p) {
+        if (($p['tts_pause_search'] ?? '') === '__cite_pause__') $ms = max($ms, (int)$p['tts_pause_ms']);
+    }
+    return max(0, min(5000, $ms));
+}
+
+/**
+ * Spell a non-negative integer in English words, space-separated (no hyphens —
+ * autoregressive local engines can choke on "forty-two"). "142" -> "one hundred
+ * forty two". Used to keep Chatterbox/Kokoro/etc. from mangling multi-digit
+ * citation numbers (Chatterbox drops the hundreds place: "142" -> "forty two").
+ */
+function numberToWords(int $n): string {
+    if ($n < 0) return (string)$n;
+    static $ones = ['zero','one','two','three','four','five','six','seven','eight','nine',
+                    'ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen',
+                    'seventeen','eighteen','nineteen'];
+    static $tens = ['','','twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+    if ($n < 20)      return $ones[$n];
+    if ($n < 100)     { $r = $n % 10;   return $tens[intdiv($n,10)] . ($r ? ' ' . $ones[$r] : ''); }
+    if ($n < 1000)    { $r = $n % 100;  return $ones[intdiv($n,100)] . ' hundred' . ($r ? ' ' . numberToWords($r) : ''); }
+    if ($n < 1000000) { $r = $n % 1000; return numberToWords(intdiv($n,1000)) . ' thousand' . ($r ? ' ' . numberToWords($r) : ''); }
+    return (string)$n;
+}
+
+/**
+ * $pauseMs > 0 inserts a real <break> (via the shared PAUSE placeholder, id 0)
+ * after each comma the rewrite introduces, so the engine pauses between e.g.
+ * chapter and verse ("Quran 3, <break> 149") instead of running the numbers
+ * together. 0 keeps the comma-only behaviour. Detection callers (the resweep)
+ * pass 0 — the comma change alone is enough to flag an affected paragraph.
+ *
+ * $spell = true spells every citation number in words. Azure's number
+ * normaliser reads the digits correctly, but autoregressive local engines
+ * (Chatterbox voices the Quran/Ishaq/… categories) drop digits — "142" was
+ * heard as "forty two". Callers pass $spell=true on the local / ElevenLabs /
+ * Inworld paths and false (digits) for Azure.
+ */
+function rewriteIslamicCitations(string $text, int $pauseMs = 0, bool $spell = false): string {
+    $brk = $pauseMs > 0 ? sprintf("\x01PAUSE_0_%d\x01", $pauseMs) : '';
+    $sep = ', ' . $brk;   // comma + optional break between citation parts
+    $num = function ($n) use ($spell) { return $spell ? numberToWords((int)$n) : (string)(int)$n; };
+    // Quran chapter:verse -> "Quran <ch>, <vs>[ to <end>]"
+    $text = preg_replace_callback(
         '/\b(Qur[\x{2019}\x{02BE}\x{0027}]?an|Koran)\s+0*(\d+)\s*[:.]\s*0*(\d+)(?:\s*[-\x{2013}\x{2014}]\s*0*(\d+))?/u',
-        function ($m) {
-            $out = $m[1] . ' ' . (int)$m[2] . ', ' . (int)$m[3];
-            if (isset($m[4]) && $m[4] !== '') $out .= ' to ' . (int)$m[4];
+        function ($m) use ($sep, $num) {
+            $out = $m[1] . ' ' . $num($m[2]) . $sep . $num($m[3]);
+            if (isset($m[4]) && $m[4] !== '') $out .= ' to ' . $num($m[4]);
             return $out;
+        },
+        $text
+    );
+    // Ishaq page reference "Ishaq:315" -> "Ishaq, 315" (single page only,
+    // optional abbreviated range). Digit required after the colon.
+    $text = preg_replace_callback(
+        '/\bIshaq\s*:\s*0*(\d+)(?:\s*[-\x{2013}\x{2014}]\s*0*(\d+))?/u',
+        function ($m) use ($sep, $num) {
+            $out = 'Ishaq' . $sep . $num($m[1]);
+            if (isset($m[2]) && $m[2] !== '') $out .= ' to ' . $num($m[2]);
+            return $out;
+        },
+        $text
+    );
+    // Tabari Roman-volume:page "Tabari IX:69" -> "Tabari, 9, 69".
+    $text = preg_replace_callback(
+        '/\bTabari\s+([IVXLCDM]+)\s*:\s*0*(\d+)(?:\s*[-\x{2013}\x{2014}]\s*0*(\d+))?/u',
+        function ($m) use ($sep, $num) {
+            $out = 'Tabari' . $sep . $num(romanToInt($m[1])) . $sep . $num($m[2]);
+            if (isset($m[3]) && $m[3] !== '') $out .= ' to ' . $num($m[3]);
+            return $out;
+        },
+        $text
+    );
+    // Bukhari/Muslim hadith code "Muslim:C34B20N4668" -> "Muslim, C 34, B
+    // 20, N 4668". Requires >=2 letter+number groups so it never touches a
+    // stray "Muslim: 5".
+    $text = preg_replace_callback(
+        '/\b(Bukhari|Muslim)\s*:\s*([A-Z]\d+(?:[A-Z]\d+)+)/u',
+        function ($m) use ($sep, $num) {
+            preg_match_all('/([A-Z]+)(\d+)/', $m[2], $groups, PREG_SET_ORDER);
+            $parts = [];
+            foreach ($groups as $g) { $parts[] = $g[1] . ' ' . $num($g[2]); }
+            return $m[1] . $sep . implode($sep, $parts);
+        },
+        $text
+    );
+    // Rare Bukhari/Muslim book:number "Muslim 37:6676" -> "Muslim, 37, 6676".
+    $text = preg_replace_callback(
+        '/\b(Bukhari|Muslim)\s+0*(\d+)\s*[:.]\s*0*(\d+)/u',
+        function ($m) use ($sep, $num) {
+            return $m[1] . $sep . $num($m[2]) . $sep . $num($m[3]);
+        },
+        $text
+    );
+    return $text;
+}
+
+/**
+ * Rewrite clock times ("6:22 PM") so the engine speaks them as a time
+ * ("six twenty two P M") instead of running the colon-joined digits into
+ * one big number. Chatterbox reads "6:22 PM" as "six thousand twenty
+ * two"; splitting the hour from the minute and spelling both fixes it.
+ *
+ * Only an explicit 12-hour time carrying an AM/PM marker is matched
+ * ("PM", "p.m.", "P M", "6:22pm") so it never touches a Bible or Islamic
+ * chapter:verse citation, a score, or a ratio — those have no meridiem.
+ * Minutes are read the natural clock way:
+ *   6:00 PM -> "six P M"            (top of the hour, minutes dropped)
+ *   6:05 PM -> "six oh five P M"    (leading-zero minutes)
+ *   6:22 PM -> "six twenty two P M"
+ * The meridiem is emitted as spaced capitals ("P M") so the engine reads
+ * the letters rather than voicing "pm" as a word.
+ *
+ * $spell mirrors rewriteIslamicCitations: Azure's normaliser already reads
+ * "6:22 PM" correctly, so the Azure path ($spell=false) leaves the text
+ * untouched; the autoregressive local engines ($spell=true) — which mangle
+ * the run-together number — get the fully spelled-out form. Runs after the
+ * citation rewrites so a "Quran 6:22" style reference (colon already
+ * removed) is never seen here.
+ */
+function rewriteClockTimes(string $text, bool $spell = false): string {
+    if (!$spell) return $text;
+    return preg_replace_callback(
+        '/\b(1[0-2]|0?[1-9]):([0-5]\d)\s*([AaPp])\.?\s*[Mm]\.?/u',
+        function ($m) {
+            $hour = (int)$m[1];
+            $min  = (int)$m[2];
+            $mer  = strtoupper($m[3]) . ' M';   // "A M" / "P M" — read as letters
+            $out  = numberToWords($hour);
+            if ($min === 0)    { /* top of the hour: hour alone */ }
+            elseif ($min < 10) { $out .= ' oh ' . numberToWords($min); }
+            else               { $out .= ' ' . numberToWords($min); }
+            return $out . ' ' . $mer;
         },
         $text
     );
@@ -374,27 +545,72 @@ function rebuildVolumeMp3Zip(PDO $db, int $volumeKey): bool {
     $dir = is_dir($containerDir) ? $containerDir : $hostDir;
     if (!is_dir($dir)) return false;
 
-    $files = glob($dir . '/' . $slug . '-ch*.{mp3,opus,wav}', GLOB_BRACE) ?: [];
+    // Chapter files are named {slug}-c{NN}-p{profile}.{ext} (the build worker's
+    // sprintf uses '-c%02d-', NOT the older '-ch{NN}' this glob used to assume —
+    // so the old '-ch*' matched nothing and every rebuild silently returned
+    // false). Match '-c' followed by a digit so per-chapter files are picked up
+    // while the redundant whole-book '-cbook-' file is excluded.
+    $files = glob($dir . '/' . $slug . '-c[0-9]*.{mp3,opus,wav}', GLOB_BRACE) ?: [];
     if (!$files) return false;
     sort($files);
 
     $zipPath = $dir . '/' . $slug . '.mp3.zip';
 
-    // Keep filenames intact ({volume_code}-ch{NN}.{ext}) inside the zip
-    // so someone unzipping multiple books in one directory ends up with
-    // each chapter clearly tagged to its volume. Container PHP doesn't
-    // ship ext-zip, so we shell out to /usr/bin/zip with -j (junk paths)
-    // since the source files all live in the same directory anyway.
+    // Keep filenames intact ({volume_code}-c{NN}-p{profile}.{ext}) inside the
+    // zip so someone unzipping multiple books in one directory ends up with
+    // each chapter clearly tagged to its volume — hence junk-paths (basename
+    // only), since the source files all live in the same directory anyway.
     $tmpZip = $dir . '/.tmp_' . basename($zipPath) . '.' . bin2hex(random_bytes(4));
-    $cmd = 'zip -q -j ' . escapeshellarg($tmpZip);
-    foreach ($files as $f) $cmd .= ' ' . escapeshellarg($f);
-    $cmd .= ' 2>&1';
-    $out = []; $rc = 0;
-    exec($cmd, $out, $rc);
-    if ($rc !== 0 || !is_file($tmpZip)) {
-        @unlink($tmpZip);
-        return false;
+
+    // The prod web container ships neither the `zip` CLI nor PHP ext-zip, so a
+    // single `zip -q -j` shell-out silently failed every rebuild. Try the
+    // available packagers in order (zip CLI → ZipArchive → python3 stdlib
+    // zipfile) so this works both in prod and on dev/mirror boxes that do have
+    // `zip`. MP3s are already compressed, so a STORED (no-deflate) archive is
+    // fine and much faster.
+    $built = false;
+
+    $zipBin = trim(shell_exec('command -v zip 2>/dev/null') ?: '');
+    if ($zipBin !== '') {
+        $cmd = escapeshellarg($zipBin) . ' -q -j -X ' . escapeshellarg($tmpZip);
+        foreach ($files as $f) $cmd .= ' ' . escapeshellarg($f);
+        $cmd .= ' 2>&1';
+        $out = []; $rc = 0;
+        exec($cmd, $out, $rc);
+        $built = ($rc === 0 && is_file($tmpZip) && filesize($tmpZip) > 0);
+        if (!$built) @unlink($tmpZip);
     }
+
+    if (!$built && class_exists('ZipArchive')) {
+        $za = new ZipArchive();
+        if ($za->open($tmpZip, ZipArchive::CREATE | ZipArchive::OVERWRITE) === true) {
+            foreach ($files as $f) $za->addFile($f, basename($f));
+            $za->close();
+        }
+        $built = is_file($tmpZip) && filesize($tmpZip) > 0;
+        if (!$built) @unlink($tmpZip);
+    }
+
+    if (!$built) {
+        $pyBin = trim(shell_exec('command -v python3 2>/dev/null') ?: '');
+        if ($pyBin !== '') {
+            // One-liner (no newlines): store each file under its basename.
+            $pySrc = 'import sys,zipfile,os; '
+                   . 'z=zipfile.ZipFile(sys.argv[1],"w",zipfile.ZIP_STORED,allowZip64=True); '
+                   . '[z.write(f,os.path.basename(f)) for f in sys.argv[2:]]; z.close()';
+            $cmd = escapeshellarg($pyBin) . ' -c ' . escapeshellarg($pySrc)
+                 . ' ' . escapeshellarg($tmpZip);
+            foreach ($files as $f) $cmd .= ' ' . escapeshellarg($f);
+            $cmd .= ' 2>&1';
+            $out = []; $rc = 0;
+            exec($cmd, $out, $rc);
+            $built = ($rc === 0 && is_file($tmpZip) && filesize($tmpZip) > 0);
+            if (!$built) @unlink($tmpZip);
+        }
+    }
+
+    if (!$built) return false;
+
     $ok = @rename($tmpZip, $zipPath);
     if (!$ok) {
         $ok = @copy($tmpZip, $zipPath);
@@ -802,7 +1018,8 @@ function buildVoiceBlock(string $text, array $cfg, string $category, ?string $ov
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
-    $text = rewriteIslamicCitations($text);
+    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg));
+    $text = rewriteClockTimes($text);   // Azure reads times fine; no-op unless spelled
     // Apply tunes BEFORE pauses so tune regexes see the raw half-ring
     // and apostrophe-equivalent characters in the source. If pauses
     // ran first, "ʾ" (0 ms suppression pause) would have been swapped
@@ -1272,7 +1489,8 @@ function azureOutputFormats(): array {
  * detection is handled separately by per-series pre-passes in the
  * build worker — segmentParagraph stays HTML-structure-driven.
  */
-function segmentParagraph(string $html, array &$carry = []): array {
+function segmentParagraph(string $html, ?array &$carry = null): array {
+    $carry ??= [];
     $segments = [];
     $cur = ['category' => null, 'text' => ''];
 
@@ -1381,7 +1599,7 @@ function segmentParagraph(string $html, array &$carry = []): array {
     // segments to that source so the citation AND its quote read in one
     // voice. Only 'other'/'quote' are moved; 'main' narration and other
     // styled scripture are left untouched.
-    $islamSources = ['islam', 'quran', 'islam_translation', 'bukhari', 'muslim', 'tabari', 'ishaq'];
+    $islamSources = ['islam', 'quran', 'bukhari', 'muslim', 'tabari', 'ishaq'];
     $islamCat = null;
     foreach ($merged as $s) {
         if (in_array($s['category'], $islamSources, true)) { $islamCat = $s['category']; break; }
@@ -1412,7 +1630,7 @@ function ttsCategories(): array {
     //   - Yada   ── YY-book content (general narration / translation / word definition)
     //   - Bible  ── per-translation children (KJV / NAS / NLT / JPS / NIV / ESV)
     //   - Islam  ── source-specific children (Quran / Bukhari / Muslim / Tabari / Ishaq / …)
-    //   - Other  ── catch-all for non-Yada, non-scriptural text (quote, mein_kampf, …)
+    //   - Other  ── catch-all for non-Yada, non-scriptural text (quote, kampf, …)
     // Children inherit voice/style/prosody from their parent when they
     // don't have their own row in yy_tts_category_voice. The ordering
     // here drives the rendering order in the Defaults tab and the Build
@@ -1456,23 +1674,32 @@ function ttsCategories(): array {
         // identified fall back to the generic Islam voice — this parent.
         ['code' => 'islam',           'parent' => null,    'label' => 'Islam — generic / fallback'],
         ['code' => 'quran',           'parent' => 'islam', 'label' => 'Quran'],
-        ['code' => 'islam_translation', 'parent' => 'islam', 'label' => 'Quran translation (Ahmed Ali, Pickthal, Shakir, Yusuf Ali, Noble Quran, Word-by-Word)'],
+        // Per-translator children of Quran. When a single verse is quoted
+        // with several named translations (e.g. Surah 111 in s07v02
+        // p213-214), the build worker's Quran-translation prepass tags each
+        // translation line ("Yusuf Ali: …") with its translator category
+        // here. An unconfigured child inherits its voice by walking the
+        // parent chain — child → quran → islam — so it never drops to the
+        // generic 'other' (Christian) voice.
+        ['code' => 'yusuf_ali',       'parent' => 'quran', 'label' => 'Quran translation — Yusuf Ali'],
+        ['code' => 'pickthal',        'parent' => 'quran', 'label' => 'Quran translation — Pickthal'],
+        ['code' => 'shakir',          'parent' => 'quran', 'label' => 'Quran translation — Shakir'],
+        ['code' => 'ahmed_ali',       'parent' => 'quran', 'label' => 'Quran translation — Ahmed Ali'],
+        ['code' => 'noble_quran',     'parent' => 'quran', 'label' => 'Quran translation — Noble Quran'],
+        ['code' => 'word_by_word',    'parent' => 'quran', 'label' => 'Quran translation — Word-by-Word'],
         ['code' => 'bukhari',         'parent' => 'islam', 'label' => 'Bukhari (Hadith)'],
         ['code' => 'muslim',          'parent' => 'islam', 'label' => 'Muslim (Sahih Muslim)'],
         ['code' => 'tabari',          'parent' => 'islam', 'label' => 'Tabari'],
         ['code' => 'ishaq',           'parent' => 'islam', 'label' => 'Ishaq'],
 
         // ── Other ── catch-all for non-Yada, non-scriptural text.
-        // 'quote' carries the historical extended-quote category; 'mein_kampf'
+        // 'quote' carries the historical extended-quote category; 'kampf'
         // is for citations from Hitler's Mein Kampf that the YY books quote
         // extensively (especially the s05 Babel and s06 Twistianity volumes).
         ['code' => 'other',           'parent' => null,    'label' => 'Other — generic catch-all'],
         ['code' => 'quote',           'parent' => 'other', 'label' => 'General extended quote (non-scripture)'],
-        // Parser emits cat='kampf' (5 chars) from data-style="kampf". Map
-        // to the same voice slot mein_kampf would use — they're the
-        // same content type, just different short-codes.
+        // Parser emits cat='kampf' (5 chars) from data-style="kampf".
         ['code' => 'kampf',           'parent' => 'other', 'label' => 'Mein Kampf'],
-        ['code' => 'mein_kampf',      'parent' => 'other', 'label' => 'Mein Kampf (legacy alias)'],
     ];
 }
 
@@ -1521,16 +1748,17 @@ function ttsCategoryParent(string $code): ?string {
 function ttsCollapseSkippedSegments(array $cfg, array $segments): array {
     $out = [];
     foreach ($segments as $s) {
+        if (!is_array($s)) continue; // guard against malformed input
         $cat = $s['category'] ?? '';
         if (!ttsCategoryReadable($cfg, $cat)) continue;
-        if ($out && end($out)['category'] === $cat) {
+        if ($out && (end($out)['category'] ?? '') === $cat) {
             // Glue with a single space so "Indeed" + ", on" reads
             // "Indeed, on" rather than running together as "Indeed,on".
             // segmentParagraph already trimmed each segment's outer
             // whitespace; we restore the boundary explicitly here.
-            $tail = $out[count($out) - 1]['text'];
+            $tail = $out[count($out) - 1]['text'] ?? '';
             $glue = ($tail !== '' && substr($tail, -1) !== ' ') ? ' ' : '';
-            $out[count($out) - 1]['text'] = $tail . $glue . $s['text'];
+            $out[count($out) - 1]['text'] = $tail . $glue . ($s['text'] ?? '');
         } else {
             $out[] = $s;
         }
@@ -1538,7 +1766,7 @@ function ttsCollapseSkippedSegments(array $cfg, array $segments): array {
     // Normalise whitespace inside each merged run (runs of >1 space →
     // single space; trim outer).
     foreach ($out as &$s) {
-        $s['text'] = preg_replace('/\s+/u', ' ', $s['text']);
+        $s['text'] = preg_replace('/\s+/u', ' ', $s['text'] ?? '');
         $s['text'] = trim($s['text']);
     }
     unset($s);
@@ -2066,7 +2294,8 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
-    $text = rewriteIslamicCitations($text);
+    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
+    $text = rewriteClockTimes($text, true);
     $tuneHits = 0;
     $matchedTuneSeed = null;
     // Phonetic flattening is Chatterbox-specific: pass the flattener only when
@@ -2230,7 +2459,8 @@ function buildInworldSegment(string $text, array $cfg, string $category): array 
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
-    $text = rewriteIslamicCitations($text);
+    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
+    $text = rewriteClockTimes($text, true);
     $tuneHits = 0;
     $matchedTuneSeed = null;
     $text = applyTunesInworld($text, ttsTunesForProvider($cfg, $providerKey, $voiceCode), $tuneHits, $matchedTuneSeed);
@@ -2302,7 +2532,8 @@ function buildElevenLabsSegment(string $text, array $cfg, string $category): arr
     if (!empty($cfg['bible_books'])) {
         $text = rewriteBibleCitations($text, $cfg['bible_books']);
     }
-    $text = rewriteIslamicCitations($text);
+    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
+    $text = rewriteClockTimes($text, true);
     // Same applyTunes path Azure uses — IPA columns produce <phoneme> tags,
     // SUB columns produce <sub alias="..."> tags. Both render correctly on
     // ElevenLabs v3 / flash_v2 / turbo_v2.

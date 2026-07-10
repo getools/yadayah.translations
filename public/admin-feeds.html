@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1783367583">
+    <meta name="page-version" content="1783718039">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
@@ -1821,7 +1821,7 @@ function openTranscript(itemKey) {
             + '<button onmousedown="event.preventDefault()" onclick="openSearchReplaceFromButton()" style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;" title="Cross-transcript find/replace — pre-fills Find with any text you have highlighted in a transcript row">Search &amp; Replace</button>'
             + '<button onclick="window.open(\'admin-transcript-compare.html?item_key=\' + _transcriptItemKey, \'_blank\')" style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;" title="Compare all Baseline (_auto) transcripts word-by-word; flag disagreements and save a majority-vote consensus-corrected version">Compare Baselines</button>'
             + '<button id="t-analyze-btn" onclick="openTranscriptAnalysis()" disabled style="background:#fff;border:1px solid #ccc;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;opacity:0.5;" title="No Whisper snapshot yet — re-run Transcribe Audio to capture one">Analyze Changes</button>'
-            + '<button onclick="openSmartCaptions()" style="background:#6c3fd6;color:#fff;border:1px solid #6c3fd6;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;" title="AI cleanup with the on-box LLM (learns from your edits) + resize lines into broadcast-sized caption cues">✨ Smart Captions</button>'
+            + '<button onclick="openSmartCaptions()" style="background:#6c3fd6;color:#fff;border:1px solid #6c3fd6;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;" title="Auto-Fix the SELECTED segments (tick them in the Excerpt column) — AI cleanup with the on-box LLM (learns from your edits) + resize lines into broadcast-sized caption cues. With nothing selected you\'ll be asked whether to run on the whole transcript.">✨ Auto-Fix</button>'
             + '</div>'
             + '<div id="t-upload-info" style="display:none;font-size:0.78rem;color:#666;background:#fffbe6;border:1px solid #ffe99e;border-radius:4px;padding:6px 10px;"></div>'
             + '<div id="t-find-bar" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;background:#f5f7fa;border:1px solid #e0e4ec;border-radius:4px;padding:6px 10px;">'
@@ -3746,7 +3746,8 @@ function runGenerateStudio() {
                 _gsResetGoBtn();
             });
         }
-        _gsPollTimer = setInterval(_gsSingle ? _gsPollTick : _gsMonitorTick, 2000);
+        _feedJobStreamEnsure();
+        _gsPollTimer = setInterval(_gsSingle ? _gsPollTick : _gsMonitorTick, 15000);
     });
 
     });   // end _gsResolveEditsSkip proceed callback
@@ -4305,7 +4306,8 @@ function _gsOpenMonitor() {
       + '</div>';
     document.body.appendChild(ov);
     _gsMonitorTick();                                         // initial load
-    _gsPollTimer = setInterval(_gsMonitorTick, 2000);
+    _feedJobStreamEnsure();
+    _gsPollTimer = setInterval(_gsMonitorTick, 15000);
 }
 
 // Map a server job_status to the client queue state vocabulary.
@@ -4680,7 +4682,8 @@ function _genTxLoadRunningJobs() {
             // Only poll if something is still in flight; an all-finished
             // snapshot needs no further ticking.
             if (_genTxJobs.some(function(j){ return j.state === 'queued' || j.state === 'running'; })) {
-                _genTxPollTimer = setInterval(_genTxPollTick, 2000);
+                _feedJobStreamEnsure();
+                _genTxPollTimer = setInterval(_genTxPollTick, 15000);
             }
         })
         .catch(function(){ /* silent — nothing-to-show is fine */ });
@@ -4703,6 +4706,36 @@ function closeGenerateTranscriptsPopover() {
 // on the latest /api/admin-transcript-models.php?action=job response.
 var _genTxJobs = [];
 var _genTxPollTimer = null;
+
+// ── feed_transcript_job push (poll → SSE) ─────────────────────────────
+// The yy_job_notify trigger (sql/job-notify-triggers.sql) fires on
+// insert / status / progress change of yy_feed_item_transcript_job; each
+// push runs whichever monitor tick is currently active, so the gen-studio
+// + gen-transcript monitors update instantly instead of waiting on the
+// (now 15s, was 2s) fallback interval. One stream per page, opened lazily
+// the first time a monitor timer starts, and closed only on page unload.
+var _feedJobES = null;
+function _feedJobStreamEnsure() {
+    if (_feedJobES || !window.EventSource) return;
+    try { _feedJobES = new EventSource('/api/admin-job-sse.php?channel=feed_transcript_job'); }
+    catch (e) { _feedJobES = null; return; }
+    _feedJobES.addEventListener('job', _feedJobPush);
+    _feedJobES.addEventListener('reconnect', function () {
+        try { _feedJobES.close(); } catch (e) {}
+        _feedJobES = null; setTimeout(_feedJobStreamEnsure, 1500);
+    });
+    _feedJobES.onerror = function () {
+        try { _feedJobES.close(); } catch (e) {}
+        _feedJobES = null; setTimeout(_feedJobStreamEnsure, 5000);
+    };
+}
+function _feedJobPush() {
+    // Run only the currently-active monitor tick(s); each self-terminates
+    // when its jobs are done and is safe to call more often than the timer.
+    if (_gsPollTimer)      { try { (_gsSingle ? _gsPollTick : _gsMonitorTick)(); } catch (e) {} }
+    if (_genTxPollTimer)   { try { _genTxPollTick(); } catch (e) {} }
+    if (_genTxBgPollTimer) { try { _genTxRefreshRunningCount(); } catch (e) {} }
+}
 
 function _genTxLineHtml(state, t, opts) {
     // state: 'queued' | 'running' | 'complete' | 'failed' | 'skipped' | 'dispatchFailed'
@@ -4865,7 +4898,8 @@ function _genTxRetryFailed() {
             }
         });
         _genTxUpdateSummary();
-        if (!_genTxPollTimer) _genTxPollTimer = setInterval(_genTxPollTick, 2000);
+        _feedJobStreamEnsure();
+        if (!_genTxPollTimer) _genTxPollTimer = setInterval(_genTxPollTick, 15000);
         // Wake the queue immediately so the operator sees progress.
         fetch(API + '/admin-transcript-models.php?action=poke',
               { method:'POST', credentials:'include' });
@@ -5017,7 +5051,8 @@ function _runGenerateTranscriptsDispatch(tasks, lines, results, goBtn, existingM
                 return j.state === 'queued' || j.state === 'running';
             });
             if (anyInFlight) {
-                _genTxPollTimer = setInterval(_genTxPollTick, 2000);
+                _feedJobStreamEnsure();
+                _genTxPollTimer = setInterval(_genTxPollTick, 15000);
                 // First tick immediately so 'pending' rows transition to
                 // 'running' as soon as the worker picks them up.
                 setTimeout(_genTxPollTick, 300);
@@ -5539,6 +5574,8 @@ function renderTranscriptRows(rows) {
     });
     tbody.innerHTML = html;
     renderSpeakersPanel(rows);
+    autoMergeDuplicateSpeakers(); // collapse same-abbrev+name duplicate speakers, once per item
+    maybeAutoMatchSpeakers();   // auto-identify recurring saved speakers, once per item
     autosizeAllTextRows();
 
     // Single click anywhere in the time cell seeks the video; double click
@@ -5892,8 +5929,12 @@ function splitTranscriptRow(btn) {
     } else {
         newTs = t2;
     }
-    newTs = Math.round(newTs);
-    var newSeg = formatSecondsToSegment(newTs);
+    // Keep hundredths precision — interpolated split points fall between two
+    // segments and rounding to a whole second collapses distinct rows onto the
+    // same timestamp. fmtSegHundredths renders H:MM:SS.ss (the same format the
+    // time cells display + save), so the fractional part survives the round-trip.
+    newTs = Math.round(newTs * 100) / 100;
+    var newSeg = fmtSegHundredths(newTs);
 
     var newTr = document.createElement('tr');
     newTr.innerHTML = transcriptRowCells(newSeg, newTs, movedText);
@@ -6465,6 +6506,7 @@ function openRowSpeakerPicker(chipEl) {
     _rowSpkAnchor = chipEl;
     var pop = document.getElementById('t-row-spk-popover');
     if (!pop) return;
+    ensureSpeakerProfilesLoaded();   // so the global "Saved speakers" list can be offered
     var seen = {};
     document.querySelectorAll('#t-rows input[data-field="speaker"]').forEach(function(inp) {
         var v = inp.value.trim();
@@ -6485,6 +6527,32 @@ function openRowSpeakerPicker(chipEl) {
             +   '<span style="font-size:0.78rem;color:#31345A;">' + esc(nameTxt) + '</span>'
             + '</div>';
     });
+    // Saved (global) speakers not already present on this transcript — click to
+    // assign one directly, so a speaker you've identified before can be selected
+    // here without retyping it. Filtered by normalised identity so a speaker
+    // already in the list isn't offered twice. Populated lazily: if the profile
+    // list is still loading, refreshRowSpeakerPickerIfOpen() repaints on arrival.
+    if (_savedSpeakerProfiles && _savedSpeakerProfiles.length) {
+        var present = {};
+        labels.forEach(function(l){ present[_speakerIdentityKey(l)] = true; });
+        var availProfiles = _savedSpeakerProfiles.filter(function(p){
+            return p && p.label && !present[_speakerIdentityKey(p.label)];
+        });
+        if (availProfiles.length) {
+            html += '<div style="font-size:0.7rem;color:#888;border-top:1px dashed #eee;margin-top:4px;padding:5px 6px 2px;">Saved speakers</div>';
+            availProfiles.forEach(function(p) {
+                var pname = p.name || parseSpeakerLabel(p.label).name || p.label;
+                html += '<div class="t-row-spk-opt" onclick="pickRowSpeaker(' + JSON.stringify(p.label).replace(/"/g, '&quot;') + ')"'
+                    +   ' style="display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:4px;cursor:pointer;"'
+                    +   ' onmouseover="this.style.background=\'#f0f4ff\';" onmouseout="this.style.background=\'\';"'
+                    +   ' title="Assign the saved speaker ' + esc(pname) + '">'
+                    +   speakerChipForLabel(p.label)
+                    +   '<span style="font-size:0.78rem;color:#31345A;">' + esc(pname) + '</span>'
+                    +   '<span style="margin-left:auto;color:#c9a227;font-size:0.72rem;" title="Saved voice profile">★</span>'
+                    + '</div>';
+            });
+        }
+    }
     html += '<div class="t-row-spk-opt" onclick="pickRowSpeaker(\'\')"'
         +   ' style="display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:4px;cursor:pointer;color:#888;border-top:1px dashed #eee;margin-top:4px;"'
         +   ' onmouseover="this.style.background=\'#f5f5f5\';" onmouseout="this.style.background=\'\';">'
@@ -6544,6 +6612,12 @@ function pickRowSpeaker(label) {
     if (pop) pop.style.display = 'none';
     _rowSpkAnchor = null;
 }
+// Repaint the open per-row picker (e.g. once the saved-profile list arrives)
+// so its "Saved speakers" section fills in without the operator reopening it.
+function refreshRowSpeakerPickerIfOpen() {
+    var pop = document.getElementById('t-row-spk-popover');
+    if (pop && pop.style.display === 'block' && _rowSpkAnchor) openRowSpeakerPicker(_rowSpkAnchor);
+}
 function createAndAssignSpeaker() {
     var color  = (document.getElementById('t-row-spk-new-color').value || '').toLowerCase();
     var abbrev =  document.getElementById('t-row-spk-new-abbrev').value.trim();
@@ -6554,6 +6628,12 @@ function createAndAssignSpeaker() {
     if (color === hashColor) color = '';
     if (abbrev && name && abbrev === speakerAbbrev(name)) abbrev = '';
     var label = formatSpeakerLabel(abbrev, name, color);
+    // Identity-based auto-merge: if this speaker has the same abbreviation + name
+    // as one already on the transcript (differing only by colour, say), assign
+    // the EXISTING speaker's exact label — the one being identified adopts the
+    // existing speaker's colour — instead of creating a duplicate. No prompt.
+    var mergeTarget = _findSpeakerMergeTarget(speakerAbbrev(label), parseSpeakerLabel(label).name, null);
+    if (mergeTarget && mergeTarget !== label) label = mergeTarget;
     pickRowSpeaker(label);
 }
 function applyRowSpeakerLabel(chipEl, newLabel) {
@@ -6580,6 +6660,10 @@ function renderSpeakersPanel(rows) { _speakerPopoverRows = rows || []; }
 // A profile is keyed by NAME server-side (save_speaker_profile matches on
 // lower(name)), so we mirror that here.
 var _savedSpeakerProfileNames = null;
+// Full saved-profile objects [{key,name,label,samples}], cached alongside the
+// name map so the per-row picker can offer the global speaker list directly.
+// `null` = not loaded yet; `[]` = loaded/empty.
+var _savedSpeakerProfiles = null;
 function ensureSpeakerProfilesLoaded() {
     if (_savedSpeakerProfileNames !== null) return;   // loaded or in-flight
     _savedSpeakerProfileNames = {};                   // mark in-flight; avoids duplicate fetches
@@ -6596,11 +6680,19 @@ function ensureSpeakerProfilesLoaded() {
         // clobber it and revert the just-lit star.
         Object.keys(_savedSpeakerProfileNames || {}).forEach(function(k){ names[k] = true; });
         _savedSpeakerProfileNames = names;
-        refreshSpeakerPopoverIfOpen();   // repaint stars now that we know what's saved
+        _savedSpeakerProfiles = (d && d.profiles) ? d.profiles.slice() : [];
+        refreshSpeakerPopoverIfOpen();       // repaint stars now that we know what's saved
+        refreshRowSpeakerPickerIfOpen();     // fill the picker's "Saved speakers" section
     }).catch(function(){ /* leave as {} — stars stay empty, saving still works */ });
 }
 function isSpeakerProfileSaved(name) {
     return !!(_savedSpeakerProfileNames && name && _savedSpeakerProfileNames[String(name).trim().toLowerCase()]);
+}
+// Normalised identity of a speaker label — displayed abbreviation + name,
+// case-insensitive, colour ignored. Two labels with the same key are the same
+// speaker (used to hide already-present saved profiles from the picker).
+function _speakerIdentityKey(label) {
+    return speakerAbbrev(label).trim().toLowerCase() + '|' + parseSpeakerLabel(label).name.trim().toLowerCase();
 }
 // Read the CURRENT speaker of every row from the live table inputs rather than
 // the _speakerPopoverRows snapshot. Per-row reassignment (applyRowSpeakerLabel)
@@ -6700,7 +6792,12 @@ function buildSpeakerPopoverHtml() {
         + '</tr>';
     html += '</table>';
     if (!ro) {
-        html += '<div style="margin-top:8px;"><button onclick="fillSpeakersFromBaseline()" style="background:#eef;border:1px solid #ccd;border-radius:4px;padding:4px 9px;font-size:0.74rem;cursor:pointer;" title="Label each segment that has no speaker yet, using the automatic voice-based speaker detection (WhisperX). Doesn\'t change any text and won\'t overwrite speakers you have set.">Auto-assign unlabeled segments</button></div>';
+        html += buildSpeakerSuggestionHtml(labels);
+        html += '<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;">'
+             +    '<button onclick="fillSpeakersFromBaseline()" style="background:#eef;border:1px solid #ccd;border-radius:4px;padding:4px 9px;font-size:0.74rem;cursor:pointer;" title="Label each segment that has no speaker yet, using the automatic voice-based speaker detection (WhisperX). Doesn\'t change any text and won\'t overwrite speakers you have set.">Auto-assign unlabeled segments</button>'
+             +    '<button onclick="matchSpeakersAgainstProfiles(true)" style="background:#eef;border:1px solid #ccd;border-radius:4px;padding:4px 9px;font-size:0.74rem;cursor:pointer;" title="Match this transcript’s generic SPEAKER_xx voices against your saved speakers and name the confident ones.">Match against saved speakers</button>'
+             +    '<button onclick="openSpeakerManager()" style="background:none;border:1px solid #ddd;border-radius:4px;padding:4px 9px;font-size:0.74rem;cursor:pointer;color:#555;" title="View, rename, delete or merge your saved speakers.">Manage saved speakers…</button>'
+             +  '</div>';
         html += '<div style="font-size:0.7rem;color:#888;margin-top:6px;">Abbreviation drives the chip; if blank it derives from the name.</div>';
     }
     return html;
@@ -6777,6 +6874,76 @@ function _countRowsWithSpeaker(label) {
     document.querySelectorAll('#t-rows input[data-field="speaker"]').forEach(function(inp){ if ((inp.value||'') === label) c++; });
     return c;
 }
+// Group the transcript's distinct speaker labels by their normalised identity
+// (displayed abbreviation + name, case-insensitive, colour ignored). Any group
+// with more than one stored label is a set of speakers that render identically
+// but sit on separate rows — e.g. "YMG|YMG" and "YMG|YMG|#a30", the reported
+// "two YMG speakers". Returns [{ labels:[...], canonical, total }] for the
+// duplicate groups only; canonical = the label carrying the most segments
+// (ties → first seen), i.e. the one the others should fold into.
+function _speakerDuplicateGroups() {
+    var groups = {}, order = [];
+    _distinctSpeakerLabels(null).forEach(function(lbl){
+        var a = speakerAbbrev(lbl).trim().toLowerCase();
+        var n = parseSpeakerLabel(lbl).name.trim().toLowerCase();
+        if (!a && !n) return;
+        var key = a.length + '|' + a + '|' + n;
+        if (!groups[key]) { groups[key] = []; order.push(key); }
+        groups[key].push(lbl);
+    });
+    var out = [];
+    order.forEach(function(key){
+        var labels = groups[key];
+        if (labels.length < 2) return;
+        var canonical = labels[0], best = -1, total = 0;
+        labels.forEach(function(lbl){
+            var c = _countRowsWithSpeaker(lbl);
+            total += c;
+            if (c > best) { best = c; canonical = lbl; }
+        });
+        out.push({ labels: labels, canonical: canonical, total: total });
+    });
+    return out;
+}
+// Items already auto-merged this page load, so re-rendering doesn't re-run.
+var _autoMergedItems = {};
+// Automatically fold any duplicate speaker groups (same abbreviation + name,
+// differing only by colour) into their canonical label — the established
+// speaker with the most segments, whose colour the merged rows adopt. Runs
+// once when a transcript loads, silently, via the same bulk rename_speaker path
+// commitSpeakerRename uses. This is what collapses e.g. two "YMG" speakers.
+function autoMergeDuplicateSpeakers() {
+    var ik = _transcriptItemKey;
+    if (!ik || _transcriptReadonly) return;
+    if (_autoMergedItems[ik]) return;
+    _autoMergedItems[ik] = true;
+    var groups = _speakerDuplicateGroups();
+    if (!groups.length) return;
+    var statusEl = document.getElementById('t-status');
+    var folded = 0;
+    groups.forEach(function(g){
+        g.labels.forEach(function(from){
+            if (from === g.canonical) return;   // canonical = the existing speaker; keep it
+            folded++;
+            _spkRenameChain = _spkRenameChain.then(function(){
+                return fetch(API + '/admin-transcript.php', {
+                    method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({action:'rename_speaker', item_key: ik, from: from, to: g.canonical})
+                }).then(function(r){ return safeJson(r); }).then(function(d){
+                    if (d && !d.error) _applySpeakerLabelChangeInDom(from, g.canonical);
+                });
+            });
+        });
+    });
+    if (!folded) return;
+    _spkRenameChain = _spkRenameChain.then(function(){
+        refreshSpeakerPopoverIfOpen();
+        if (statusEl) {
+            statusEl.textContent = '✓ Merged duplicate speakers';
+            setTimeout(function(){ if (statusEl.textContent.charAt(0) === '✓') statusEl.textContent = ''; }, 2500);
+        }
+    });
+}
 function commitSpeakerRename(inputEl) {
     var tr = inputEl.closest('tr');
     if (!tr || !_transcriptItemKey) return;
@@ -6804,14 +6971,13 @@ function commitSpeakerRename(inputEl) {
     // rename below folds these rows into it.
     var doMerge = false;
     var _toP = parseSpeakerLabel(to);
+    // Identity-based auto-merge: if the edited abbreviation + name now matches an
+    // EXISTING different speaker, fold into it silently — the one being changed
+    // adopts the existing speaker's exact label (colour and all). No prompt.
     var mergeTarget = _findSpeakerMergeTarget(speakerAbbrev(to), _toP.name, from);
     if (mergeTarget && mergeTarget !== to) {
-        var _disp = _toP.name || speakerAbbrev(to);
-        var _cnt = _countRowsWithSpeaker(from);
-        if (confirm('A speaker "' + _disp + '" with the same abbreviation and name already exists.\n\nMerge these ' + _cnt + ' segment(s) into it? They’ll share one label and colour.')) {
-            to = mergeTarget;
-            doMerge = true;
-        }
+        to = mergeTarget;
+        doMerge = true;
     }
     // Advance this row's identity SYNCHRONOUSLY so editing a second field
     // (e.g. colour after abbreviation) renames from the NEW label, not the
@@ -6913,6 +7079,185 @@ function fillSpeakersFromBaseline() {
             }, 3500);
         }
         if (_transcriptItemKey) loadTranscript();
+    });
+}
+
+// ── Auto-recognise saved speakers ────────────────────────────────────────
+// Near-miss suggestions from the last match, keyed by item then raw label:
+//   _speakerSuggestions[itemKey] = { SPEAKER_04: {name, profile_key, sim}, ... }
+// Rendered as one-click "Assign <name>? (0.49)" chips in the popover.
+var _speakerSuggestions = {};
+// Items already auto-matched this page load, so opening/reloading a transcript
+// doesn't re-run the match on every render.
+var _autoMatchedItems = {};
+
+// When a transcript with generic SPEAKER_xx labels loads and there are saved
+// voice profiles, match once automatically: strong matches are applied
+// server-side (and reflected in the DOM in place), near-misses are stashed as
+// suggestions. Silent — only surfaces a status line when it actually renames.
+function maybeAutoMatchSpeakers() {
+    var ik = _transcriptItemKey;
+    if (!ik || _transcriptReadonly) return;
+    if (_autoMatchedItems[ik]) return;
+    var vals = currentRowSpeakerValues();
+    if (!vals.some(function(s){ return /^SPEAKER_\d+$/.test(s); })) return;  // nothing generic to identify
+    _autoMatchedItems[ik] = true;
+    matchSpeakersAgainstProfiles(false);
+}
+
+// Ask the server to match this item's raw SPEAKER_xx labels against the saved
+// global profiles. Applies strong matches; returns near-miss suggestions.
+// manual=true reflects an explicit button press (louder status, always runs).
+function matchSpeakersAgainstProfiles(manual) {
+    var ik = _transcriptItemKey;
+    if (!ik || _transcriptReadonly) return;
+    _autoMatchedItems[ik] = true;
+    var statusEl = document.getElementById('t-status');
+    if (manual && statusEl) statusEl.textContent = 'Matching against saved speakers…';
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'match_speaker_profiles', item_key: ik})
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        if (!d || d.error) { if (manual && statusEl) statusEl.textContent = '✗ ' + ((d && d.error) || 'match failed'); return; }
+        (d.matched || []).forEach(function(m){ _applySpeakerLabelChangeInDom(m.from, m.to); });
+        // Stash suggestions for this item so the popover can offer them.
+        var sug = {};
+        (d.suggestions || []).forEach(function(s){ sug[s.from] = s; });
+        _speakerSuggestions[ik] = sug;
+        var applied = (d.matched || []).length;
+        if (statusEl) {
+            if (applied) {
+                statusEl.textContent = '✓ Auto-identified ' + d.matched.map(function(m){ return m.name; }).join(', ');
+                setTimeout(function(){ if (statusEl.textContent.charAt(0) === '✓') statusEl.textContent = ''; }, 3500);
+            } else if (manual) {
+                statusEl.textContent = (d.suggestions && d.suggestions.length)
+                    ? 'No confident match — ' + d.suggestions.length + ' suggestion(s) below'
+                    : 'No saved speaker matched this transcript';
+                setTimeout(function(){ statusEl.textContent = ''; }, 3500);
+            }
+        }
+        refreshSpeakerPopoverIfOpen();
+    }).catch(function(){ if (manual && statusEl) statusEl.textContent = '✗ match failed'; });
+}
+
+// One-click accept a near-miss suggestion: assign the saved profile to that raw
+// label across the transcript, in place.
+function assignSuggestedSpeaker(fromLabel, profileKey, name) {
+    if (!_transcriptItemKey || _transcriptReadonly) return;
+    var statusEl = document.getElementById('t-status');
+    if (statusEl) statusEl.textContent = 'Assigning ' + name + '…';
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'assign_speaker_profile', item_key: _transcriptItemKey, from_label: fromLabel, profile_key: profileKey})
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        if (!d || d.error) { if (statusEl) statusEl.textContent = '✗ ' + ((d && d.error) || 'assign failed'); return; }
+        _applySpeakerLabelChangeInDom(d.from, d.to);
+        if (_speakerSuggestions[_transcriptItemKey]) delete _speakerSuggestions[_transcriptItemKey][fromLabel];
+        refreshSpeakerPopoverIfOpen();
+        if (statusEl) {
+            statusEl.textContent = '✓ Assigned ' + d.name + ' (' + d.changed + ' segment(s))';
+            setTimeout(function(){ if (statusEl.textContent.charAt(0) === '✓') statusEl.textContent = ''; }, 3000);
+        }
+    });
+}
+
+// Build the near-miss suggestion block + match/manage controls appended under
+// the speaker table. Only lists suggestions whose raw label is still present.
+function buildSpeakerSuggestionHtml(presentLabels) {
+    var sug = _speakerSuggestions[_transcriptItemKey] || {};
+    var keys = Object.keys(sug).filter(function(k){ return presentLabels.indexOf(k) !== -1; });
+    var html = '';
+    if (keys.length) {
+        html += '<div style="margin-top:10px;border-top:1px solid #eee;padding-top:8px;">'
+             +  '<div style="font-size:0.72rem;color:#31345A;font-weight:600;margin-bottom:4px;">Possible matches to saved speakers</div>';
+        keys.forEach(function(k){
+            var s = sug[k];
+            html += '<div style="display:flex;align-items:center;gap:6px;margin:3px 0;font-size:0.74rem;">'
+                 +    '<span style="color:#888;">' + esc(k.replace(/^SPEAKER_/, 'Speaker ')) + '</span>'
+                 +    '<span style="color:#bbb;">→</span>'
+                 +    '<button onclick="assignSuggestedSpeaker(' + JSON.stringify(k).replace(/"/g,'&quot;') + ',' + s.profile_key + ',' + JSON.stringify(s.name).replace(/"/g,'&quot;') + ')" '
+                 +      'style="background:#eef;border:1px solid #ccd;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.74rem;" '
+                 +      'title="Assign the saved voice profile ' + esc(s.name) + ' to these segments">Assign ' + esc(s.name) + ' &nbsp;<span style="color:#999;">' + s.sim + '</span></button>'
+                 +  '</div>';
+        });
+        html += '</div>';
+    }
+    return html;
+}
+
+// ── Global saved-speaker manager ─────────────────────────────────────────
+// A standalone panel (independent of any transcript) to review every saved
+// voice profile and rename / delete / merge duplicates.
+function openSpeakerManager() {
+    var overlay = document.getElementById('spk-mgr-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'spk-mgr-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:10000;display:flex;align-items:flex-start;justify-content:center;padding-top:6vh;';
+        overlay.addEventListener('click', function(e){ if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+    }
+    overlay.innerHTML = '<div style="background:#fff;border-radius:8px;max-width:560px;width:92%;max-height:82vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.3);padding:16px 18px;">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+        +   '<div style="font-weight:700;color:#31345A;font-size:0.95rem;">Saved speakers</div>'
+        +   '<button onclick="document.getElementById(\'spk-mgr-overlay\').remove()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:#888;line-height:1;">&times;</button>'
+        + '</div>'
+        + '<div id="spk-mgr-body" style="color:#888;font-size:0.8rem;">Loading…</div>'
+        + '<div style="font-size:0.7rem;color:#999;margin-top:10px;">Deleting a profile stops it auto-matching future transcripts; segments already labelled with its name are left unchanged. Merge folds an accidental duplicate’s voice samples into another.</div>'
+        + '</div>';
+    loadSpeakerManager();
+}
+function loadSpeakerManager() {
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'list_speaker_profiles'})
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        var body = document.getElementById('spk-mgr-body');
+        if (!body) return;
+        var profiles = (d && d.profiles) || [];
+        if (!profiles.length) { body.innerHTML = '<div style="color:#999;">No saved speakers yet. Name a speaker in a transcript and click its ★ to save one.</div>'; return; }
+        var opts = profiles.map(function(p){ return '<option value="' + p.key + '">' + esc(p.name) + '</option>'; }).join('');
+        var rows = profiles.map(function(p){
+            var chip = '<span style="display:inline-block;background:' + speakerChipPalette(p.label) + ';color:#fff;font-size:0.62rem;font-weight:700;padding:1px 5px;border-radius:8px;min-width:12px;text-align:center;">' + esc(speakerAbbrev(p.label) || '?') + '</span>';
+            return '<tr data-key="' + p.key + '" style="border-top:1px solid #eee;">'
+                +   '<td style="padding:5px 6px;">' + chip + '</td>'
+                +   '<td style="padding:5px 6px;"><input class="spk-mgr-name" value="' + esc(p.name) + '" style="font-size:0.8rem;width:130px;padding:3px 6px;border:1px solid #ccc;border-radius:3px;"></td>'
+                +   '<td style="padding:5px 6px;color:#999;font-size:0.72rem;white-space:nowrap;">' + p.samples + ' sample' + (p.samples == 1 ? '' : 's') + '</td>'
+                +   '<td style="padding:5px 6px;white-space:nowrap;">'
+                +     '<button onclick="renameSpeakerProfile(' + p.key + ', this)" title="Save the new name" style="background:#31345A;color:#fff;border:none;border-radius:4px;padding:3px 8px;font-size:0.72rem;cursor:pointer;">Save</button> '
+                +     '<button onclick="deleteSpeakerProfile(' + p.key + ',' + JSON.stringify(p.name).replace(/"/g,'&quot;') + ')" title="Delete this saved speaker" style="background:none;border:none;color:#c0392b;cursor:pointer;font-size:0.9rem;">&times;</button>'
+                +   '</td>'
+                + '</tr>';
+        }).join('');
+        // Duplicate saved speakers no longer need a manual fold form — a speaker
+        // identified with the same abbreviation + name auto-merges into the
+        // existing one. The manager is just review / rename / delete now.
+        body.innerHTML = '<table style="border-collapse:collapse;width:100%;font-size:0.8rem;"><tbody>' + rows + '</tbody></table>';
+    });
+}
+function renameSpeakerProfile(key, btn) {
+    var tr = btn.closest('tr');
+    var inp = tr && tr.querySelector('.spk-mgr-name');
+    var name = inp ? inp.value.trim() : '';
+    if (!name) { alert('A name is required.'); return; }
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'rename_speaker_profile', profile_key: key, name: name})
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        if (!d || d.error) { alert('Rename failed: ' + ((d && d.error) || '?')); return; }
+        _savedSpeakerProfileNames = null;   // force reload of the star map
+        btn.textContent = '✓'; setTimeout(function(){ btn.textContent = 'Save'; }, 1200);
+    });
+}
+function deleteSpeakerProfile(key, name) {
+    if (!confirm('Delete saved speaker "' + name + '"?\n\nThis removes the reusable voice profile so it no longer auto-matches future transcripts. Segments already labelled with this name are unchanged.')) return;
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'delete_speaker_profile', profile_key: key})
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        if (!d || d.error) { alert('Delete failed: ' + ((d && d.error) || '?')); return; }
+        _savedSpeakerProfileNames = null;
+        loadSpeakerManager();
     });
 }
 // Save a named speaker's captured voice embedding into the reusable profile
@@ -7981,7 +8326,7 @@ function openExcerptPopover(ev) {
         + '<button type="button" onclick="createSnippetFromSelection()" '
         +   'style="width:100%;background:#31345A;color:#fff;border:none;padding:7px 10px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-weight:600;">Create Snippet</button>'
         + '<div style="border-top:1px solid #eee;margin:10px 0 6px;"></div>'
-        + '<div style="font-weight:600;color:#31345A;margin-bottom:4px;">Insert an existing snippet</div>'
+        + '<div style="font-weight:600;color:#31345A;margin-bottom:4px;">Insert Snippet</div>'
         + '<div id="t-snippet-list" style="max-height:220px;overflow-y:auto;color:#888;font-size:0.8rem;">Loading…</div>'
     );
     var inp = document.getElementById('t-snippet-label');
@@ -8017,15 +8362,60 @@ function refreshSnippetList() {
         if (!list.length) { box.innerHTML = '<div style="color:#999;">No snippets saved yet.</div>'; return; }
         box.innerHTML = list.map(function(s) {
             var n = parseInt(s.segment_count, 10) || 0;
-            return '<div onclick="insertSnippet(' + s.transcript_snippet_key + ', this.getAttribute(\'data-label\'))" '
-                + 'data-label="' + esc(s.transcript_snippet_label) + '" '
-                + 'style="padding:6px 8px;border:1px solid #eee;border-radius:4px;margin-bottom:4px;cursor:pointer;color:#333;" '
+            var key = s.transcript_snippet_key;
+            var lbl = esc(s.transcript_snippet_label);
+            return '<div data-label="' + lbl + '" '
+                + 'style="display:flex;align-items:center;gap:4px;padding:6px 8px;border:1px solid #eee;border-radius:4px;margin-bottom:4px;color:#333;" '
                 + 'onmouseover="this.style.background=\'#eef2ff\';" onmouseout="this.style.background=\'#fff\';">'
-                + '<span style="font-weight:600;">' + esc(s.transcript_snippet_label) + '</span>'
-                + '<span style="color:#999;font-size:0.75rem;"> · ' + n + ' segment' + (n === 1 ? '' : 's') + '</span>'
+                + '<span onclick="insertSnippet(' + key + ', this.parentNode.getAttribute(\'data-label\'))" '
+                +   'title="Insert this snippet over the selected segments" '
+                +   'style="flex:1 1 auto;min-width:0;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+                +   '<span style="font-weight:600;">' + lbl + '</span>'
+                +   '<span style="color:#999;font-size:0.75rem;"> · ' + n + ' segment' + (n === 1 ? '' : 's') + '</span>'
+                + '</span>'
+                + '<button type="button" onclick="renameSnippet(event, ' + key + ', this.closest(\'[data-label]\').getAttribute(\'data-label\'))" '
+                +   'title="Rename snippet" '
+                +   'style="flex:none;background:none;border:none;cursor:pointer;color:#666;font-size:0.9rem;padding:2px 4px;line-height:1;">✎</button>'
+                + '<button type="button" onclick="deleteSnippet(event, ' + key + ', this.closest(\'[data-label]\').getAttribute(\'data-label\'))" '
+                +   'title="Remove snippet" '
+                +   'style="flex:none;background:none;border:none;cursor:pointer;color:#c00;font-size:0.9rem;padding:2px 4px;line-height:1;">✕</button>'
                 + '</div>';
         }).join('');
     }).catch(function() { box.innerHTML = '<div style="color:#c00;">Could not load snippets.</div>'; });
+}
+
+// Rename a saved snippet (library-wide). Prompts for a new title, then reloads
+// the list. Only the label changes — segments and any inserted copies are kept.
+function renameSnippet(ev, snippetKey, currentLabel) {
+    if (ev) ev.stopPropagation();
+    var next = prompt('Rename snippet:', currentLabel || '');
+    if (next === null) return;
+    next = next.trim();
+    if (!next) { alert('Enter a title for the snippet.'); return; }
+    if (next === (currentLabel || '')) return;
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'rename_snippet', snippet_key: snippetKey, label: next})
+    }).then(function(r){return safeJson(r);}).then(function(d) {
+        if (!d || d.error) { alert('Could not rename snippet: ' + ((d && d.error) || 'unknown error')); return; }
+        refreshSnippetList();
+    }).catch(function() { alert('Could not rename snippet (network error).'); });
+}
+
+// Delete a saved snippet from the library. Confirms first. Transcripts that
+// already had it inserted keep their rows — only the reusable template is gone.
+function deleteSnippet(ev, snippetKey, label) {
+    if (ev) ev.stopPropagation();
+    if (!confirm('Remove snippet "' + (label || '') + '"?\n\nThis deletes the saved snippet. Transcripts where it was already inserted are not affected.')) return;
+    fetch(API + '/admin-transcript.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'delete_snippet', snippet_key: snippetKey})
+    }).then(function(r){return safeJson(r);}).then(function(d) {
+        if (!d || d.error) { alert('Could not remove snippet: ' + ((d && d.error) || 'unknown error')); return; }
+        refreshSnippetList();
+    }).catch(function() { alert('Could not remove snippet (network error).'); });
 }
 
 // Save the ticked segments as a new snippet. The first ticked segment's time is
@@ -8561,29 +8951,140 @@ function previewWhisperPrompt() {
             + '<div style="font-family:monospace;background:#fff;padding:8px;border:1px solid #ddd;border-radius:4px;white-space:pre-wrap;word-break:break-word;">' + esc(d.prompt) + '</div>';
     });
 }
+// Last-loaded corrections, keyed by correction_key — lets editCorrection()
+// pre-fill the inline edit inputs without another round-trip.
+var _tdCorrections = {};
+function tdCorrRowHtml(c) {
+    var dt = (c.correction_last_seen_dtime || '').substring(0,10);
+    return '<td style="padding:6px;">' + esc(c.correction_wrong) + '</td>'
+        + '<td style="padding:6px;color:#27ae60;">' + esc(c.correction_right) + '</td>'
+        + '<td style="padding:6px;text-align:center;">' + c.correction_count + '</td>'
+        + '<td style="padding:6px;text-align:center;">' + (c.correction_case_sensitive ? '✓' : '') + '</td>'
+        + '<td style="padding:6px;text-align:center;">' + (c.correction_word_boundary ? '✓' : '') + '</td>'
+        + '<td style="padding:6px;text-align:center;"><button onclick="toggleCorrection(' + c.correction_key + ')" style="background:none;border:1px solid #ccc;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:0.78rem;">' + (c.correction_active_flag ? 'On' : 'Off') + '</button></td>'
+        + '<td style="padding:6px;font-size:0.78rem;color:#888;">' + dt + '</td>'
+        + '<td style="padding:6px;text-align:center;white-space:nowrap;">'
+        +   '<button onclick="editCorrection(' + c.correction_key + ')" title="Edit" style="background:none;border:none;color:#31345A;cursor:pointer;font-size:0.95rem;">✎</button>'
+        +   '<button onclick="deleteCorrection(' + c.correction_key + ')" title="Delete" style="background:none;border:none;color:#c00;cursor:pointer;font-size:1rem;">×</button>'
+        + '</td>';
+}
+// Loaded corrections as an array (render order) + current sort. Clicking a
+// header sorts client-side; clicking the active header flips direction.
+var _tdCorrItems = [];
+var _tdCorrSort = { col: 'count', dir: 'desc' };   // matches the server's default order
+// col -> [accessor, type]. type 'num' also covers booleans (0/1).
+var TD_CORR_COLS = {
+    wrong:    [function(c){ return (c.correction_wrong || '').toLowerCase(); }, 'str'],
+    right:    [function(c){ return (c.correction_right || '').toLowerCase(); }, 'str'],
+    count:    [function(c){ return +c.correction_count || 0; },               'num'],
+    'case':   [function(c){ return c.correction_case_sensitive ? 1 : 0; },     'num'],
+    wb:       [function(c){ return c.correction_word_boundary ? 1 : 0; },      'num'],
+    active:   [function(c){ return c.correction_active_flag ? 1 : 0; },        'num'],
+    lastseen: [function(c){ return c.correction_last_seen_dtime || ''; },      'str']
+};
+function sortCorrectionsBy(col) {
+    if (!TD_CORR_COLS[col]) return;
+    if (_tdCorrSort.col === col) {
+        _tdCorrSort.dir = _tdCorrSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        _tdCorrSort.col = col;
+        // Text columns read best ascending; numeric/flags most-useful descending.
+        _tdCorrSort.dir = TD_CORR_COLS[col][1] === 'str' ? 'asc' : 'desc';
+    }
+    renderCorrections();
+}
+function tdCorrTh(col, label, extra) {
+    var active = _tdCorrSort.col === col;
+    var arrow = active ? (_tdCorrSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return '<th onclick="sortCorrectionsBy(\'' + col + '\')" title="Sort by ' + label + '" style="padding:6px;cursor:pointer;user-select:none;white-space:nowrap;'
+        + (active ? 'color:#31345A;font-weight:700;' : 'color:#555;')
+        + (extra || '') + '">' + label + '<span style="color:#31345A;">' + arrow + '</span></th>';
+}
 function loadCorrections() {
     fetch(API + '/admin-transcript-dict.php?type=corrections&_=' + Date.now(), {credentials:'include', cache:'no-store'})
         .then(function(r){return safeJson(r);})
         .then(function(d) {
-            var el = document.getElementById('td-corr-list');
-            if (!d.items || !d.items.length) { el.innerHTML = '<div style="padding:20px;text-align:center;color:#999;">No corrections yet.</div>'; return; }
-            var html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">'
-                + '<thead style="background:#f5f5f5;"><tr><th style="padding:6px;text-align:left;">Wrong</th><th style="padding:6px;text-align:left;">→ Right</th><th style="padding:6px;width:60px;">Count</th><th style="padding:6px;width:60px;">Case</th><th style="padding:6px;width:60px;">WB</th><th style="padding:6px;width:90px;">Active</th><th style="padding:6px;width:80px;">Last seen</th><th style="padding:6px;width:50px;"></th></tr></thead><tbody>';
-            d.items.forEach(function(c) {
-                var dt = (c.correction_last_seen_dtime || '').substring(0,10);
-                html += '<tr style="border-top:1px solid #eee;' + (c.correction_active_flag ? '' : 'opacity:0.5;') + '">'
-                    + '<td style="padding:6px;">' + esc(c.correction_wrong) + '</td>'
-                    + '<td style="padding:6px;color:#27ae60;">' + esc(c.correction_right) + '</td>'
-                    + '<td style="padding:6px;text-align:center;">' + c.correction_count + '</td>'
-                    + '<td style="padding:6px;text-align:center;">' + (c.correction_case_sensitive ? '✓' : '') + '</td>'
-                    + '<td style="padding:6px;text-align:center;">' + (c.correction_word_boundary ? '✓' : '') + '</td>'
-                    + '<td style="padding:6px;text-align:center;"><button onclick="toggleCorrection(' + c.correction_key + ')" style="background:none;border:1px solid #ccc;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:0.78rem;">' + (c.correction_active_flag ? 'On' : 'Off') + '</button></td>'
-                    + '<td style="padding:6px;font-size:0.78rem;color:#888;">' + dt + '</td>'
-                    + '<td style="padding:6px;text-align:center;"><button onclick="deleteCorrection(' + c.correction_key + ')" style="background:none;border:none;color:#c00;cursor:pointer;font-size:1rem;">×</button></td>'
-                    + '</tr>';
-            });
-            el.innerHTML = html + '</tbody></table>';
+            _tdCorrItems = (d && d.items) ? d.items.slice() : [];
+            renderCorrections();
         });
+}
+function renderCorrections() {
+    var el = document.getElementById('td-corr-list');
+    if (!el) return;
+    _tdCorrections = {};
+    if (!_tdCorrItems.length) { el.innerHTML = '<div style="padding:20px;text-align:center;color:#999;">No corrections yet.</div>'; return; }
+    var spec = TD_CORR_COLS[_tdCorrSort.col] || TD_CORR_COLS.count;
+    var get = spec[0], mul = _tdCorrSort.dir === 'asc' ? 1 : -1;
+    var items = _tdCorrItems.slice().sort(function(a, b) {
+        var av = get(a), bv = get(b);
+        if (av < bv) return -1 * mul;
+        if (av > bv) return 1 * mul;
+        // Stable tiebreak so equal rows don't jump around between sorts.
+        return (a.correction_key - b.correction_key) * mul;
+    });
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">'
+        + '<thead style="background:#f5f5f5;"><tr>'
+        +   tdCorrTh('wrong', 'Wrong', 'text-align:left;')
+        +   tdCorrTh('right', 'Right', 'text-align:left;')
+        +   tdCorrTh('count', 'Count', 'width:60px;')
+        +   tdCorrTh('case', 'Case', 'width:60px;')
+        +   tdCorrTh('wb', 'WB', 'width:60px;')
+        +   tdCorrTh('active', 'Active', 'width:90px;')
+        +   tdCorrTh('lastseen', 'Last seen', 'width:80px;')
+        +   '<th style="padding:6px;width:70px;"></th>'
+        + '</tr></thead><tbody>';
+    items.forEach(function(c) {
+        _tdCorrections[c.correction_key] = c;
+        html += '<tr id="tdcorr-row-' + c.correction_key + '" style="border-top:1px solid #eee;' + (c.correction_active_flag ? '' : 'opacity:0.5;') + '">'
+            + tdCorrRowHtml(c)
+            + '</tr>';
+    });
+    el.innerHTML = html + '</tbody></table>';
+}
+// Swap a row into inline-edit mode: Wrong/Right become text inputs and
+// Case/WB become checkboxes, pre-filled from the loaded row. Save posts an
+// 'edit' action; Cancel restores the read-only row without a reload.
+function editCorrection(key) {
+    var c = _tdCorrections[key];
+    var row = document.getElementById('tdcorr-row-' + key);
+    if (!c || !row) return;
+    row.style.opacity = '';
+    row.innerHTML =
+          '<td style="padding:6px;"><input type="text" id="tdedit-wrong-' + key + '" value="' + esc(c.correction_wrong) + '" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;"></td>'
+        + '<td style="padding:6px;"><input type="text" id="tdedit-right-' + key + '" value="' + esc(c.correction_right) + '" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:3px;"></td>'
+        + '<td style="padding:6px;text-align:center;color:#888;">' + c.correction_count + '</td>'
+        + '<td style="padding:6px;text-align:center;"><input type="checkbox" id="tdedit-case-' + key + '"' + (c.correction_case_sensitive ? ' checked' : '') + '></td>'
+        + '<td style="padding:6px;text-align:center;"><input type="checkbox" id="tdedit-wb-' + key + '"' + (c.correction_word_boundary ? ' checked' : '') + '></td>'
+        + '<td colspan="2" style="padding:6px;text-align:right;color:#888;font-size:0.78rem;">editing…</td>'
+        + '<td style="padding:6px;text-align:center;white-space:nowrap;">'
+        +   '<button onclick="saveCorrectionEdit(' + key + ')" title="Save" style="background:none;border:none;color:#27ae60;cursor:pointer;font-size:1rem;">✓</button>'
+        +   '<button onclick="cancelCorrectionEdit(' + key + ')" title="Cancel" style="background:none;border:none;color:#999;cursor:pointer;font-size:1rem;">↺</button>'
+        + '</td>';
+    var wi = document.getElementById('tdedit-wrong-' + key);
+    if (wi) wi.focus();
+}
+function cancelCorrectionEdit(key) {
+    var c = _tdCorrections[key];
+    var row = document.getElementById('tdcorr-row-' + key);
+    if (!c || !row) { loadCorrections(); return; }
+    row.style.opacity = c.correction_active_flag ? '' : '0.5';
+    row.innerHTML = tdCorrRowHtml(c);
+}
+function saveCorrectionEdit(key) {
+    var wrong = document.getElementById('tdedit-wrong-' + key).value.trim();
+    var right = document.getElementById('tdedit-right-' + key).value.trim();
+    if (!wrong || !right) { alert('Wrong and Right are both required.'); return; }
+    fetch(API + '/admin-transcript-dict.php', {
+        method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+            type:'corrections', action:'edit', key:key, wrong:wrong, right:right,
+            case_sensitive: document.getElementById('tdedit-case-' + key).checked,
+            word_boundary: document.getElementById('tdedit-wb-' + key).checked
+        })
+    }).then(function(r){return safeJson(r);}).then(function(d){
+        if (d && d.error) { alert(d.error); return; }
+        loadCorrections();
+    });
 }
 function addCorrection() {
     var wrong = document.getElementById('td-corr-wrong').value.trim();
@@ -8867,6 +9368,11 @@ function openSearchReplaceFromButton() {
 // Backend: api/admin-transcript-captionfit.php. Every Apply is snapshotted
 // server-side (yy_transcript_snapshot) so it is reversible via "Revert…".
 var _scMode = null;        // 'ai' | 'fit' — what the Apply button will commit
+// Auto-Fix scope: the feed_item_transcript_key values of the ticked Excerpt
+// rows this run is restricted to. null = whole transcript (operator confirmed
+// a full-transcript run when nothing was selected). Set in openSmartCaptions()
+// and sent to the backend by scPost() on every request.
+var _scScopeKeys = null;
 var _scAiResults = [];     // [{key,old,new,changed}]
 var _scFitCues = [];       // [{segment,secs,text,chars,lines}] — proposed (new)
 var _scFitBefore = [];     // [{segment,secs,text}] — current (live) segmentation
@@ -8892,9 +9398,14 @@ function scCancelRun() {
 
 function scEndpoint() { return API + '/admin-transcript-captionfit.php'; }
 function scPost(body) {
+    var payload = Object.assign({item_key: _transcriptItemKey}, body);
+    // Restrict this run to the ticked Excerpt segments when a scope is set. The
+    // backend honours scope_keys for ai_chunk / fit_preview / fit_apply and
+    // ignores it elsewhere (warm, llm_status, snapshots, restore).
+    if (_scScopeKeys && _scScopeKeys.length) payload.scope_keys = _scScopeKeys;
     var opt = {
         method: 'POST', credentials: 'include', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(Object.assign({item_key: _transcriptItemKey}, body))
+        body: JSON.stringify(payload)
     };
     if (_scAbort) opt.signal = _scAbort.signal;   // abortable while a pass is running
     return fetch(scEndpoint(), opt).then(function(r){ return safeJson(r); });
@@ -8995,6 +9506,26 @@ function scResetPreview() {
 function openSmartCaptions() {
     if (!_transcriptItemKey) { alert('Open a transcript first.'); return; }
     if (typeof pauseTranscriptVideo === 'function') pauseTranscriptVideo();
+    // Auto-Fix runs on the segments ticked in the Excerpt column. Collect their
+    // saved transcript keys; with nothing selected, confirm a whole-transcript
+    // run before opening (Cancel aborts). Selected-but-unsaved rows have no key
+    // yet — tell the operator to save first rather than silently widening scope.
+    var _selRows = (typeof _checkedExcerptRows === 'function') ? _checkedExcerptRows() : [];
+    var _selKeys = [];
+    _selRows.forEach(function(tr){
+        var k = parseInt(tr.getAttribute('data-tkey'), 10);
+        if (!isNaN(k) && k > 0) _selKeys.push(k);
+    });
+    if (_selRows.length && !_selKeys.length) {
+        alert('The selected segment(s) haven’t been saved yet.\n\nSave the transcript first, or clear the selection to run Auto-Fix on the whole transcript.');
+        return;
+    }
+    if (_selKeys.length) {
+        _scScopeKeys = _selKeys;
+    } else {
+        if (!confirm('No segments are selected.\n\nApply Auto-Fix to the ENTIRE transcript?')) return;
+        _scScopeKeys = null;
+    }
     var ov = document.getElementById('sc-overlay');
     if (!ov) {
         ov = document.createElement('div');
@@ -9005,10 +9536,10 @@ function openSmartCaptions() {
         ov.innerHTML = [
             '<div style="background:#fff;border-radius:10px;padding:20px;max-width:1360px;width:100%;margin-top:20px;">',
               '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">',
-                '<h3 style="margin:0;font-size:1.05rem;color:#31345A;">✨ Smart Captions — AI Cleanup &amp; Caption Sizing</h3>',
+                '<h3 style="margin:0;font-size:1.05rem;color:#31345A;">✨ Auto-Fix — AI Cleanup &amp; Caption Sizing</h3>',
                 '<button id="sc-close" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#999;">×</button>',
               '</div>',
-              '<div style="font-size:0.8rem;color:#777;margin-bottom:12px;">Operates on the <b>Current (editable)</b> transcript. Each Apply saves a snapshot first — use <b>Revert…</b> to undo.</div>',
+              '<div style="font-size:0.8rem;color:#777;margin-bottom:12px;"><b id="sc-scope-note" style="color:#5a2fb8;"></b> Operates on the <b>Current (editable)</b> transcript. Each Apply saves a snapshot first — use <b>Revert…</b> to undo.</div>',
               // Section A — AI cleanup
               '<div style="border:1px solid #e6e1f5;background:#faf8ff;border-radius:8px;padding:12px;margin-bottom:12px;">',
                 '<div style="font-weight:600;color:#5a2fb8;margin-bottom:8px;"><label style="cursor:pointer;" title="Uncheck to exclude AI cleanup from Process."><input type="checkbox" id="sc-enable-ai" checked style="vertical-align:middle;margin-right:6px;">1 · AI Cleanup</label> <span style="font-weight:400;color:#888;font-size:0.8rem;">— on-box LLM, primed with your saved corrections &amp; glossary (learns from your edits)</span></div>',
@@ -9070,6 +9601,10 @@ function openSmartCaptions() {
         ov.addEventListener('change', scSavePrefs);
     }
     ov.style.display = 'flex';
+    var _note = document.getElementById('sc-scope-note');
+    if (_note) _note.textContent = (_scScopeKeys && _scScopeKeys.length)
+        ? ('Applying to ' + _scScopeKeys.length + ' selected segment' + (_scScopeKeys.length === 1 ? '' : 's') + '.')
+        : 'Applying to the entire transcript.';
     scResetPreview();
     scLoadConfig();
 }
@@ -9353,7 +9888,10 @@ function scAiApply() {
 
 function scFitApply() {
     if (!_scFitCues.length) return;
-    if (!confirm('Replace the current ' + 'transcript lines with ' + _scFitCues.length + ' re-sized caption cues? A snapshot is saved first so you can revert.')) return;
+    var _scope = (_scScopeKeys && _scScopeKeys.length)
+        ? 'the ' + _scScopeKeys.length + ' selected segment' + (_scScopeKeys.length === 1 ? '' : 's')
+        : 'the current transcript lines';
+    if (!confirm('Replace ' + _scope + ' with ' + _scFitCues.length + ' re-sized caption cues? A snapshot is saved first so you can revert.')) return;
     scEnableApply(false);
     scSetStatus('Applying caption sizing…');
     var cues = _scFitCues.map(function(c){ return {segment: c.segment, text: c.text, speaker: c.speaker}; });

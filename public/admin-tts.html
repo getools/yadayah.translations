@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1783346405">
+    <meta name="page-version" content="1783702393">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -142,6 +142,12 @@
 
         .books-controls { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
         .books-controls select { padding:6px 10px; border:1px solid #ccc; border-radius:4px; font-size:0.9rem; min-width:280px; }
+        /* Books-tab "now building" status pill (right of the Volumes heading). */
+        .books-processing { font-size:0.85rem; font-weight:600; padding:4px 12px; border-radius:12px; white-space:nowrap; }
+        .books-processing--idle { background:#f0f1f4; color:#8a8c98; font-weight:500; }
+        .books-processing--active { background:#e8f0fe; color:#1a5fb4; border:1px solid #c5d8f7; }
+        .books-processing--active .bp-code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-weight:700; }
+        .books-processing--active .bp-para { color:#3a6ea5; font-weight:700; }
         .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:600; }
         .badge-complete { background:#d4edda; color:#155724; }
         .badge-running { background:#fff3cd; color:#856404; }
@@ -172,6 +178,9 @@
         .modal-box .btn-primary { background:#31345A; color:#fff; border-color:#31345A; }
         .modal-box .btn-cancel { background:#f8f8f8; }
 
+        /* Transient bubble shown when a Pitch value is out of the −12…+12 st range. */
+        .pitch-range-pop { position:absolute; z-index:2000; background:#c0392b; color:#fff; font-size:0.78rem; line-height:1.35; padding:6px 9px; border-radius:5px; max-width:280px; box-shadow:0 2px 8px rgba(0,0,0,0.25); pointer-events:none; }
+        .pitch-range-pop::before { content:''; position:absolute; top:-5px; left:14px; border:5px solid transparent; border-top:0; border-bottom-color:#c0392b; }
         .status-msg { font-size:0.85rem; color:#666; margin-top:6px; min-height:18px; }
         .status-msg.error { color:#c0392b; }
         .status-msg.success { color:#27ae60; }
@@ -313,7 +322,7 @@
                 </div>
                 <div class="preview-controls">
                     <label>Rate <input type="number" id="preview-rate" value="0" min="-50" max="200" style="width:60px"><span title="Percent — positive speeds the voice up, negative slows it down (range -50 to +200)" style="margin-left:2px;cursor:help;">%</span></label>
-                    <label>Pitch <input type="number" id="preview-pitch" value="0" min="-12" max="12" step="0.1" style="width:80px"><span title="Semitones — 12 = one octave. Positive raises the voice, negative lowers it (range -12 to +12). Fractional values like 0.5 give finer control." style="margin-left:2px;cursor:help;">st</span></label>
+                    <label>Pitch <input type="number" id="preview-pitch" value="0" min="-12" max="12" step="0.1" style="width:80px"><span title="Pitch shift in semitones (st) — 12 st = one octave. Positive raises the voice, negative lowers it. Valid range −12 to +12 st; fractional steps like 0.5 give finer control, and out-of-range values are clamped. For self-hosted voices (Chatterbox, Kokoro, CosyVoice, XTTS, F5 / Adolph…) the shift is applied to the rendered audio after synthesis (a resample) rather than by re-voicing the model, so large shifts can sound artificial. Azure applies it as native SSML prosody; ElevenLabs has no pitch control and ignores it." style="margin-left:2px;cursor:help;">st</span></label>
                     <span title="Self-hosted voices only. These are the SELECTED VOICE'S PROVIDER chunk sizes from the database — editing a value saves it back to that provider. Chunk sizing: aim for ~Target characters, breaking at the last punctuation (. ! ? ; : , — - ) and ( ); a chunk never goes below Min (except at end of text) and never exceeds Max (hard cap — falls back to the last whitespace if no punctuation fits)." style="cursor:help;color:#555;">Chunk (provider)</span>
                     <label>Min <input type="number" id="preview-chunk-min" min="20" max="400" step="10" autocomplete="off" style="width:71px" title="Provider chunk minimum — saved to the provider on change"></label>
                     <label>Target <input type="number" id="preview-chunk-target" min="40" max="500" step="10" autocomplete="off" style="width:71px" title="Provider chunk target — saved to the provider on change"></label>
@@ -607,7 +616,13 @@
     <!-- ── Books tab ──────────────────────────────────────────────── -->
     <div id="pane-books" class="tts-pane">
         <div class="tts-section">
-            <h3>Volumes</h3>
+            <div style="display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+                <h3 style="margin:0;">Volumes</h3>
+                <!-- Live "now building" indicator. Shows s##v## ch## · ¶N/M for the
+                     chapter the GPU worker is currently processing, or "Idle".
+                     Polled independently of the volume selection (see startBooksProcessingPoll). -->
+                <span id="books-processing" class="books-processing books-processing--idle" title="The chapter the TTS build worker is processing right now">Idle</span>
+            </div>
             <p class="desc">Pick a volume to see chapter-level audio status and build new files.</p>
             <div class="books-controls">
                 <select id="volume-select"><option value="">— Select volume —</option></select>
@@ -796,7 +811,8 @@ function activateTtsTab(tabName) {
     if (tabName === 'pronunciations') loadTunes();
     if (tabName === 'pauses') loadPauses();
     if (tabName === 'fonts')  loadFonts();
-    if (tabName === 'books') { loadVolumes(); populateBooksProfileSelect(); }
+    if (tabName === 'books') { loadVolumes(); populateBooksProfileSelect(); startBooksProcessingPoll(); }
+    else { stopBooksProcessingPoll(); }
     if (tabName === 'qa') loadQa();
     return true;
 }
@@ -1595,7 +1611,7 @@ async function renderCategoryRows() {
             '<select data-field="style" title="Speaking style (e.g. cheerful, chat, narration). Empty = no style override."></select>' +
             '<div class="prosody">' +
                 '<span style="display:inline-flex;align-items:center;gap:4px;">rate <input type="number" data-field="rate" min="-50" max="200" step="5" value="' + (saved.tts_voice_rate_pct || 0) + '"><span title="Percent — positive speeds the voice up, negative slows it down (range -50 to +200)" style="margin-left:2px;cursor:help;">%</span></span>' +
-                '<span style="display:inline-flex;align-items:center;gap:4px;">pitch <input type="number" data-field="pitch" min="-12" max="12" step="0.1" value="' + (saved.tts_voice_pitch_st || 0) + '" style="width:73px"><span title="Semitones — 12 = one octave. Positive raises the voice, negative lowers it. Fractional values like 0.5 give finer control." style="margin-left:2px;cursor:help;">st</span></span>' +
+                '<span style="display:inline-flex;align-items:center;gap:4px;">pitch <input type="number" data-field="pitch" min="-12" max="12" step="0.1" value="' + (saved.tts_voice_pitch_st || 0) + '" style="width:73px"><span title="Pitch shift in semitones (st) — 12 st = one octave. Positive raises the voice, negative lowers it. Valid range −12 to +12 st; fractional steps like 0.5 give finer control, and out-of-range values are clamped. For self-hosted voices (Chatterbox, Kokoro, CosyVoice, XTTS, F5 / Adolph…) the shift is applied to the rendered audio after synthesis (a resample) rather than by re-voicing the model, so large shifts can sound artificial. Azure applies it as native SSML prosody; ElevenLabs has no pitch control and ignores it." style="margin-left:2px;cursor:help;">st</span></span>' +
                 '<span style="display:inline-flex;align-items:center;gap:4px;">vol <input type="number" data-field="volume" min="0" max="100" step="5" value="' + (saved.tts_voice_volume || 100) + '" style="width:60px"></span>' +
             '</div>' +
             '<button class="btn-listen" data-cat="' + cat.code + '" title="Play a sample with current settings">▶</button>';
@@ -1673,6 +1689,7 @@ async function renderCategoryRows() {
         }
         rebuildVoiceSelect(savedVoiceCode);
         populateStyleOptions(voiceSel, styleSel, saved.tts_voice_style || '');
+        ttsGateRowProsody(row, providers);
 
         // Provider change: refilter voices + clear the style dropdown.
         // Don't autosave here — the voice select is now empty, so saving
@@ -1681,6 +1698,7 @@ async function renderCategoryRows() {
         provSel.addEventListener('change', function () {
             rebuildVoiceSelect();
             populateStyleOptions(voiceSel, styleSel, '');
+            ttsGateRowProsody(row, providers);
             // Picking "-default-" (provider_key 0) means "no engine, no voice"
             // for this category — clear its override entirely so it falls back to
             // inherit/default. save_category_voice with a blank voice_code DELETEs
@@ -5774,6 +5792,126 @@ var POLL_TIMER = null;
 // so an admin can edit one profile while watching another's builds.
 var BOOKS_PROFILE_KEY = 0;
 
+// ── Books-tab "now building" indicator ───────────────────────────────
+// Independent of the volume selection: the GPU worker (cap = 1) may be
+// processing a chapter in a volume the admin isn't currently viewing, and
+// the indicator should still show it. Polls ?action=processing while the
+// Books tab is open and shows "s##v## ch## · ¶N/M", or "Idle".
+var BOOKS_PROC_TIMER = null;
+
+function _pad2(n) { return String(n == null ? 0 : n).padStart(2, '0'); }
+
+// Latest 'now building' payload, kept so a click on the indicator can jump
+// to that volume/chapter/paragraph (see jumpToBuildingChapter). Null=idle.
+var LAST_BOOKS_PROC = null;
+
+function renderBooksProcessing(p) {
+    var el = $('books-processing');
+    if (!el) return;
+    if (!p) {
+        LAST_BOOKS_PROC = null;
+        el.className = 'books-processing books-processing--idle';
+        el.textContent = 'Idle';
+        el.title = 'No chapter is being processed right now';
+        el.style.cursor = '';
+        el.onclick = null;
+        return;
+    }
+    LAST_BOOKS_PROC = p;
+    var code = 's' + _pad2(p.series_number) + 'v' + _pad2(p.volume_number) + ' ch' + _pad2(p.chapter_number);
+    // Pull "Paragraph N / M" out of the worker's progress message when present.
+    var para = '';
+    var m = /paragraph\s+(\d+)\s*\/\s*(\d+)/i.exec(p.tts_audio_message || '');
+    if (m) para = ' · <span class="bp-para">¶' + m[1] + '/' + m[2] + '</span>';
+    else if (p.tts_audio_progress != null) para = ' · ' + p.tts_audio_progress + '%';
+    el.className = 'books-processing books-processing--active';
+    el.innerHTML = 'Building <span class="bp-code">' + escapeHtml(code) + '</span>' + para;
+    // Only clickable when we have the keys needed to navigate.
+    if (p.volume_key && p.chapter_key) {
+        el.style.cursor = 'pointer';
+        el.onclick = jumpToBuildingChapter;
+        el.title = 'Now building: ' + code + (p.tts_audio_message ? ' — ' + p.tts_audio_message : '') + ' · click to jump to this chapter';
+    } else {
+        el.style.cursor = '';
+        el.onclick = null;
+        el.title = 'Now building: ' + code + (p.tts_audio_message ? ' — ' + p.tts_audio_message : '');
+    }
+}
+
+// Clicking the live "now building" indicator jumps the admin straight to the
+// chapter the worker is on: selects its volume (series+book), loads the
+// chapter table, scrolls the chapter row into view, expands its paragraph
+// panel, and scrolls to + briefly highlights the paragraph currently being
+// synthesised (position N from the "¶N/M" progress message).
+async function jumpToBuildingChapter() {
+    var p = LAST_BOOKS_PROC;
+    if (!p || !p.volume_key || !p.chapter_key) return;
+    var vk = parseInt(p.volume_key, 10) || 0;
+    var ck = parseInt(p.chapter_key, 10) || 0;
+    if (!vk || !ck) return;
+    // The indicator lives on the Books pane, but make sure the tab is active
+    // and the volume list is populated before we drive the selection.
+    activateTtsTab('books');
+    await loadVolumes();
+    var sel = $('volume-select');
+    if (sel && String(sel.value) !== String(vk)) {
+        sel.value = String(vk);
+        if (window.sessionState && sessionState.save) sessionState.save('booksVolumeKey_' + TTS_KEY, vk);
+    }
+    // Load (or refresh) the chapter table for that volume and wait for rows.
+    await loadChapters(vk);
+    var tb = $('chapters-tbody');
+    var dRow = tb && tb.querySelector('tr[data-ck="' + ck + '"]:not(.paragraph-expand-row)');
+    if (dRow) dRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Force-expand the chapter's paragraph panel (loads the rows).
+    var caret = tb && tb.querySelector('.expand-caret[data-ck="' + ck + '"]');
+    if (caret) { try { await toggleChapterParas(caret, true); } catch (e) {} }
+    // Scroll to the paragraph the worker is on. "Paragraph N / M" — N is the
+    // 1-based position in the chapter, which is exactly the mini-table's first
+    // (position) column, so match on the displayed number to stay robust even
+    // if the row count differs from M.
+    var mm = /paragraph\s+(\d+)\s*\/\s*(\d+)/i.exec(p.tts_audio_message || '');
+    var pn = mm ? parseInt(mm[1], 10) : 0;
+    if (!pn) return;
+    var xRow = dRow && dRow.nextElementSibling && dRow.nextElementSibling.classList.contains('paragraph-expand-row')
+        ? dRow.nextElementSibling : null;
+    var grid = xRow && xRow.querySelector('.paragraph-grid');
+    if (!grid) return;
+    var target = null;
+    Array.prototype.slice.call(grid.querySelectorAll('table.paragraph-mini-table tbody tr[data-idx]')).some(function (tr) {
+        var posCell = tr.children[0];
+        if (posCell && posCell.textContent.trim() === String(pn)) { target = tr; return true; }
+        return false;
+    });
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Brief highlight so the eye lands on the right row.
+    var origBg = target.style.backgroundColor, origTrans = target.style.transition;
+    target.style.transition = 'background-color 0.4s';
+    target.style.backgroundColor = '#fff3b0';
+    setTimeout(function () {
+        target.style.backgroundColor = origBg;
+        setTimeout(function () { target.style.transition = origTrans; }, 500);
+    }, 1800);
+}
+
+async function refreshBooksProcessing() {
+    try {
+        var r = await api('/admin-tts-books.php?action=processing&tts_key=' + TTS_KEY);
+        renderBooksProcessing(r && r.processing);
+    } catch (e) { /* transient — leave the last state, try again next tick */ }
+}
+
+function startBooksProcessingPoll() {
+    refreshBooksProcessing();
+    if (BOOKS_PROC_TIMER) return;
+    BOOKS_PROC_TIMER = setInterval(refreshBooksProcessing, 5000);
+}
+
+function stopBooksProcessingPoll() {
+    if (BOOKS_PROC_TIMER) { clearInterval(BOOKS_PROC_TIMER); BOOKS_PROC_TIMER = null; }
+}
+
 async function loadVolumes() {
     if (VOLUMES.length) return;
     var r = await api('/admin-tts-books.php?action=volumes&tts_key=' + TTS_KEY);
@@ -6004,19 +6142,16 @@ async function _loadChaptersImpl(volumeKey) {
       })
       .catch(function () {});
     renderChapters();
-    // CRITICAL — DO NOT REINTRODUCE A FETCH HERE. The polling auto-refresh
-    // of the paragraph panel MUST NOT call list_paragraphs. Calling
-    // loadParagraphRows from polling caused the entire panel to wholesale
-    // re-render every 5 seconds (visible to the user as "the whole list
-    // refreshes"). The correct behavior — surgical per-row cell updates
-    // driven entirely from the chapter row's poll data ("synthed K /
-    // reused L / M fails" in tts_audio_message) — lives in
-    // _paraSurgicalFromChapters(). It only touches the ONE audio cell
-    // whose part just became available. To force a full re-fetch, the
-    // user clicks ↻ Refresh list inside the panel. See
-    // feedback_panel_refresh_regression in memory for context — this
-    // exact fetch has been re-added by 3 prior code changes; do not be
-    // the 4th.
+    // Live paragraph-panel refresh. _paraSurgicalFromChapters() routes any
+    // OPEN panel of an actively-building chapter through the surgical
+    // per-row differ so "processing" rows flip to their audio player as
+    // parts land — gated (building/transition only) + throttled (~15s) so
+    // idle/complete panels are never touched and playback is preserved.
+    // ⚠ Do NOT add a bare, unconditional loadParagraphRows()/list_paragraphs
+    // fetch here or anywhere in the poll path: that wholesale-re-renders the
+    // panel every tick (kills playback, flickers) — the regression the
+    // operator repeatedly reported. Keep the gating inside
+    // _paraSurgicalFromChapters(). See feedback_panel_refresh_regression.
     _paraSurgicalFromChapters();
     // Poll while anything is running.
     // Poll while anything is in motion. 'paused' is a settled state — no
@@ -6101,7 +6236,7 @@ function sseEnsureStream(volumeKey) {
             if (snap.volume && snap.volume.volume_code) ACTIVE_VOLUME_CODE = snap.volume.volume_code;
             $('chapters-table').style.display = '';
             renderChapters();
-            _paraSurgicalFromChapters();
+            _paraSurgicalFromChapters(true);   // live SSE push → prompt row-flip
         } catch (e) { console.error('sse snapshot parse error', e); }
     });
     _SSE.addEventListener('tts_progress', function (ev) {
@@ -6123,7 +6258,7 @@ function sseEnsureStream(volumeKey) {
             if (p.progress != null) c.tts_audio_progress = p.progress;
             if (p.message  != null) c.tts_audio_message  = p.message;
             renderChapters();
-            _paraSurgicalFromChapters();
+            _paraSurgicalFromChapters(true);   // live SSE push → prompt row-flip
             if (typeof updatePauseAllVisibility === 'function') updatePauseAllVisibility();
         } catch (e) { console.error('sse tts_progress parse error', e); }
     });
@@ -6426,8 +6561,17 @@ async function toggleChapterParas(el, forceOpen) {
     if (willOpen) {
         window._expandedAudioKeys.add(ak);
         await loadParagraphRows(ak, row.querySelector('.paragraph-grid'));
+        // Seed the live-refresh throttle with the chapter's current status so
+        // the next poll tick doesn't immediately re-fetch the panel we just
+        // rendered (and doesn't misread it as a state change).
+        try {
+            var _ch = (CHAPTERS || []).find(function (c) { return c.tts_audio_key === ak; });
+            (window._panelLiveState = window._panelLiveState || {})[ak] =
+                { status: _ch ? (_ch.tts_audio_status || 'none') : 'none', at: Date.now() };
+        } catch (e) {}
     } else {
         window._expandedAudioKeys.delete(ak);
+        if (window._panelLiveState) delete window._panelLiveState[ak];
     }
 }
 
@@ -6514,60 +6658,64 @@ function _paraRowSig(p) {
             p.part_idx == null ? 0 : 1].join(',');
 }
 
-// ⚠ DO NOT REMOVE — this function is what keeps the paragraph panel
-// from wholesale-refreshing on every 5s chapter poll. The poll calls
-// this instead of list_paragraphs, so the panel header counter ticks
-// up live while individual rows flip their audio cell as parts become
-// available. NEVER REPLACE THIS CALL WITH A loadParagraphRows() FETCH.
-// Driven entirely by the chapter row's tts_audio_message field
-// ("synthed K, reused L, M fails") — no network round-trip. Touches at
-// most ONE row per call (the audio cell of the newly-available part).
-// User clicks ↻ Refresh list to force a full re-fetch when they want
-// is_failed / is_skipped state to refresh.
-function _paraSurgicalFromChapters() {
+// ── Live per-row refresh for OPEN paragraph panels ───────────────────
+// When a chapter is actively building, each poll/SSE tick routes its
+// OPEN panel through the SURGICAL differ so a paragraph shown as
+// "◔ processing" flips to its audio player the moment its part lands —
+// exactly what a fresh page load would show, but touching ONLY the rows
+// whose status actually changed. This is a gated, throttled
+// list_paragraphs fetch fed into loadParagraphRows' isRendered path
+// (_paraSurgicalUpdate): server-authoritative per-row status + part_url
+// (no client URL-guessing), it preserves any <audio> the user is
+// playing (src-match guard) and never replaces the panel container.
+//
+// ⚠ Why a fetch IS allowed here now (and was NOT before): an earlier
+// version put an UNCONDITIONAL loadParagraphRows() in the poll path that
+// wholesale-re-rendered the whole panel every 5s — killed playback,
+// flickered — the regression the operator kept reporting. THIS path is
+// safe because it (a) fetches only while the chapter is running/pending
+// or on the single tick it changes state, (b) throttles to one fetch per
+// ~15s per panel, (c) never touches idle/complete panels (where playback
+// happens), and (d) applies the per-row data-sig diff, not a container
+// overwrite. The operator explicitly asked for this live row-flipping
+// behaviour (2026-07-10). See feedback_panel_refresh_regression.
+window._panelLiveState = window._panelLiveState || {};   // ak -> {status, at}
+function _paraSurgicalFromChapters(fromPush) {
     if (!window._expandedAudioKeys || !window._expandedAudioKeys.size) return;
+    var now = Date.now();
+    // A live SSE push (fromPush) means a paragraph genuinely just finished
+    // (the worker's per-paragraph DB update fired NOTIFY → tts_progress), so
+    // refresh almost immediately — a small debounce only coalesces bursts of
+    // rapid completions / reused parts. The 15s cadence is ONLY for the
+    // HTTP-poll FALLBACK (SSE down), where we are timer-polling and must not
+    // hammer list_paragraphs's per-part disk stats.
+    var throttleMs = fromPush ? 1500 : 15000;
     window._expandedAudioKeys.forEach(function (ak) {
         var chapter = (CHAPTERS || []).find(function (c) { return c.tts_audio_key === ak; });
         if (!chapter) return;
         var row = document.querySelector('tr.paragraph-expand-row[data-ak="' + ak + '"]');
-        if (!row || row.style.display === 'none') return;
+        if (!row || row.style.display === 'none') return;        // panel closed
         var grid = row.querySelector('.paragraph-grid');
-        if (!grid || grid.dataset.rendered !== '1') return;  // never touch pre-render
-        var tbody = grid.querySelector('table.paragraph-mini-table tbody');
-        if (!tbody) return;
-        // Parse "synthed K" and "reused L" and "M fails" — that's the count
-        // of paragraphs the worker has processed (synthed succeeded +
-        // reused from cache + fails skipped on). The worker emits parts
-        // sequentially by idx, so idx 0..(synthed+reused+fails-1) covers
-        // the workspace. We update audio cells whose row hasn't been
-        // flipped yet. The "reused" cases are cells whose part file
-        // already existed before this build started — the audio src works.
-        var msg = String(chapter.tts_audio_message || '');
-        var synthed = 0, reused = 0, fails = 0;
-        var m = msg.match(/synthed\s+(\d+)/);
-        if (m) synthed = parseInt(m[1], 10) || 0;
-        var rm = msg.match(/reused\s+(\d+)/);
-        if (rm) reused = parseInt(rm[1], 10) || 0;
-        var f = msg.match(/(\d+)\s+fails?/);
-        if (f) fails = parseInt(f[1], 10) || 0;
-        // Header counter — single text-node update, no innerHTML on
-        // anything but a single cell.
-        var headerSpan = grid.querySelector('.paragraph-mini-header span');
-        if (headerSpan) {
-            var totalRows = tbody.children.length;
-            var doneCount = synthed + reused;
-            headerSpan.textContent = doneCount + ' of ' + totalRows + ' synthesised';
-        }
-        // NOTE: this path intentionally does NOT paint per-paragraph audio
-        // cells. It used to guess each row's clip URL as p{rowPosition}.mp3,
-        // but the worker's part-file index is the position among SURVIVORS
-        // (after continuation tails, tables and skip-page rows are dropped),
-        // so row-position ≠ part-index and the guess pointed at the wrong (or
-        // a non-existent) file — and would now paint players onto merged /
-        // empty / skipped rows. The authoritative per-row audio + status is
-        // resolved server-side in list_paragraphs; the header above gives the
-        // live progress, and the user (or the panel's own refresh) pulls the
-        // exact rows via loadParagraphRows. Header-only keeps this safe.
+        if (!grid || grid.dataset.rendered !== '1') return;      // never touch pre-render
+        var st       = chapter.tts_audio_status || 'none';
+        var prev     = window._panelLiveState[ak] || {};
+        var building = (st === 'running' || st === 'pending');
+        var changed  = (prev.status !== undefined) && (prev.status !== st);
+        var lastAt   = prev.at || 0;
+        // Remember the status every tick (even ones we don't fetch) so a
+        // build start OR finish registers as a state change next time.
+        window._panelLiveState[ak] = { status: st, at: lastAt };
+        // Idle + unchanged → leave the panel completely alone (the stable
+        // state where the user plays audio). Fetch only while parts are
+        // being produced (throttled) or on the single tick the build
+        // settles (running → complete/paused/failed) so the last rows flip.
+        if (!building && !changed) return;
+        if (building && (now - lastAt) < throttleMs) return;   // push: ~1.5s coalesce · poll-fallback: ~15s
+        window._panelLiveState[ak] = { status: st, at: now };
+        // Surgical: the isRendered path applies _paraSurgicalUpdate — flips
+        // only the changed rows' audio/status cells and updates the header
+        // count in place, preserving any clip mid-playback. NOT a rebuild.
+        loadParagraphRows(ak, grid);
     });
 }
 
@@ -6903,7 +7051,7 @@ async function renderBuildCategoryRows(root) {
             '<select data-field="style" title="Speaking style — defaults to the Voices-tab setting"></select>' +
             '<div class="prosody">' +
                 '<span style="display:inline-flex;align-items:center;gap:4px;">rate <input type="number" data-field="rate" min="-50" max="200" step="5" value="' + (saved.tts_voice_rate_pct || 0) + '"><span title="Percent — positive speeds the voice up, negative slows it down" style="margin-left:2px;cursor:help;">%</span></span>' +
-                '<span style="display:inline-flex;align-items:center;gap:4px;">pitch <input type="number" data-field="pitch" min="-12" max="12" step="0.1" value="' + (saved.tts_voice_pitch_st || 0) + '" style="width:73px"><span title="Semitones — 12 = one octave" style="margin-left:2px;cursor:help;">st</span></span>' +
+                '<span style="display:inline-flex;align-items:center;gap:4px;">pitch <input type="number" data-field="pitch" min="-12" max="12" step="0.1" value="' + (saved.tts_voice_pitch_st || 0) + '" style="width:73px"><span title="Pitch shift in semitones (st) — 12 st = one octave. Positive raises the voice, negative lowers it. Valid range −12 to +12 st; fractional steps like 0.5 give finer control, and out-of-range values are clamped. For self-hosted voices (Chatterbox, Kokoro, CosyVoice, XTTS, F5 / Adolph…) the shift is applied to the rendered audio after synthesis (a resample) rather than by re-voicing the model, so large shifts can sound artificial. Azure applies it as native SSML prosody; ElevenLabs has no pitch control and ignores it." style="margin-left:2px;cursor:help;">st</span></span>' +
                 '<span style="display:inline-flex;align-items:center;gap:4px;">vol <input type="number" data-field="volume" min="0" max="100" step="5" value="' + (saved.tts_voice_volume || 100) + '" style="width:60px"></span>' +
             '</div>';
         root.appendChild(row);
@@ -6968,10 +7116,12 @@ async function renderBuildCategoryRows(root) {
         }
         rebuildVoiceSelect(savedVoiceCode);
         populateStyleOptions(voiceSel, styleSel, saved.tts_voice_style || '');
+        ttsGateRowProsody(row, providers);
 
         provSel.addEventListener('change', function () {
             rebuildVoiceSelect();
             populateStyleOptions(voiceSel, styleSel, '');
+            ttsGateRowProsody(row, providers);
         });
         voiceSel.addEventListener('change', function () {
             populateStyleOptions(voiceSel, styleSel, '');
@@ -7394,6 +7544,104 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!/401/.test(e.message || '')) console.error('TTS bootstrap failed:', e);
     });
 });
+
+// ── Pitch range guard ──────────────────────────────────────────────────
+// Every Pitch input (Preview any voice, the per-category Defaults rows, and
+// the per-build override rows) is a semitone shift constrained to −12…+12 st.
+// The number spinner already caps the arrows, but a typed/pasted value can
+// exceed the range, so on commit (change / blur) we clamp to the nearest
+// bound and pop a transient bubble explaining the valid range. Delegated in
+// the capture phase so it also covers rows rendered after load. The matching
+// "st" unit carries a title tooltip with the full explanation, including how
+// the shift is applied to self-hosted voices (F5 / Adolph et al.).
+(function () {
+    var PITCH_MIN = -12, PITCH_MAX = 12;
+    var bubble = null, bubbleTimer = null;
+
+    function isPitchInput(el) {
+        return el && el.tagName === 'INPUT' &&
+            (el.id === 'preview-pitch' || el.getAttribute('data-field') === 'pitch');
+    }
+
+    function showBubble(el, msg) {
+        if (!bubble) {
+            bubble = document.createElement('div');
+            bubble.className = 'pitch-range-pop';
+            document.body.appendChild(bubble);
+        }
+        bubble.textContent = msg;
+        bubble.style.display = 'block';
+        var r = el.getBoundingClientRect();
+        bubble.style.left = (window.pageXOffset + r.left) + 'px';
+        bubble.style.top  = (window.pageYOffset + r.bottom + 6) + 'px';
+        clearTimeout(bubbleTimer);
+        bubbleTimer = setTimeout(function () { if (bubble) bubble.style.display = 'none'; }, 3400);
+    }
+
+    function guard(el) {
+        if (!isPitchInput(el)) return;
+        var raw = (el.value || '').trim();
+        if (raw === '' || raw === '-' || raw === '+') return;   // still mid-typing
+        var v = parseFloat(raw);
+        if (isNaN(v)) return;
+        if (v > PITCH_MAX || v < PITCH_MIN) {
+            var clamped = v > PITCH_MAX ? PITCH_MAX : PITCH_MIN;
+            el.value = clamped;
+            showBubble(el, 'Pitch must be between −12 and +12 semitones. Adjusted to ' +
+                (clamped > 0 ? '+' : '') + clamped + ' st.');
+        }
+    }
+
+    document.addEventListener('change', function (e) { guard(e.target); }, true);
+    document.addEventListener('blur',   function (e) { guard(e.target); }, true);
+})();
+
+// ── Prosody capability gating ──────────────────────────────────────────
+// Not every engine honours every prosody knob. Mirrors ttsProviderTransport()
+// in admin-tts-helpers.php:
+//   • Azure (SSML)           → rate + pitch + volume  (native <prosody>)
+//   • Self-hosted GPU engines → rate + pitch + volume  (ffmpeg post on output)
+//   • ElevenLabs             → rate only (speed); pitch + volume dropped
+//   • Inworld                → rate only (speakingRate); pitch + volume dropped
+// Rate is universal. We disable the pitch/volume inputs on any Defaults or
+// build-override row whose provider ignores them, so an admin can't dial in a
+// value the engine will silently discard.
+function ttsProsodyCaps(prov) {
+    var main = (prov && prov.provider_main ? String(prov.provider_main) : '').toLowerCase();
+    var cloudNoProsody = (main === 'elevenlabs' || main === 'inworld');
+    return { rate: true, pitch: !cloudNoProsody, volume: !cloudNoProsody };
+}
+
+// Enable/disable the pitch & volume inputs of one prosody row to match the
+// currently-selected provider. Safe to call repeatedly (render + provider
+// change). `providers` is the same array the row builder already holds.
+function ttsGateRowProsody(row, providers) {
+    if (!row) return;
+    var provSel = row.querySelector('select[data-field="provider"]');
+    if (!provSel) return;
+    var pk = parseInt(provSel.value, 10) || 0;
+    var prov = null;
+    for (var i = 0; i < (providers || []).length; i++) {
+        if (String(providers[i].provider_key) === String(pk)) { prov = providers[i]; break; }
+    }
+    var caps = ttsProsodyCaps(prov);
+    var provName = (prov && (prov.provider_label || prov.provider_main)) || 'This provider';
+    [['pitch', caps.pitch], ['volume', caps.volume]].forEach(function (pair) {
+        var inp = row.querySelector('input[data-field="' + pair[0] + '"]');
+        if (!inp) return;
+        var wrap = inp.parentElement;   // the <span> holding label + input + unit
+        if (pair[1]) {
+            inp.disabled = false;
+            if (wrap) { wrap.style.opacity = ''; wrap.title = ''; }
+        } else {
+            inp.disabled = true;
+            if (wrap) {
+                wrap.style.opacity = '0.5';
+                wrap.title = provName + ' has no ' + pair[0] + ' control — it is ignored at synthesis, so this field is disabled. (Rate is still honoured.)';
+            }
+        }
+    });
+}
 
 // ── Sync / QA tab ──────────────────────────────────────────────────────
 // Runs STT over a built chapter's audio and aligns it to the book text:

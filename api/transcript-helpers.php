@@ -732,3 +732,86 @@ function buildWhisperWordJoin(PDO $db, int $itemKey, string $refModel = 'youtube
     }
     return count($result);
 }
+
+/**
+ * Match a diarised item's raw SPEAKER_xx labels against the saved global voice
+ * profiles (yy_speaker_profile) by embedding cosine similarity. Two-tier:
+ *   • sim >= $autoTh    → APPLY: rename the label to the profile's label across
+ *                         the live transcript rows + embedding store of every
+ *                         cluster item, so recurring people get named for real.
+ *   • sim >= $suggestTh → SUGGEST: return the near-miss (label, profile, sim)
+ *                         for the UI to offer as a one-click "Assign <name>?"
+ *                         chip, WITHOUT touching any data.
+ * Only raw SPEAKER_xx labels are considered — a label already carrying a name is
+ * left alone. Returns ['matched'=>[...], 'suggestions'=>[...]]. Used by the
+ * admin-transcript.php match/fill actions AND by the build workers so freshly
+ * built diarised transcripts arrive pre-named.
+ */
+function matchSpeakerProfilesForItem(PDO $db, int $srcItem, array $itemKeys, float $autoTh = 0.55, float $suggestTh = 0.40): array {
+    $matched = [];
+    $suggestions = [];
+    $embStmt = $db->prepare("SELECT DISTINCT label, embedding::text AS emb FROM yy_feed_item_speaker_embedding WHERE feed_item_key = ?");
+    $embStmt->execute([$srcItem]);
+    $renameRow = $db->prepare("UPDATE yy_feed_item_transcript SET feed_item_transcript_speaker=? WHERE feed_item_key=? AND feed_item_transcript_speaker=?");
+    // Renaming an embedding to a label another already holds (several raw labels
+    // folding into one profile) would violate the (feed_item_key, model, label)
+    // unique index — drop the colliding source rows first, then rename the
+    // remainder so the profile stays addressable by its new label.
+    $dropCollide = $db->prepare("DELETE FROM yy_feed_item_speaker_embedding a
+                                  WHERE a.feed_item_key=? AND a.label=?
+                                    AND EXISTS (SELECT 1 FROM yy_feed_item_speaker_embedding b
+                                                 WHERE b.feed_item_key=a.feed_item_key AND b.model=a.model AND b.label=?)");
+    $renameEmb = $db->prepare("UPDATE yy_feed_item_speaker_embedding SET label=? WHERE feed_item_key=? AND label=? AND NOT EXISTS (SELECT 1 FROM yy_feed_item_speaker_embedding ex WHERE ex.feed_item_key = yy_feed_item_speaker_embedding.feed_item_key AND ex.model = yy_feed_item_speaker_embedding.model AND ex.label = ?)");
+    $mq = $db->prepare("SELECT speaker_profile_key AS pk, speaker_profile_label AS lbl, speaker_profile_name AS nm,
+                               1 - (speaker_profile_embedding <=> ?::vector) AS sim
+                          FROM yy_speaker_profile
+                         ORDER BY speaker_profile_embedding <=> ?::vector LIMIT 1");
+    foreach ($embStmt->fetchAll(PDO::FETCH_ASSOC) as $er) {
+        $lab = (string)$er['label'];
+        if (!preg_match('/^SPEAKER_\d+$/', $lab)) continue;   // only auto-name raw labels
+        $mq->execute([$er['emb'], $er['emb']]);
+        $m = $mq->fetch(PDO::FETCH_ASSOC);
+        if (!$m) continue;
+        $sim = (float)$m['sim'];
+        if ((string)$m['lbl'] === $lab) continue;
+        if ($sim >= $autoTh) {
+            foreach ($itemKeys as $ik) {
+                $renameRow->execute([$m['lbl'], (int)$ik, $lab]);
+                $dropCollide->execute([(int)$ik, $lab, $m['lbl']]);
+                $renameEmb->execute([$m['lbl'], (int)$ik, $lab, $m['lbl']]);
+            }
+            $matched[] = ['from' => $lab, 'to' => $m['lbl'], 'name' => $m['nm'], 'sim' => round($sim, 3)];
+        } elseif ($sim >= $suggestTh) {
+            $suggestions[] = ['from' => $lab, 'to' => $m['lbl'], 'name' => $m['nm'],
+                              'profile_key' => (int)$m['pk'], 'sim' => round($sim, 3)];
+        }
+    }
+    return ['matched' => $matched, 'suggestions' => $suggestions];
+}
+
+/**
+ * Auto-name a freshly built item's raw SPEAKER_xx labels from saved profiles by
+ * running matchSpeakerProfilesForItem over every cluster item that carries voice
+ * embeddings. Applies strong matches only (suggestions are ignored at build —
+ * they surface interactively when an admin opens the transcript). FAIL-OPEN:
+ * any error is swallowed so a match hiccup never fails a durable build.
+ * Returns the count of labels auto-named.
+ */
+function autoNameSpeakersFromProfiles(PDO $db, int $itemKey): int {
+    try {
+        $itemKeys = getFeedItemKeyCluster($db, $itemKey);
+        if (!$itemKeys) $itemKeys = [$itemKey];
+        $ph = implode(',', array_fill(0, count($itemKeys), '?'));
+        $embItems = $db->prepare("SELECT DISTINCT feed_item_key FROM yy_feed_item_speaker_embedding WHERE feed_item_key IN ($ph)");
+        $embItems->execute($itemKeys);
+        $named = 0;
+        foreach ($embItems->fetchAll(PDO::FETCH_COLUMN) as $srcItem) {
+            $r = matchSpeakerProfilesForItem($db, (int)$srcItem, $itemKeys);
+            $named += count($r['matched']);
+        }
+        return $named;
+    } catch (\Throwable $e) {
+        error_log('autoNameSpeakersFromProfiles item=' . $itemKey . ' — ' . $e->getMessage());
+        return 0;
+    }
+}

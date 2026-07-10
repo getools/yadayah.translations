@@ -40,7 +40,10 @@
     var chapterPauseTimer = null;
     var suppressPageSync = false;  // set true when WE drive a goto from a marker
     var lastPage = 0;
+    var userTurnAt = 0;            // timestamp of the reader's last manual page turn
     var currentParagraphNumber = -1;  // paragraph being narrated right now
+    var scrubActive = false;     // true while dragging the seek scrubber
+    var scrubTrackEl = null;     // the track element being dragged over
 
     // ── DOM injection ───────────────────────────────────────────────────
     function injectStyles() {
@@ -125,7 +128,8 @@
             '.fb-tts-progress.is-hidden { opacity: 0; pointer-events: none; }',
             '.fb-tts-progress-track { position: relative; width: 100%; height: 6px;',
             '                         background: var(--fb-tts-track-bg, rgba(200,200,200,0.85));',
-            '                         border-radius: 3px; cursor: pointer; overflow: hidden; }',
+            '                         border-radius: 3px; cursor: pointer; overflow: hidden;',
+            '                         touch-action: none; }',
             '.fb-tts-progress-fill  { position: absolute; top: 0; left: 0; height: 100%;',
             '                         background: var(--fb-tts-fill-bg, #1f3550); width: 0%; }',
             // Time readout row under the scrubber: elapsed on the left,
@@ -280,7 +284,12 @@
         progressFill.className = 'fb-tts-progress-fill';
         track.appendChild(progressFill);
         progressEl.appendChild(track);
-        track.addEventListener('click', onProgressClick);
+        // Click OR click-and-drag to seek. pointerdown starts a scrub;
+        // pointermove (tracked on the document so the drag survives the
+        // pointer leaving the thin track) updates the playhead live;
+        // pointerup commits. A plain click (down + up with no move) is
+        // just a zero-length drag, so click-to-seek still works.
+        track.addEventListener('pointerdown', onScrubStart);
 
         // Elapsed / total time readout under the scrubber.
         var times = document.createElement('div');
@@ -364,15 +373,53 @@
         document.body.appendChild(audio);
     }
 
-    // Click anywhere on the track to seek. The track lives at .fb-tts-progress-track;
-    // the inner fill is pointer-events transparent (default) so click coords are
-    // always against the track itself.
-    function onProgressClick(e) {
-        if (!current || !current.available || !audio || !audio.duration) return;
-        var trackRect = e.currentTarget.getBoundingClientRect();
-        var ratio = (e.clientX - trackRect.left) / trackRect.width;
-        ratio = Math.max(0, Math.min(1, ratio));
+    // ── Seek scrubber (click + drag) ───────────────────────────────────
+    // Map a pointer event's X to a 0–1 position along the track. The inner
+    // fill is pointer-events transparent (default) so coords are always
+    // against the track itself.
+    function scrubRatio(e, trackEl) {
+        var rect = trackEl.getBoundingClientRect();
+        if (!rect.width) return 0;
+        var ratio = (e.clientX - rect.left) / rect.width;
+        return Math.max(0, Math.min(1, ratio));
+    }
+
+    // Move the playhead to the given 0–1 position. Updates the fill and
+    // elapsed-time readout immediately (before the browser fires 'seeked')
+    // so scrubbing feels responsive even while paused. Continuous, so any
+    // second within the chapter is reachable.
+    function applyScrub(ratio) {
+        if (!audio || !isFinite(audio.duration)) return;
+        if (progressFill) progressFill.style.width = (ratio * 100).toFixed(2) + '%';
+        if (timeCurEl) timeCurEl.textContent = formatTime(ratio * audio.duration);
         try { audio.currentTime = ratio * audio.duration; } catch (err) {}
+    }
+
+    function onScrubStart(e) {
+        if (!current || !current.available || !audio || !audio.duration) return;
+        scrubActive = true;
+        scrubTrackEl = e.currentTarget;
+        applyScrub(scrubRatio(e, scrubTrackEl));
+        document.addEventListener('pointermove', onScrubMove);
+        document.addEventListener('pointerup', onScrubEnd);
+        document.addEventListener('pointercancel', onScrubEnd);
+        e.preventDefault();
+    }
+
+    function onScrubMove(e) {
+        if (!scrubActive || !scrubTrackEl) return;
+        applyScrub(scrubRatio(e, scrubTrackEl));
+        e.preventDefault();
+    }
+
+    function onScrubEnd(e) {
+        if (!scrubActive) return;
+        if (scrubTrackEl) applyScrub(scrubRatio(e, scrubTrackEl));
+        scrubActive = false;
+        scrubTrackEl = null;
+        document.removeEventListener('pointermove', onScrubMove);
+        document.removeEventListener('pointerup', onScrubEnd);
+        document.removeEventListener('pointercancel', onScrubEnd);
     }
 
     // Seconds → "M:SS" (or "H:MM:SS" past an hour). Non-finite/NaN → "0:00".
@@ -738,6 +785,31 @@
             audio.pause();
             return;
         }
+        resumePlayback();
+    }
+
+    // Resume playback. Distinct from startPlayback(): if the current
+    // chapter's MP3 is already sourced and the playhead sits somewhere
+    // meaningful within it, we resume from exactly there instead of
+    // snapping back to the visible page's first-paragraph offset. This
+    // is what makes Pause → Play continue from the paused moment rather
+    // than jumping to the top of the page. The playhead is kept in sync
+    // with the visible page while paused by notifyPageChange (which
+    // seeks on every page turn), so "wherever the playhead is" is always
+    // the right place to continue from once the chapter is positioned.
+    function resumePlayback() {
+        ensureAudio();
+        if (!current || !current.available) return;
+        var positioned = (loadedChapterKey === current.chapter_key) &&
+            isFinite(audio.currentTime) && audio.currentTime > 0.05 &&
+            (!isFinite(audio.duration) || audio.currentTime < audio.duration - 0.25);
+        if (positioned) {
+            var p = audio.play();
+            if (p && p.catch) p.catch(function () {});
+            return;
+        }
+        // Chapter not yet positioned (fresh load / deep-link, or the
+        // playhead is at 0 or the very end) — start at the current page.
         startPlayback();
     }
 
@@ -787,7 +859,19 @@
         var nowPage = pageAtMs(current.markers, ms);
         if (!nowPage) return;
         var cur = cfg.getCurrentPage ? cfg.getCurrentPage() : nowPage;
-        if (nowPage !== cur) {
+        // Stand down right after a reader-driven page turn. When the reader
+        // flips the page while audio is playing — especially BACKWARD with
+        // the left arrow — notifyPageChange seeks the playhead to the new
+        // page's top, but the audio element's own 'timeupdate' can fire in
+        // the same beat still carrying the pre-seek position. Left unchecked,
+        // the auto-turn below reads that stale position and snaps the book
+        // right back to the page the reader just left, cancelling the turn.
+        // Whether that race is won or lost depends on device/browser timing,
+        // so it's flaky rather than absent. A brief grace period lets the
+        // seek settle; after it, the playhead is authoritative again and
+        // normal forward auto-advance resumes.
+        var settling = (Date.now() - userTurnAt) < 500;
+        if (nowPage !== cur && !settling) {
             suppressPageSync = true;
             try { cfg.gotoPage(nowPage); } catch (e) {}
             // Page-change events from goto will re-trigger our refresh;
@@ -1073,6 +1157,11 @@
         }
         if (page1 === lastPage) return;
         lastPage = page1;
+        // This is a genuine reader-driven turn (our own auto-turns take the
+        // suppressPageSync branch above). Stamp it so onTimeUpdate's auto-turn
+        // stands down while the seek below settles — otherwise a stale
+        // timeupdate could snap the book back to the page just left.
+        userTurnAt = Date.now();
         // If the new page is outside the current chapter's range, refetch.
         if (current && current.markers && current.markers.length) {
             var minP = current.markers[0].paragraph_page;

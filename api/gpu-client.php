@@ -285,7 +285,9 @@ function gpuSynthesize(array $params, ?string $saveTo = null, int $timeout = 600
     $opts = ['json' => $params, 'timeout' => $timeout];
     if ($saveTo !== null) $opts['save_to'] = $saveTo;
     else                  $opts['expect']  = 'raw';
-    return gpuRequest('POST', '/tts/synthesize', $opts);
+    // F5-TTS runs as its own gateway-routed engine (/tts-f5/); everything else -> tts-engine.
+    $ttsPath = ((($params['provider'] ?? '')) === 'f5') ? '/tts-f5/synthesize' : '/tts/synthesize';
+    return gpuRequest('POST', $ttsPath, $opts);
 }
 
 /**
