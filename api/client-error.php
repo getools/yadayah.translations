@@ -80,7 +80,12 @@ if ($logged > 0) {
         '__firefox__', 'ResizeObserver', 'googletagmanager', 'gtag', 'standardSelectors',
         'Object Not Found Matching Id', 'The string did not match the expected pattern',
         'The operation was aborted',
-        'media resource was aborted by the user agent'];
+        'media resource was aborted by the user agent',
+        // Admin 401 session expiry — admin api() rethrows as unhandled rejection;
+        // client-side filter in error-reporter.js covers most cases, but async
+        // script injection creates a race where rejections fire before it loads.
+        'Authentication required',
+        '"error":"Authentication required"'];
     $resolveStmt = $db->prepare("UPDATE yy_monitor_event SET event_resolved_flag = TRUE, event_resolved_dtime = NOW(), event_action_taken = ? WHERE event_key = ? AND event_resolved_flag = FALSE");
     $pending = $db->prepare("SELECT event_key, event_message, event_detail FROM yy_monitor_event WHERE event_resolved_flag = FALSE AND event_dtime > NOW() - INTERVAL '5 minutes' ORDER BY event_dtime DESC LIMIT 30");
     $pending->execute();

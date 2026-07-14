@@ -95,7 +95,8 @@ if ($method === 'GET' && $action === 'status') {
 //                into the preceding "head" paragraph, so it shares the
 //                head's clip and has no part of its own — BY DESIGN
 //   skip_table → parser flagged it a table; not narrated — BY DESIGN
-//   skip_page  → inside the volume's volume_skip_pages range — BY DESIGN
+//   skip_page  → inside the volume's volume_skip_pages range, or part of
+//                the volume's trailing RESOURCES back matter — BY DESIGN
 //   skip_admin → admin Deleted/skipped it (settings.skip_paragraphs)
 //   empty      → no speakable text after the synth pipeline drops word
 //                definitions / unspeakable glyphs (e.g. a lone "hwhy" or
@@ -162,6 +163,14 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
         return false;
     };
 
+    // Trailing back matter (the closing RESOURCES page) — filtered by the
+    // worker exactly like a skip-page row, so it must classify as one here
+    // too, or the panel calls every line of it a GENUINE gap.
+    $backMatterFrom = $volumeKey ? ttsBackMatterCutoff($db, (int)$volumeKey) : null;
+    $isBackMatter = function (int $num) use ($backMatterFrom): bool {
+        return $backMatterFrom !== null && $num >= $backMatterFrom;
+    };
+
     $pStmt = $db->prepare("
         SELECT paragraph_number, paragraph_page, paragraph_text_plain, paragraph_text_html, paragraph_is_table, paragraph_is_continuation
           FROM yy_paragraph WHERE chapter_key = ? ORDER BY paragraph_number
@@ -205,8 +214,14 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
         $carry = [];
         foreach ($merged as $r) {
             $pg = $r['paragraph_page'] !== null ? (int)$r['paragraph_page'] : null;
-            if (!empty($r['paragraph_is_table']) || $inSkipRange($pg)) continue;   // not narrated; carry untouched
-            $segs = segmentParagraph(preprocessFontFilter((string)($r['paragraph_text_html'] ?? ''), $fonts), $carry);
+            if (!empty($r['paragraph_is_table']) || $inSkipRange($pg)
+                || $isBackMatter((int)$r['paragraph_number'])) continue;   // not narrated; carry untouched
+            $html = preprocessFontFilter((string)($r['paragraph_text_html'] ?? ''), $fonts);
+            $segs = segmentParagraph($html, $carry);
+            // Same carry bound as the worker — a COMPLETE paragraph may not leak
+            // an open delimiter into the next one. Must match the worker exactly
+            // or this pre-pass reports a status synthesis doesn't produce.
+            ttsBoundCarryAtParagraphEnd($html, $carry);
             if ($segs) $segs = ttsCollapseSkippedSegments($cfg, $segs);
             if ($segs) $segs = ttsDropUnspeakableSegments($segs);
             if (empty($segs)) $emptyNums[(int)$r['paragraph_number']] = true;
@@ -238,7 +253,7 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
             if ($lastHeadIdx !== null) { $playIdxByNum[$num] = $lastHeadIdx; $headNumByCont[$num] = $lastHeadNum; }
             continue;                                   // coalesced — no own index
         }
-        if (!empty($r['paragraph_is_table']) || $inSkipRange($pg)) continue;   // filtered before synth
+        if (!empty($r['paragraph_is_table']) || $inSkipRange($pg) || $isBackMatter($num)) continue;   // filtered before synth
         $partIdxByNum[$num] = $widx;
         $playIdxByNum[$num] = $widx;
         $lastHeadIdx = $widx; $lastHeadNum = $num;
@@ -254,7 +269,7 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
         $isTable = !empty($r['paragraph_is_table']);
         $isCont  = !empty($r['paragraph_is_continuation']);
         $isSkipAdmin = isset($skipSet[$num]);
-        $isSkipPage  = $inSkipRange($pg);
+        $isSkipPage  = $inSkipRange($pg) || $isBackMatter($num);
         $voiced  = isset($voicedSet[$num]);
 
         $partIdx = $partIdxByNum[$num] ?? null;             // own file (redo/delete target)
@@ -273,11 +288,20 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
             }
         }
 
-        // Is there audio you can PLAY for this paragraph right now? Its own
-        // per-paragraph clip, or (clip purged after assembly) the finished
-        // chapter MP3 that contains it. This is the sole "done" signal —
-        // the play control itself is what tells the admin it's done.
-        $playableNow = $hasPart || ($chapterDone && $finalExists);
+        // Did this paragraph actually get VOICED? Its own per-paragraph clip, or
+        // a marker (markers survive the post-assembly purge of the per-clip
+        // files, so they're the authoritative record — see the header note).
+        //
+        // ⚠ The chapter MP3 existing is NOT evidence that THIS paragraph is in
+        // it. Treating it as such ($hasPart || ($chapterDone && $finalExists))
+        // made the "missing" alarm below unreachable for every complete chapter
+        // — a paragraph the worker never synthesised still reported "complete",
+        // which is precisely what hid the ~900 paragraphs the unclosed-paren
+        // carry leak was silently dropping. Only fall back to the chapter file
+        // for a LEGACY build that wrote no per-paragraph markers at all;
+        // otherwise absence of a marker is a real gap and must be alarmed.
+        $chapterHasMarkers = !empty($voicedSet);
+        $wasVoiced = $hasPart || $voiced || ($chapterDone && $finalExists && !$chapterHasMarkers);
 
         // Classify. Structural not-narrated cases (admin skip / continuation
         // / table / skip-page / no speakable text) first — they're by design
@@ -293,7 +317,7 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
         elseif ($isTable)                $status = 'skip_table';
         elseif ($isSkipPage)             $status = 'skip_page';
         elseif (isset($emptyNums[$num])) $status = 'empty';
-        elseif ($chapterDone)            $status = ($playableNow || $voiced) ? 'complete' : 'missing';
+        elseif ($chapterDone)            $status = $wasVoiced ? 'complete' : 'missing';
         elseif ($chapterRunning)         $status = ($hasPart && $partMtime >= $startedEpoch) ? 'complete' : 'processing';
         else                             $status = 'pending';   // queued for generation
 

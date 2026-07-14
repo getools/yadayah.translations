@@ -67,6 +67,11 @@ flock -n 9 || exit 0
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*"; }
 
+# Set by any phase that actually does a unit of work. Phase 7 chains another
+# run immediately when this is 1, so a queue drains back-to-back instead of
+# one item per cron tick.
+DID_WORK=0
+
 # Pre-flight: bail if the host doesn't have headroom. We check BEFORE any
 # heavy work so a heavy tick is naturally re-tried by cron 2 min later when
 # the previous load has decayed.
@@ -204,6 +209,60 @@ convert_via_onlyoffice() {
     return 0
 }
 
+# ── Preemptible long-running conversion ───────────────────────────
+# A DOCX is overwritten IN PLACE on re-upload, and admin-books.php drops a
+# fresh job file on every upload. So if a newer upload for THIS volume lands
+# while we're mid-render, the bytes we're rendering (a /tmp/_embed copy taken
+# at the start) are already stale. Rather than finish a 10-20 min render whose
+# PDF we'd immediately discard, abort it the moment a newer job appears and let
+# the next chained run render the new docx.
+#
+# Runs "$@" in the background with stdout+stderr to $outfile, and polls every
+# PREEMPT_POLL_SEC for a queued job file for this volume OTHER than the one
+# we're processing. Dedupe-at-pickup guarantees ours is the only such file at
+# start, so any other that appears is strictly a newer upload.
+#
+# Returns the command's own exit code, or PREEMPT_RC (99) if it was aborted.
+# A killed Graph render may orphan its uploaded temp item in the drive; the
+# graph script's own "delete existing item and retry" path cleans that up on
+# the next render, so preemption is self-healing.
+PREEMPT_RC=99
+PREEMPT_POLL_SEC=5
+run_preemptible() {
+    local vk_pad="$1" cur_job="$2" outfile="$3"; shift 3
+    local cur_base; cur_base=$(basename "$cur_job")
+    "$@" > "$outfile" 2>&1 &
+    local cmd_pid=$!
+    while kill -0 "$cmd_pid" 2>/dev/null; do
+        local newer
+        newer=$(find "$JOBS_DIR" -maxdepth 1 -name "${vk_pad}_*.json" \
+                     ! -name "$cur_base" -print -quit 2>/dev/null)
+        if [ -n "$newer" ]; then
+            log "Preempt: newer upload queued for volume $((10#$vk_pad)) ($(basename "$newer")) — aborting in-flight render (pid $cmd_pid)"
+            kill -TERM "$cmd_pid" 2>/dev/null
+            local w=0
+            while kill -0 "$cmd_pid" 2>/dev/null && [ "$w" -lt 8 ]; do sleep 1; w=$((w+1)); done
+            kill -KILL "$cmd_pid" 2>/dev/null
+            wait "$cmd_pid" 2>/dev/null
+            return "$PREEMPT_RC"
+        fi
+        sleep "$PREEMPT_POLL_SEC"
+    done
+    wait "$cmd_pid"
+}
+
+# Retire the current (now-superseded) job and hand off to the newer one.
+# Called on PREEMPT_RC: clears the half-written PDF so the skip-if-exists
+# check can't short-circuit the re-render, marks the volume queued, and moves
+# the stale job aside. The newer job stays in the queue for the next run.
+handle_preempt() {
+    local volume_key="$1" pdf_name="$2" job="$3"
+    log "Volume $volume_key render preempted by a newer upload — retiring stale job; newest version renders next run"
+    rm -f "$PDF_DIR/$pdf_name"
+    update_status "$volume_key" "queued" "Superseded by a newer DOCX upload — re-rendering the latest version"
+    mv -f "$job" "$JOBS_DIR/done/" 2>/dev/null || rm -f "$job"
+}
+
 # Process a single job file.
 process_job() {
     local job="$1"
@@ -280,13 +339,22 @@ process_job() {
             log "Font embedding failed for $docx_name (rc=$embed_rc) — converting original docx (fonts may substitute)"
         fi
 
-        # 1a. Primary: Microsoft Graph (fast, ~30s, but 60s server-side cap)
+        # 1a. Primary: Microsoft Graph (fast, ~30s, but 60s server-side cap).
+        # Preemptible: aborted if a newer upload for this volume is queued.
         local graph_output graph_rc=0
-        graph_output=$(/opt/yada-www/parsers/docx_to_pdf_via_graph.py \
+        local vk_pad; vk_pad=$(printf '%010d' "$volume_key")
+        local graph_out="/tmp/_graphout-$$-${volume_key}.log"
+        run_preemptible "$vk_pad" "$job" "$graph_out" \
+            /opt/yada-www/parsers/docx_to_pdf_via_graph.py \
             --input  "$conv_docx" \
-            --output "$PDF_DIR/$pdf_name" 2>&1) || graph_rc=$?
+            --output "$PDF_DIR/$pdf_name" || graph_rc=$?
         graph_rc=${graph_rc:-0}
+        graph_output=$(cat "$graph_out" 2>/dev/null); rm -f "$graph_out"
         echo "$graph_output" >> /var/log/book-pipeline.log
+        if [ "$graph_rc" -eq "$PREEMPT_RC" ]; then
+            handle_preempt "$volume_key" "$pdf_name" "$job"
+            return
+        fi
         if [ "$graph_rc" -eq 2 ]; then
             # Exit 2 = PDF was written but failed validation
             # (producer not Word, or run-on tokens > threshold).
@@ -314,11 +382,18 @@ process_job() {
             log "Graph failed for $docx_name ($wol_reason) — falling back to Word for the Web"
             update_status "$volume_key" "running" "$wol_reason — falling back to Word for the Web"
             local wol_output wol_rc=0
-            wol_output=$(/opt/yada-www/parsers/docx_to_pdf_via_word_online.py \
+            local wol_out="/tmp/_wolout-$$-${volume_key}.log"
+            run_preemptible "$vk_pad" "$job" "$wol_out" \
+                /opt/yada-www/parsers/docx_to_pdf_via_word_online.py \
                 --input  "$conv_docx" \
-                --output "$PDF_DIR/$pdf_name" 2>&1) || wol_rc=$?
+                --output "$PDF_DIR/$pdf_name" || wol_rc=$?
             wol_rc=${wol_rc:-0}
+            wol_output=$(cat "$wol_out" 2>/dev/null); rm -f "$wol_out"
             echo "$wol_output" >> /var/log/book-pipeline.log
+            if [ "$wol_rc" -eq "$PREEMPT_RC" ]; then
+                handle_preempt "$volume_key" "$pdf_name" "$job"
+                return
+            fi
             if [ "$wol_rc" -eq 3 ]; then
                 log "Word Online auth expired for $docx_name — manual re-bootstrap required"
                 update_status "$volume_key" "error" \
@@ -551,6 +626,16 @@ process_job() {
                 "Volume $volume_key parser failed (exit $pv_rc)" "$pv_output"
         else
             log "Parser succeeded for volume $volume_key"
+            # Book text changed → tts pronunciation tune occurrence counts (the
+            # # column in admin-tts) are now stale. Recount all tunes corpus-
+            # wide, detached, so the pipeline returns immediately. A full sweep
+            # supersedes any concurrent one (last correct write wins), so no
+            # lock is needed. Best effort — never affects the parse outcome.
+            log "Queuing tts tune book-count recount (detached)"
+            nohup docker exec yada-www-web-1 php \
+                /var/www/html/api/recount-tune-book-counts.php --tts-key=1 --write --quiet \
+                >> /var/log/tts-tune-recount.log 2>&1 &
+            disown 2>/dev/null || true
         fi
     else
         log "Skipping parser (parse_volume.py not deployed/executable)"
@@ -567,8 +652,33 @@ process_job() {
 # every 15 min, so the next queued volume picks up on the next tick.
 shopt -s nullglob
 for j in "$JOBS_DIR"/*.json; do
+    # Collapse duplicate jobs for this volume. Re-uploading a docx before the
+    # queue drains leaves several job files for the same volume_key, but they
+    # all describe the SAME file on disk — the docx was overwritten in place.
+    # Rendering it more than once just burns another 10-20 min of MS Graph for
+    # a byte-identical result. Keep the newest job, retire the rest.
+    #
+    # Only jobs that exist RIGHT NOW are collapsed. A job dropped after this
+    # point is a genuinely newer docx and must still be processed, so it is
+    # deliberately left alone.
+    vk_pad=$(basename "$j" | cut -d_ -f1)
+    dupes=()
+    while IFS= read -r d; do
+        [ -n "$d" ] && dupes+=("$d")
+    done < <(find "$JOBS_DIR" -maxdepth 1 -name "${vk_pad}_*.json" -printf '%T@ %p\n' 2>/dev/null \
+                | sort -rn | cut -d' ' -f2-)
+
+    if [ "${#dupes[@]}" -gt 1 ]; then
+        j="${dupes[0]}"
+        for d in "${dupes[@]:1}"; do
+            log "Dedupe: retiring superseded job $(basename "$d") for volume $((10#$vk_pad)) (same docx on disk)"
+            mv -f "$d" "$JOBS_DIR/done/" 2>/dev/null || rm -f "$d"
+        done
+    fi
+
     process_job "$j"
-    log "Processed one job — yielding to next cron tick (single-volume-per-run policy)"
+    DID_WORK=1
+    log "Processed one job — yielding (single-volume-per-run policy); phase 7 chains the next immediately"
     break
 done
 
@@ -668,10 +778,24 @@ done <<< "$sweep_rows"
 # stripped. PDF stem keeps apostrophes (so file lookup matches what
 # pdftoppm/yy_volume reference). The slug is the LIVE URL path under
 # /opt/yada-www/public/<slug>/.
+#
+# Failure guard: the sweep picks the FIRST stale slug and stops. Without a
+# cap, a book whose rebuild fails every time would be re-picked on every
+# tick forever and no later book would ever be reached. Consecutive failures
+# are counted per-slug under $FB_FAIL_DIR; at $FB_FAIL_MAX the slug is
+# skipped so the sweep moves on. A successful rebuild clears the counter,
+# as does an admin "Regenerate" (which routes through flipbook-regen-worker,
+# not this sweep).
+FB_FAIL_DIR=/var/lib/yada/flipbook-sweep
+FB_FAIL_MAX=3
+mkdir -p "$FB_FAIL_DIR" 2>/dev/null
+
 if [ -x /opt/yada-www/migrate_flipbook.sh ]; then
     flipbook_rows=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -At -F'|' -c "
         SELECT replace(replace(volume_file, ' ', '-'), '''', '') AS slug,
-               volume_pdf                                          AS pdf_name
+               volume_pdf                                          AS pdf_name,
+               volume_key,
+               COALESCE(volume_pipeline_status, '')                AS pipe_status
           FROM yy_volume
          WHERE volume_file IS NOT NULL
            AND volume_file <> ''
@@ -680,17 +804,29 @@ if [ -x /opt/yada-www/migrate_flipbook.sh ]; then
 
     fb_target_slug=""
     fb_target_reason=""
+    fb_target_key=""
+    fb_target_prev_status=""
     # Use volume_pdf directly as the on-disk PDF filename. Deriving the
     # stem from `replace(volume_file, ' ', '-')` previously kept apostrophes
     # that the actual files don't have (e.g. Mow'ed-Appointments vs
     # Mowed-Appointments.pdf), making the [-f "$fb_pdf"] check fail for
     # apostrophe-containing labels and silently skipping those volumes
     # every sweep tick.
-    while IFS='|' read -r fb_slug fb_pdf_name; do
+    while IFS='|' read -r fb_slug fb_pdf_name fb_key fb_status; do
         [ -z "$fb_slug" ] && continue
         [ -z "$fb_pdf_name" ] && continue
         fb_pdf="$PDF_DIR/$fb_pdf_name"
         [ ! -f "$fb_pdf" ] && continue
+
+        # Skip slugs that have already failed FB_FAIL_MAX times in a row —
+        # otherwise one broken book blocks every book behind it, forever.
+        fb_fails=0
+        [ -f "$FB_FAIL_DIR/$fb_slug" ] && fb_fails=$(cat "$FB_FAIL_DIR/$fb_slug" 2>/dev/null | grep -oE '^[0-9]+$' | head -1)
+        fb_fails=${fb_fails:-0}
+        if [ "$fb_fails" -ge "$FB_FAIL_MAX" ]; then
+            continue
+        fi
+
         # Per-book wrapper now lives at index.php (shared-shell shim);
         # legacy index.html still exists in a handful of un-migrated
         # dirs and also counts as "present". Migrate when PDF is newer
@@ -702,17 +838,44 @@ if [ -x /opt/yada-www/migrate_flipbook.sh ]; then
         else
             fb_target_slug="$fb_slug"
             fb_target_reason="flipbook missing"
+            fb_target_key="$fb_key"
+            fb_target_prev_status="$fb_status"
             break
         fi
+        # Compare the PDF against pages/, not the index file. The wrapper is a
+        # 4-line shim that gets rewritten by template changes without any page
+        # being re-rendered — keying off it would make a stale book look fresh
+        # and this sweep would skip it forever. pages/ is only written by an
+        # actual render, so it is the true build time. (Keep the index file as
+        # the presence test above: pages/ with no wrapper is not servable.)
+        fb_pages="/opt/yada-www/public/$fb_slug/pages"
+        [ -d "$fb_pages" ] && fb_index="$fb_pages"
         if [ "$fb_pdf" -nt "$fb_index" ]; then
             fb_target_slug="$fb_slug"
             fb_target_reason="PDF newer than flipbook"
+            fb_target_key="$fb_key"
+            fb_target_prev_status="$fb_status"
             break
         fi
     done <<< "$flipbook_rows"
 
     if [ -n "$fb_target_slug" ]; then
         log "Flipbook-sweep: regenerating $fb_target_slug ($fb_target_reason)"
+        DID_WORK=1
+
+        # Announce the rebuild so the admin Books page can render it as
+        # "regenerating" instead of a bare "stale". A rebuild takes 2-4
+        # minutes; without this the row sits on the alarming stale icon with
+        # no sign that work is under way. migrate_flipbook.sh writes
+        # status='success' itself on completion, so we only have to restore
+        # the previous status if it fails.
+        if [ -n "$fb_target_key" ]; then
+            docker exec "$PG_CONTAINER" psql -U postgres -d yada -c \
+                "UPDATE yy_volume SET volume_pipeline_status='flipbook-running', \
+                        volume_pipeline_message='Flipbook rebuild in progress ($fb_target_reason)' \
+                  WHERE volume_key=$fb_target_key" >/dev/null 2>&1
+        fi
+
         fb_rc=0
         fb_output=$(systemd-run --scope --quiet \
             --property=MemoryMax=1500M \
@@ -720,10 +883,35 @@ if [ -x /opt/yada-www/migrate_flipbook.sh ]; then
             /opt/yada-www/migrate_flipbook.sh "$fb_target_slug" 2>&1) || fb_rc=$?
         echo "$fb_output" >> /var/log/book-pipeline.log
         if [ "$fb_rc" -ne 0 ]; then
-            log "Flipbook-sweep: $fb_target_slug failed (exit $fb_rc)"
+            # Count the failure; at FB_FAIL_MAX the loop above stops picking
+            # this slug and the sweep can reach the books behind it.
+            fb_prev=0
+            [ -f "$FB_FAIL_DIR/$fb_target_slug" ] && fb_prev=$(cat "$FB_FAIL_DIR/$fb_target_slug" 2>/dev/null | grep -oE '^[0-9]+$' | head -1)
+            fb_prev=${fb_prev:-0}
+            fb_now=$((fb_prev + 1))
+            echo "$fb_now" > "$FB_FAIL_DIR/$fb_target_slug"
+
+            log "Flipbook-sweep: $fb_target_slug failed (exit $fb_rc) — attempt $fb_now/$FB_FAIL_MAX"
+            if [ "$fb_now" -ge "$FB_FAIL_MAX" ]; then
+                log "Flipbook-sweep: $fb_target_slug giving up after $FB_FAIL_MAX attempts — skipping it on future ticks (admin Regenerate resets)"
+            fi
             log_monitor_event "flipbook_regen" "error" \
-                "Flipbook regen failed for slug $fb_target_slug (exit $fb_rc)" "$fb_output"
+                "Flipbook regen failed for slug $fb_target_slug (exit $fb_rc, attempt $fb_now/$FB_FAIL_MAX)" "$fb_output"
+
+            # Restore the pre-sweep status. Deliberately NOT 'error': the
+            # Phase 4.5 stale-sweep re-queues a full DOCX→PDF render on
+            # 'error', which would burn a Word render for a problem that
+            # lives in the flipbook step. The mtime comparison in the admin
+            # UI still shows the flipbook as stale, which is the truth.
+            if [ -n "$fb_target_key" ]; then
+                fb_restore=$(printf '%s' "${fb_target_prev_status:-success}" | sed "s/'/''/g")
+                docker exec "$PG_CONTAINER" psql -U postgres -d yada -c \
+                    "UPDATE yy_volume SET volume_pipeline_status='$fb_restore', \
+                            volume_pipeline_message='Flipbook rebuild failed (exit $fb_rc, attempt $fb_now/$FB_FAIL_MAX)' \
+                      WHERE volume_key=$fb_target_key" >/dev/null 2>&1
+            fi
         else
+            rm -f "$FB_FAIL_DIR/$fb_target_slug"
             log "Flipbook-sweep: $fb_target_slug regenerated successfully"
         fi
     fi
@@ -739,6 +927,7 @@ if [ -x /opt/yada-www/parsers/parse_volume_from_bundle.py ]; then
     parse_target=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -At -c "SELECT volume_key FROM yy_volume WHERE volume_docx IS NOT NULL AND (volume_parse_status IS NULL OR volume_parse_status IN ('queued','stale')) ORDER BY CASE WHEN volume_parse_status='queued' THEN 0 ELSE 1 END, volume_key LIMIT 1")
     if [ -n "$parse_target" ]; then
         log "Parse-sweep: picking up volume $parse_target"
+        DID_WORK=1
         ps_rc=0
         ps_output=$(systemd-run --scope --quiet \
             --property=MemoryMax=$PARSER_MEM_MAX \
@@ -753,4 +942,40 @@ if [ -x /opt/yada-www/parsers/parse_volume_from_bundle.py ]; then
             log "Parse-sweep: volume $parse_target succeeded"
         fi
     fi
+fi
+
+# ── Phase 7: chain the next run immediately ───────────────────────
+# Every phase above deliberately does ONE unit of heavy work per run so two
+# conversions never contend for RAM/cgroups. That policy stays. What used to
+# hurt is the WAIT: the next unit idled until a cron tick, and any tick that
+# landed mid-run died on flock -n. Six books uploaded together drained over
+# hours.
+#
+# So: if this run did work, or a job is still queued, re-arm right now. The
+# child sleeps briefly so this process exits and releases the fd-9 lock
+# first, then re-enters through the same flock the cron uses.
+#
+# BP_CHAIN bounds the chain so a permanently-failing item can never spin
+# forever, and the pre-flight RAM/load gate is re-checked on every entry.
+# Cron (*/10) remains the backstop for anything the chain drops.
+BP_CHAIN=${BP_CHAIN:-0}
+BP_CHAIN_MAX=24
+
+shopt -s nullglob
+pending_jobs=("$JOBS_DIR"/*.json)
+
+if [ "$DID_WORK" -eq 1 ] || [ ${#pending_jobs[@]} -gt 0 ]; then
+    if [ "$BP_CHAIN" -ge "$BP_CHAIN_MAX" ]; then
+        log "Chain: limit $BP_CHAIN_MAX reached — deferring remaining work to the next cron tick"
+    else
+        log "Chain: work remains (${#pending_jobs[@]} queued) — starting run #$((BP_CHAIN + 1)) now, no cron wait"
+        BP_CHAIN=$((BP_CHAIN + 1)) setsid nohup bash -c '
+            sleep 3
+            flock -n /var/lock/cron-book-pipeline-worker-sh.lock \
+                -c "nice -n 19 ionice -c 3 /opt/yada-www/book-pipeline-worker.sh" \
+                >> /var/log/book-pipeline.log 2>&1
+        ' >/dev/null 2>&1 &
+    fi
+else
+    log "Chain: nothing left to do — going idle until the next upload or cron tick"
 fi

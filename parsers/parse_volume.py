@@ -229,6 +229,42 @@ def chapter_key_for_paragraph(para_num, boundary_keys):
     return ck
 
 
+def back_matter_cutoff(paragraphs):
+    """paragraph_number where the volume's trailing back matter begins, or None.
+
+    Every YY volume closes with a one-page RESOURCES block — site links,
+    social handles, contact address, cover credit, "Ver. 20251217". It carries
+    no chapter heading, so chapter_key_for_paragraph() hands it to whichever
+    chapter happened to come last, and the TTS build then narrates it as that
+    chapter's ending. It belongs to no chapter: leave it unmapped
+    (chapter_key NULL) exactly as the front matter already is.
+
+    Guards mirror ttsBackMatterCutoff() in api/admin-tts-helpers.php: the
+    heading must open the volume's FINAL block (no later paragraph sits on an
+    earlier page) and that block must be short. A mid-book paragraph that
+    merely reads "RESOURCES" therefore cannot trip it.
+    """
+    head = None
+    for p in paragraphs:
+        if html_to_plain(p.get('text_html', '')).strip().casefold() == 'resources':
+            head = p          # last match wins — the real block is at the end
+    if head is None:
+        return None
+
+    cut = head['paragraph_number']
+    page = head.get('page')
+    if page is None:
+        return None
+
+    tail = [p for p in paragraphs if p['paragraph_number'] > cut]
+    if len(tail) > 40:
+        return None                                                   # too long to be back matter
+    if any(p.get('page') is not None and p['page'] < page for p in tail):
+        return None                                                   # real content follows
+
+    return cut
+
+
 def reparse_volume(vol_key, verbose=False):
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -289,6 +325,18 @@ def reparse_volume(vol_key, verbose=False):
     )
     logging.info(f"  Extracted {len(paragraphs)} content paragraphs, {len(chapter_boundaries)} chapter boundaries")
 
+    # Trailing RESOURCES back matter belongs to no chapter. Find where it
+    # starts and drop any heading inside it, so ensure_chapters_for_boundaries
+    # below can't mint a "RESOURCES" chapter row, and so the insert loop leaves
+    # those paragraphs unmapped instead of appending them to the last real
+    # chapter (which the TTS build would then narrate).
+    back_from = back_matter_cutoff(paragraphs)
+    if back_from is not None:
+        inside = [b for b in chapter_boundaries if b[0] >= back_from]
+        chapter_boundaries = [b for b in chapter_boundaries if b[0] < back_from]
+        logging.info(f"  Back matter from paragraph {back_from} — left unmapped (chapter_key NULL)"
+                     + (f"; dropped {len(inside)} heading(s) inside it" if inside else ""))
+
     # Ensure a yy_chapter row exists for every heading the extractor found —
     # numbered chapters AND unnumbered front/back-matter sections (Prelude,
     # Afterword, Bibliography…). Missing ones are created so they get parsed
@@ -312,7 +360,10 @@ def reparse_volume(vol_key, verbose=False):
     para_rows = []
     for p in paragraphs:
         para_num = p['paragraph_number']
-        chapter_key = chapter_key_for_paragraph(para_num, boundary_keys)
+        if back_from is not None and para_num >= back_from:
+            chapter_key = None                       # back matter — belongs to no chapter
+        else:
+            chapter_key = chapter_key_for_paragraph(para_num, boundary_keys)
         # extract_paragraphs_from_doc emits 'text_raw' (already JSON-encoded)
         # and 'text_html'. Earlier wrapper read 'raw'/'html'/'text_plain' which
         # this extractor never produces — that's what wiped 99k paragraphs to

@@ -26,7 +26,7 @@ Usage:
     bundle_dir defaults to /opt/yada-www/public/<pdf_stem>/ and is only
     used to read toc.json for chapter assignment.
 """
-import json, re, sys
+import json, re, struct, sys
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -35,8 +35,25 @@ import fitz  # PyMuPDF
 # YY books are 6"×9" = 432×648 pt. Running header (book title + chapter
 # name) sits in the top inch, footer page number in the bottom half-inch.
 # Use generous bands so jitter doesn't slip headers into content.
-HEADER_MAX_Y = 55.0   # ~0.76"
+#
+# ⚠ 55.0 was too tight. The running header is set in the book's display font,
+# and where its text carries an embedded-subset glyph (the ʿ/ʾ half-rings in
+# "Mowʿed ~ Appointments" / "ʾAdam ~ The Story of Man") that glyph's oversized
+# box drags the block's bbox bottom to y1≈61.4 — clearing a 55pt cutoff, so
+# the header survived as a body paragraph and got NARRATED once every other
+# page in s02v02 and s02v06. Body text starts at y0>=64.4 in every YY PDF
+# (all 432x648), so 63.0 clears the descender and still leaves the body clear.
+HEADER_MAX_Y = 63.0   # ~0.87"
 FOOTER_MIN_Y = 595.0  # ~8.26" — leaves the body comfortably clear
+
+# Top zone a running header can occupy at all. Used by the repetition pass
+# below, which is the real guarantee: geometry alone is one font change away
+# from leaking again.
+HEADER_ZONE_Y = 80.0
+# A line that appears as the page's TOPMOST block on at least this share of
+# pages is a running header, not prose. Real body text never repeats verbatim
+# at the top of a quarter of the book.
+HEADER_REPEAT_RATIO = 0.25
 
 # Bold / italic detection: PyMuPDF reports both a `flags` bitmask
 # (bit 1=italic, bit 4=bold) and the embedded font name. On Word-
@@ -60,17 +77,133 @@ VARIANT_SUFFIX_RE = re.compile(
     re.I,
 )
 
-def font_family(span):
-    """Clean PyMuPDF font name → bare family (e.g. 'Times New Roman')."""
+# ── Canonical font names ─────────────────────────────────────────────
+# The name a run lands on MUST equal a yy_tts_font.tts_font_name exactly:
+# preprocessFontFilter() looks the rule up with $fonts[$font], a plain
+# array key. A near-miss is a silent no-op, not an error.
+#
+# ⚠ Word EMBEDS its non-standard fonts under obfuscated names — the PDF
+# reports "___WRD_EMBED_SUB_1408", never "Yada Towrah". No rule can ever
+# match that, so the skip flag on every special font was dead: the divine
+# name (hwhy, set in Yada Towrah) was being read aloud as gibberish, as
+# were the ʾ/ʿ half-rings inside transliterated words. The real name does
+# survive inside the embedded font program's `name` table (PostScript
+# name), so we recover it from there — see embedded_font_aliases().
+#
+# The SUB_#### numbers are NOT stable across books (1436 is IsaiahScroll
+# in one PDF and PictoHeb in another), so the alias map is rebuilt per PDF.
+FONT_CANON = {
+    "yadatowrahtimes":    "Yada Towrah",
+    "yadatowrah":         "Yada Towrah",
+    "jupiteryadaregular": "Jupiter-Yada",
+    "jupiteryada":        "Jupiter-Yada",
+    "isaiahscroll":       "Isaiah Scroll",
+    "moabitestone":       "Moabite Stone",
+    "pictoheb":           "PictoHeb",
+    "hebrewscript":       "Hebrew Script",
+    "semiticearly":       "Semitic Early",
+}
+
+
+def canon_font(name):
+    """Map a raw family/PostScript name onto its yy_tts_font rule name."""
+    key = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    return FONT_CANON.get(key, name)
+
+
+def _ttf_ps_name(buf):
+    """PostScript / family name out of an embedded TrueType `name` table."""
+    try:
+        num = struct.unpack(">H", buf[4:6])[0]
+        off = None
+        for i in range(num):
+            rec = buf[12 + 16 * i: 12 + 16 * i + 16]
+            if rec[0:4] == b"name":
+                off = struct.unpack(">I", rec[8:12])[0]
+                break
+        if off is None:
+            return None
+        _fmt, count, str_off = struct.unpack(">HHH", buf[off:off + 6])
+        best = {}
+        for i in range(count):
+            p = off + 6 + 12 * i
+            pid, _eid, _lid, nid, ln, so = struct.unpack(">HHHHHH", buf[p:p + 12])
+            raw = buf[off + str_off + so: off + str_off + so + ln]
+            try:
+                txt = raw.decode("utf-16-be") if pid == 3 else raw.decode("latin-1")
+            except Exception:
+                continue
+            if nid in (1, 6) and txt.strip():
+                best.setdefault(nid, txt.strip())
+        family, ps = best.get(1, ""), best.get(6, "")
+        # Word obfuscates the family name but leaves PostScript intact.
+        return ps if (not family or "___WRD_EMBED" in family) else family
+    except Exception:
+        return None
+
+
+def embedded_font_aliases(doc):
+    """{obfuscated basefont → canonical family} for one PDF."""
+    aliases = {}
+    for pno in range(doc.page_count):
+        for f in doc.get_page_fonts(pno, full=True):
+            xref, basefont = f[0], SUBSET_PREFIX_RE.sub("", f[3])
+            if "___WRD_EMBED" not in basefont or basefont in aliases:
+                continue
+            try:
+                real = _ttf_ps_name(doc.extract_font(xref)[3])
+            except Exception:
+                real = None
+            if real:
+                aliases[basefont] = canon_font(real)
+    return aliases
+
+
+def font_family(span, aliases=None):
+    """Clean PyMuPDF font name → the family name the TTS rules key on."""
     name = (span.get("font") or "").strip()
     if not name: return ""
     name = SUBSET_PREFIX_RE.sub("", name)
+    if aliases and name in aliases:
+        return aliases[name]          # Word-embedded: recovered real family
     # Strip variant suffixes iteratively in case multiple are present.
     prev = None
     while prev != name:
         prev = name
         name = VARIANT_SUFFIX_RE.sub("", name).rstrip("-,")
-    return name.replace("-", " ").strip()
+    return canon_font(name.replace("-", " ").strip())
+
+# ── Glyph fonts vs the half-rings that live inside them ──────────────
+# Yada Towrah (and the other Hebrew/paleo faces) carry TWO different
+# things, and they must not share a fate:
+#
+#   1. Glyph text — "hwhy", "zy": ASCII that RENDERS as Hebrew. Nonsense
+#      when read aloud, so the font is marked skip in yy_tts_font.
+#   2. The ʾ/ʿ half-rings inside transliterated words — "huwʾ", "Yisraʾel",
+#      "ʾatah". Word sets these in the glyph font too (it owns the glyph),
+#      but they are part of the ENGLISH transliteration.
+#
+# Skipping the font wholesale would strip the half-rings out of ~155k runs
+# — and 510 pronunciation tunes are keyed on prints that CONTAIN them
+# ("huwʾ" → huːʔ, "Yisraʾel" → jɪsɹˈɑʕɛl). Those tunes would silently stop
+# matching corpus-wide: a far worse regression than the bug being fixed.
+# So a run is only handed to the skipped font when it is glyph text and
+# nothing else; anything holding a half-ring stays plain text.
+GLYPH_FONTS = {"Yada Towrah", "PictoHeb", "Isaiah Scroll", "Moabite Stone", "Semitic Early"}
+HALF_RING_RE = re.compile(r"[ʾʿʾʿ]")
+GLYPH_TEXT_RE = re.compile(r"[A-Za-z0-9]")
+
+
+def glyph_font_for(family, text):
+    """The data-font a run should carry — '' means 'plain text, never skipped'."""
+    if family not in GLYPH_FONTS:
+        return family
+    if HALF_RING_RE.search(text):
+        return ""                      # transliteration diacritic — must be spoken
+    if GLYPH_TEXT_RE.search(text):
+        return family                  # real glyph text — skip it
+    return ""                          # whitespace / punctuation — keep spacing intact
+
 
 # Hebrew Unicode block — wrapped as a synthetic "Hebrew Script" font so
 # the same skip/pause rules in yy_tts_font apply, regardless of which
@@ -215,7 +348,7 @@ def block_in_body(block):
     return True
 
 
-def render_block(block):
+def render_block(block, aliases=None):
     """
     Walk a block's lines/spans and produce:
       • text_plain — flat text, whitespace normalized
@@ -240,7 +373,7 @@ def render_block(block):
                 continue
             b = is_bold(span)
             i = is_italic(span)
-            family = font_family(span)
+            family = font_family(span, aliases)
             style = bible_style_for(span)
             plain_parts.append(text)
             # Build the per-span attribute string once. Bible-style
@@ -263,7 +396,7 @@ def render_block(block):
                 if m.start() > last:
                     seg = text[last:m.start()]
                     seg_esc = escape_html(seg)
-                    op = open_span(family)
+                    op = open_span(glyph_font_for(family, seg))
                     pieces.append(f'{op}{seg_esc}</span>' if op else seg_esc)
                 heb_esc = escape_html(m.group(0))
                 # Hebrew script overrides the bible-style colour, but
@@ -276,7 +409,7 @@ def render_block(block):
             if last < len(text):
                 seg = text[last:]
                 seg_esc = escape_html(seg)
-                op = open_span(family)
+                op = open_span(glyph_font_for(family, seg))
                 pieces.append(f'{op}{seg_esc}</span>' if op else seg_esc)
             html = "".join(pieces)
             if i: html = f"<i>{html}</i>"
@@ -328,11 +461,51 @@ def chapter_for_page(page, toc):
     return cur
 
 
+def _norm_line(s):
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def running_header_texts(doc, aliases=None):
+    """Lines that recur as the page's TOPMOST block across the book.
+
+    The geometric band above is necessary but not sufficient: it only takes a
+    taller glyph in the header font to push the block past the cutoff, which is
+    exactly how the book title leaked into the paragraphs (and the audiobook)
+    for s02v02 / s02v06. Repetition is the property a running header actually
+    has and prose never does — the same line sitting at the top of a quarter of
+    the pages. Returns the set of such lines; the block loop drops them.
+    """
+    counts = {}
+    pages = 0
+    for page in doc:
+        pages += 1
+        blocks = [b for b in page.get_text("dict", sort=True)["blocks"]
+                  if b.get("type", 1) == 0 and b.get("lines")]
+        if not blocks:
+            continue
+        top = min(blocks, key=lambda b: b["bbox"][1])
+        if top["bbox"][1] > HEADER_ZONE_Y:
+            continue                      # nothing in the header zone on this page
+        text = _norm_line(render_block(top, aliases)[0])
+        if text:
+            counts[text] = counts.get(text, 0) + 1
+    if not pages:
+        return set()
+    threshold = pages * HEADER_REPEAT_RATIO
+    return {t for t, c in counts.items() if c >= threshold}
+
+
 def parse_pdf(pdf_path, bundle_dir=None):
     toc = load_toc(bundle_dir)
     out = []
     paragraph_idx = 0
     with fitz.open(pdf_path) as doc:
+        aliases = embedded_font_aliases(doc)
+        if aliases:
+            print("embedded fonts resolved: %s" % sorted(set(aliases.values())), file=sys.stderr)
+        header_texts = running_header_texts(doc, aliases)
+        if header_texts:
+            print("running header(s) dropped: %s" % sorted(header_texts), file=sys.stderr)
         for page_num0, page in enumerate(doc):
             page_num = page_num0 + 1
             page_dict = page.get_text("dict", sort=True)
@@ -356,8 +529,13 @@ def parse_pdf(pdf_path, bundle_dir=None):
             for block in page_dict.get("blocks", []):
                 if not block_in_body(block):
                     continue
-                text_plain, text_html, runs = render_block(block)
+                text_plain, text_html, runs = render_block(block, aliases)
                 if not text_plain:
+                    continue
+                # Running header that cleared the geometric band (a tall glyph
+                # in the header font is all it takes) — drop it on repetition.
+                if (header_texts and block["bbox"][1] <= HEADER_ZONE_Y
+                        and _norm_line(text_plain) in header_texts):
                     continue
                 # Drop pure-punctuation artifacts (horizontal rules rendered
                 # as a stray "-", lone bullet glyphs, etc.). Anything that

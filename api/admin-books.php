@@ -62,10 +62,26 @@ if ($method === 'GET') {
         $flipIdxAlt = $flipDir ? $flipDir . '/index.html' : null;
         $v['volume_docx_mtime'] = ($docxAbs && is_file($docxAbs)) ? date('c', filemtime($docxAbs)) : null;
         $v['volume_pdf_mtime']  = ($pdfAbs  && is_file($pdfAbs))  ? date('c', filemtime($pdfAbs))  : null;
+        // Freshness comes from pages/, not the index file. index.php is a
+        // 4-line shim that can be rewritten without re-rendering a single
+        // page (a template change, a bundleVersion backfill), which would
+        // make a genuinely stale flipbook look freshly built and stop the
+        // regen sweep from ever picking it up. pages/ is only touched by an
+        // actual migrate_flipbook.sh render, so its mtime is the build time.
+        // The index file still decides *presence* — pages/ without a wrapper
+        // is not a servable flipbook.
+        $flipPages = $flipDir ? $flipDir . '/pages' : null;
         if ($flipIdx && is_file($flipIdx)) {
-            $v['volume_flip_mtime'] = date('c', filemtime($flipIdx));
+            $flipPresent = $flipIdx;
         } elseif ($flipIdxAlt && is_file($flipIdxAlt)) {
-            $v['volume_flip_mtime'] = date('c', filemtime($flipIdxAlt));
+            $flipPresent = $flipIdxAlt;
+        } else {
+            $flipPresent = null;
+        }
+        if ($flipPresent) {
+            $v['volume_flip_mtime'] = ($flipPages && is_dir($flipPages))
+                ? date('c', filemtime($flipPages))
+                : date('c', filemtime($flipPresent));
         } else {
             $v['volume_flip_mtime'] = null;
         }

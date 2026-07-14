@@ -121,6 +121,35 @@ if ($transport === 'gpu-tailnet') {
     $chunkMax    = $pcs['max'];
 }
 
+// A single-word / very-short audition of a self-hosted (token) engine is
+// UNREPRESENTATIVE: the word is produced cold at utterance start with no
+// coarticulation, so XTTS / Coqui mis-syllabify or spell out short inputs
+// ("Dowd" → "Doe Dad") in a way they DON'T when the same word sits inside a
+// book sentence. Wrap it in a neutral carrier so the engine renders it
+// mid-utterance — exactly as the build will — then play the whole frame (no
+// fragile sub-word trim; see ttsWordAuditionFrame). gpu-tailnet only (cloud
+// SSML engines are context-stable); skipped when the audition carries B/I
+// formatting (a different intent). Frame BEFORE buildLocalSegment / the async
+// enqueue so pronunciation tunes still fire on the inner word, and both the
+// sync and detached-worker paths stay identical.
+if ($transport === 'gpu-tailnet' && !$hasFormat) {
+    // Carrier words for the frame. The Pronunciations preview bar sends the
+    // live "Warmup" / "Cooldown" field values with each audition; when absent
+    // (other preview callers) fall back to this tts_key's saved setting, then
+    // to the built-in "Say … again." default. Empty on both sides disables it.
+    $auditionWarmup   = array_key_exists('audition_warmup', $data)
+        ? (string)$data['audition_warmup']
+        : (string)($cfg['system']['tts_audition_warmup']   ?? TTS_WORD_AUDITION_WARMUP_DEFAULT);
+    $auditionCooldown = array_key_exists('audition_cooldown', $data)
+        ? (string)$data['audition_cooldown']
+        : (string)($cfg['system']['tts_audition_cooldown'] ?? TTS_WORD_AUDITION_COOLDOWN_DEFAULT);
+    $framedAudition = ttsWordAuditionFrame($text, $auditionWarmup, $auditionCooldown);
+    if ($framedAudition !== null) {
+        $text    = $framedAudition;   // sync path (buildLocalSegment below)
+        $rawText = $framedAudition;   // detached worker renders raw_text
+    }
+}
+
 // Length guard, per engine. Self-hosted engines render long selections in the
 // background (chunked whole-paragraph, see below), so there's no hard preview
 // cap — chunking absorbs the scale. Cloud providers synth the whole utterance

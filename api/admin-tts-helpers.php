@@ -410,6 +410,55 @@ function rewriteClockTimes(string $text, bool $spell = false): string {
 }
 
 /**
+ * Spell bare three-digit numbers (100–999) in running prose: "between 610 and
+ * 632 CE" -> "between six hundred ten and six hundred thirty two CE". The
+ * autoregressive local engines drop a digit place on three-digit numbers —
+ * Chatterbox read "610" as "six hundred" and "142" as "forty two" — so the
+ * spelled form is the only way to get every place voiced.
+ *
+ * $spell mirrors rewriteIslamicCitations / rewriteClockTimes: Azure's number
+ * normaliser reads digits correctly, so the Azure path ($spell=false) is a
+ * no-op and keeps its raw digits.
+ *
+ * Deliberately limited to 100–999:
+ *   - 1–99 are voiced correctly by every engine, so they are left alone.
+ *   - Four digits and up are usually years ("the year 1110 came and went"),
+ *     where the arithmetic reading numberToWords() produces ("one thousand
+ *     one hundred ten") is worse than the digits.
+ *
+ * Runs after the citation and clock rewrites, so numbers those already turned
+ * into words are never seen here. The word-boundary anchors keep it off digits
+ * embedded in a longer number ("1610") and off the PAUSE placeholder's digits
+ * ("\x01PAUSE_0_500\x01" — underscore is a word char, so there is no boundary
+ * before the 500); the lookarounds keep it off decimals ("3.141"), thousands
+ * separators ("610,000") and any colon-joined reference the citation rewrite
+ * did not claim ("3:149").
+ *
+ * A hyphenated range is spoken "to" ("610-632" -> "six hundred ten to six
+ * hundred thirty two"), matching how the citation rewrite reads ranges and
+ * keeping a hyphen from landing between two spelled numbers — the same hyphen
+ * these engines choke on, which is why numberToWords() emits none. A trailing
+ * percent sign is spoken too, so spelling the number cannot strand a bare "%".
+ */
+function rewriteBareNumbers(string $text, bool $spell = false): string {
+    if (!$spell) return $text;
+    // Ranges first: both endpoints spelled, hyphen voiced as "to".
+    $text = preg_replace_callback(
+        '/(?<![\d.,:_\x01])\b([1-9]\d{2})\s*[-\x{2013}\x{2014}]\s*([1-9]\d{2})\b(?![.,:]\d)(?![_\x01])/u',
+        function ($m) { return numberToWords((int)$m[1]) . ' to ' . numberToWords((int)$m[2]); },
+        $text
+    );
+    return preg_replace_callback(
+        '/(?<![\d.,:_\x01])\b([1-9]\d{2})\b(?![.,:]\d)(?![_\x01])(\s*%)?/u',
+        function ($m) {
+            $out = numberToWords((int)$m[1]);
+            return isset($m[2]) && $m[2] !== '' ? $out . ' percent' : $out;
+        },
+        $text
+    );
+}
+
+/**
  * Apply pause substring replacements. Pauses use a placeholder token so the
  * pause stays intact after XML escaping; the placeholder is rewritten back
  * to the SSML <break> tag after escaping.
@@ -671,101 +720,337 @@ function placeholdersToBreaks(string $escaped): string {
  *
  * Uses a token round-trip so SSML markup isn't double-escaped.
  */
-function applyTunes(string $text, array $tunes, array &$tokenMap): string {
+/**
+ * The single tune-substitution driver. EVERY engine path — Azure SSML,
+ * plain local (Chatterbox/XTTS/…), Inworld, Kokoro — funnels through here,
+ * so the Print matching, the apostrophe-class normalisation, the fast
+ * pre-filter, the bold / italic / case-sensitive MATCH CRITERIA, the
+ * possessive handling, the token round-trip and the seed selection all live
+ * in exactly ONE place. The match criteria therefore can neither be
+ * service-specific nor accidentally skipped: a new engine only supplies
+ * $render and physically never touches the tune loop or the region gating.
+ *
+ *   $render(array $tune): ?array
+ *     → [$replacement, $possessiveReplacement] for this tune, or null to
+ *       skip it (no usable phonetic for this engine).
+ *
+ * The driver fills $tokenMap (token → replacement) and leaves the opaque
+ * tokens in the returned text; the CALLER decides when to map them back —
+ * immediately via strtr for plain-text engines, or after XML-escaping via
+ * tokensToSsml for the SSML path (whose replacements are raw tags that must
+ * not themselves be escaped). Tokens use the \x02 (STX) control char so they
+ * survive htmlspecialchars untouched and can't collide with source text.
+ */
+function substituteTunes(string $text, array $tunes, callable $render, array &$tokenMap, ?int &$count = null, &$matchedSeed = null): string {
+    if ($count !== null) $count = 0;
+    $matchedSeed = null;        // seed governing this segment's synth (see precedence below)
+    $matchedSeedFixed = false;  // true once a DEFINITIVE pin (min==max) has claimed the seed
+    // Fast pre-filter: strip apostrophe-class chars from both the Print core
+    // and the text, then a cheap stripos skips the ~95% of tunes whose word
+    // never appears before we build their regex. tunePrintToRegex makes the
+    // apostrophe-class optional in matching, so it must be stripped on both
+    // sides here (else half-ring words silently skip their tune).
+    static $APOS_RE_FAST = '/[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]/u';
+    $textLowerCore = preg_replace($APOS_RE_FAST, '', mb_strtolower($text, 'UTF-8'));
+    $tokenIdx = 0;
     foreach ($tunes as $t) {
-        $print = $t['tts_tune_print'];
+        $print = (string)($t['tts_tune_print'] ?? '');
         if ($print === '') continue;
-        // Per-rule restrictions: the rule only fires inside <b> and/or
-        // <i> contexts when these are set. Implemented as a tag-aware
-        // walker because the substitution target is the same text in
-        // both cases; we just need to skip non-qualifying regions.
-        $needsBold      = !empty($t['tts_tune_match_bold']);
-        $needsItalic    = !empty($t['tts_tune_match_italic']);
-        $caseSensitive  = !empty($t['tts_tune_match_case_sensitive']);
-        // Each row now stores three independent phonetic representations
-        // (sub / ipa / sapi). The phonetic_type column picks which one is
-        // live. Fall back to the legacy tts_tune_phonetic mirror so this
-        // still works on rows that haven't been re-saved since the
-        // multi-column migration.
+        $core = preg_replace($APOS_RE_FAST, '', $print);
+        if ($core === '' || mb_stripos($textLowerCore, $core, 0, 'UTF-8') === false) continue;
+        $r = $render($t);
+        if ($r === null) continue;         // engine has no usable phonetic for this tune
+        [$repl, $replS] = $r;
+        $regex  = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
+        $token  = "\x02PT" . $tokenIdx . "\x02";
+        $tokenS = "\x02PS" . $tokenIdx . "\x02";   // possessive variant
+        $tokenIdx++;
+        $tokenMap[$token]  = $repl;
+        $tokenMap[$tokenS] = $replS;
+        // Group 2 captures a trailing possessive 's; pick the possessive
+        // token when it did, the plain token otherwise.
+        $cb = function ($m) use ($token, $tokenS) {
+            return !empty($m[2]) ? $tokenS : $token;
+        };
+        // Per-rule bold/italic MATCH CRITERIA: the rule only fires inside
+        // <b> / <i> regions when set. This is the ONE place it is enforced.
+        $needsBold   = !empty($t['tts_tune_match_bold']);
+        $needsItalic = !empty($t['tts_tune_match_italic']);
+        $hits = 0;
+        if ($needsBold || $needsItalic) {
+            $text = applyTuneInTaggedRegions($text, $regex, $cb, $needsBold, $needsItalic, $hits);
+        } else {
+            $text = preg_replace_callback($regex, $cb, $text, -1, $hits);
+        }
+        if ($hits > 0) {
+            if ($count !== null) $count += $hits;
+            // Seed governance. Each tune carries a [seed_min, seed_max] range:
+            //   min == max → a DEFINITIVE pin: a hand-approved, reproducible
+            //                pronunciation the admin has locked (e.g. 0/0).
+            //   min <  max → opts INTO variability: a fresh random int per synth
+            //                so the word can ring in different variants across a book.
+            // The engine seeds the WHOLE utterance, so exactly one tune governs the
+            // chunk's seed. Precedence makes a pin AUTHORITATIVE: the first definitive
+            // pin in the chunk claims the seed and can NOT be overridden by a variable
+            // (ranged) word — and, unlike before, a pin that matches AFTER a ranged
+            // word still upgrades the seed to its fixed value. Only when no pin matches
+            // does the first variable word set (and keep) the seed. Net effect: pinning
+            // a word 0/0 makes every chunk it appears in render deterministically at
+            // that seed, regardless of neighbouring ranged words.
+            if (!$matchedSeedFixed) {
+                $sMin = isset($t['tts_tune_seed_min']) ? (int)$t['tts_tune_seed_min'] : 0;
+                $sMax = isset($t['tts_tune_seed_max']) ? (int)$t['tts_tune_seed_max'] : $sMin;
+                if ($sMax < $sMin) $sMax = $sMin;
+                if ($sMin === $sMax) {
+                    $matchedSeed      = $sMin;   // definitive pin — locks the chunk seed
+                    $matchedSeedFixed = true;
+                } elseif ($matchedSeed === null) {
+                    $matchedSeed = random_int($sMin, $sMax);   // first variable word, no pin yet
+                }
+            }
+        }
+    }
+    return $text;
+}
+
+/**
+ * yy_tts_tune.tts_tune_book_count is a denormalised "how many times does this
+ * word occur across the books" counter shown as the # column in admin-tts.
+ * These helpers recompute it. Rules:
+ *   • Count is PER ROW (per tune_key) so two rows sharing a Print but differing
+ *     in the italic / case MATCH CRITERIA get their own counts.
+ *   • Counting delegates to substituteTunes (the ONE true matcher) so a count
+ *     equals exactly what the synth engine substitutes: apostrophe-class
+ *     normalisation (half-ring ʿ/ʾ, straight ', curly ’, prime ′ … all ONE
+ *     character), whole-word boundaries, and the case-sensitive flag.
+ *   • ⚠ FORMATTING IS NOT A FILTER for an un-gated tune. The build worker runs
+ *     segmentParagraph FIRST, which consumes <b>/<i> tags into voice-routing
+ *     and hands applyTunes PLAIN text — so a word the parser split across
+ *     format/font runs (e.g. "<i>me</i>ʾ<i>od</i>") is whole again by match
+ *     time and matches like any other. Counting therefore runs over
+ *     paragraph_text_PLAIN for the common (un-gated) case: every occurrence
+ *     counts regardless of bold/italic. Only a tune that OPTS IN to a bold or
+ *     italic gate is counted against the tagged HTML, where the gate applies.
+ */
+
+// The apostrophe-equivalence class as a raw UTF-8 string of its members —
+// same 12 code points the matcher uses. Handy for building SQL/PHP pre-filters
+// that strip apostrophes from both the word and the text before comparing.
+if (!defined('TTS_APOS_CHARS')) {
+    define('TTS_APOS_CHARS',
+        "\x27\x60\u{00B4}\u{02BC}\u{02BE}\u{02BF}\u{02C0}\u{2018}\u{2019}\u{201B}\u{2032}\u{05F3}");
+}
+
+/**
+ * Occurrences of ONE tune in ONE piece of text, honouring that tune's
+ * apostrophe/case/bold/italic matching. Returns the hit count only. Feed it
+ * PLAIN text for an un-gated tune (formatting-independent, whole words) or
+ * font-filtered HTML for a bold/italic-gated tune (so the gate can see tags).
+ */
+function ttsCountTuneInHtml(string $html, array $tune): int {
+    if ($html === '') return 0;
+    $count = 0;
+    $tokenMap = [];
+    // substituteTunes skips tunes whose render() returns null; return a
+    // throwaway non-null pair so it proceeds and we get the hit count.
+    substituteTunes($html, [$tune], function () { return ['x', 'x']; }, $tokenMap, $count);
+    return (int)$count;
+}
+
+/** True when a tune restricts itself to bold/italic regions — the only case
+ *  where formatting tags matter to the count (case-sensitivity is handled by
+ *  the regex flag and needs no tags). */
+function ttsTuneIsFormatGated(array $tune): bool {
+    return !empty($tune['tts_tune_match_bold']) || !empty($tune['tts_tune_match_italic']);
+}
+
+/** Normalised core of a Print/text: apostrophe-class chars stripped, lowercased.
+ *  Two strings with the same core are indistinguishable to the matcher. */
+function ttsNormalizeCore(string $s): string {
+    static $re = null;
+    if ($re === null) $re = '/[' . preg_quote(TTS_APOS_CHARS, '/') . ']/u';
+    return mb_strtolower((string)preg_replace($re, '', $s), 'UTF-8');
+}
+
+/** Font rules for a profile, in the shape preprocessFontFilter expects
+ *  (name => ['skip'=>bool,'pause_ms'=>int]). Only needed to count the rare
+ *  bold/italic-gated tunes against tagged HTML. */
+function ttsLoadFontRules(PDO $db, int $ttsKey): array {
+    $st = $db->prepare("SELECT tts_font_name, tts_font_skip, tts_font_pause_ms FROM yy_tts_font WHERE tts_key = ?");
+    $st->execute([$ttsKey]);
+    $fonts = [];
+    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $fonts[$r['tts_font_name']] = [
+            'skip'     => !empty($r['tts_font_skip']),
+            'pause_ms' => (int)$r['tts_font_pause_ms'],
+        ];
+    }
+    return $fonts;
+}
+
+/**
+ * First paragraph_number of a volume's trailing back matter, or null.
+ *
+ * Every YY volume closes with a one-page RESOURCES block — site links,
+ * social handles, contact address, cover credit, "Ver. 20251217". The DOCX
+ * gives it no numeric heading, and parse_paragraphs.py only maps paragraphs
+ * to headings it already knows, so the block lands inside whichever chapter
+ * happened to come last and gets narrated with it. Nothing about it is
+ * speakable, so the build drops it from the last chapter's audio the way it
+ * drops tables and skip-page ranges.
+ *
+ * Everything from the returned number to the end of the volume is back
+ * matter. Detection is by content, not page number, so a re-parse that
+ * shifts pagination can't leak the block back into the chapter.
+ *
+ * Two guards keep a mid-book paragraph that merely reads "RESOURCES" from
+ * tripping it: the heading must open the volume's FINAL block (no later
+ * paragraph may sit on an earlier page), and that block must be short. A
+ * heading with real chapter text after it therefore fails both.
+ */
+function ttsBackMatterCutoff(PDO $db, int $volumeKey): ?int {
+    static $cache = [];
+    if (array_key_exists($volumeKey, $cache)) return $cache[$volumeKey];
+    $cache[$volumeKey] = null;
+    if ($volumeKey <= 0) return null;
+
+    $st = $db->prepare("
+        SELECT paragraph_number, paragraph_page
+          FROM yy_paragraph
+         WHERE volume_key = ? AND btrim(paragraph_text_plain) ILIKE 'resources'
+      ORDER BY paragraph_number DESC
+         LIMIT 1
+    ");
+    $st->execute([$volumeKey]);
+    $head = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$head) return null;
+
+    $cut  = (int)$head['paragraph_number'];
+    $page = $head['paragraph_page'] !== null ? (int)$head['paragraph_page'] : null;
+    if ($page === null) return null;
+
+    $tl = $db->prepare("
+        SELECT count(*) AS n, min(paragraph_page) AS min_pg
+          FROM yy_paragraph
+         WHERE volume_key = ? AND paragraph_number > ?
+    ");
+    $tl->execute([$volumeKey, $cut]);
+    $tail = $tl->fetch(PDO::FETCH_ASSOC);
+
+    if ((int)$tail['n'] > 40) return null;                                  // too long to be back matter
+    if ($tail['min_pg'] !== null && (int)$tail['min_pg'] < $page) return null;  // real content follows
+
+    return $cache[$volumeKey] = $cut;
+}
+
+/**
+ * Recount tts_tune_book_count for every row of a single Print, corpus-wide,
+ * and write it. Called after save_tune — a NEW pronunciation and an italic/
+ * case FILTER change both alter the count, so this covers both. Cheap: an SQL
+ * pre-filter on paragraph_text_plain pulls only the paragraphs that could
+ * contain the word instead of scanning all ~126K.
+ *
+ * Un-gated tunes (the vast majority) count over paragraph_text_plain — the
+ * same formatting-free text the build's segmentParagraph feeds applyTunes, so
+ * every occurrence counts regardless of bold/italic. Only a bold/italic-gated
+ * tune is counted against the font-filtered HTML, where the tags the gate
+ * needs are preserved.
+ */
+function recountTuneBookCountForPrint(PDO $db, int $ttsKey, string $print): int {
+    $sel = $db->prepare("SELECT * FROM yy_tts_tune WHERE tts_key = ? AND tts_tune_print = ?");
+    $sel->execute([$ttsKey, $print]);
+    $tunes = $sel->fetchAll(PDO::FETCH_ASSOC);
+    if (!$tunes) return 0;
+
+    $core = ttsNormalizeCore($print);
+    $anyGated = false;
+    foreach ($tunes as $t) { if (ttsTuneIsFormatGated($t)) { $anyGated = true; break; } }
+
+    $plains = [];   // formatting-free text, for un-gated tunes
+    $htmls  = [];   // font-filtered HTML, only built if a gated row exists
+    if ($core !== '') {
+        $cand = $db->prepare(
+            "SELECT paragraph_text_plain, paragraph_text_html
+               FROM yy_paragraph
+              WHERE paragraph_text_html <> ''
+                AND position(:core in lower(regexp_replace(paragraph_text_plain, '[' || :apos || ']', '', 'g'))) > 0"
+        );
+        $cand->execute([':core' => $core, ':apos' => TTS_APOS_CHARS]);
+        $fonts = $anyGated ? ttsLoadFontRules($db, $ttsKey) : [];
+        foreach ($cand->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $plains[] = (string)$r['paragraph_text_plain'];
+            if ($anyGated) $htmls[] = preprocessFontFilter((string)$r['paragraph_text_html'], $fonts);
+        }
+    }
+
+    $upd = $db->prepare(
+        "UPDATE yy_tts_tune SET tts_tune_book_count = ? WHERE tts_tune_key = ?"
+    );
+    $written = 0;
+    foreach ($tunes as $t) {
+        $n = 0;
+        if (ttsTuneIsFormatGated($t)) {
+            foreach ($htmls  as $h) $n += ttsCountTuneInHtml($h, $t);
+        } else {
+            foreach ($plains as $p) $n += ttsCountTuneInHtml($p, $t);
+        }
+        $upd->execute([$n, (int)$t['tts_tune_key']]);
+        $written++;
+    }
+    return $written;
+}
+
+/**
+ * Azure SSML tune rendering. 'sub' → <sub>/<prosody> respelling, 'ipa'/'sapi'
+ * → <phoneme>. All matching + gating is handled by substituteTunes; this only
+ * turns a tune row into its SSML replacement pair. Per-tune voice overrides
+ * (tts_tune_voice_code) are intentionally NOT emitted as nested <voice>
+ * elements — Azure's REST API rejects nested <voice>, so only the phoneme/sub
+ * correction is applied, not the voice switch.
+ */
+function applyTunes(string $text, array $tunes, array &$tokenMap): string {
+    return substituteTunes($text, $tunes, function (array $t) {
+        // Pick the live phonetic representation (sub / ipa / sapi). Azure
+        // neural voices reject the legacy 'sapi' alphabet, so type=sapi is a
+        // reference-only setting that transparently synths from the IPA column.
         $type = $t['tts_tune_phonetic_type'] ?? 'sub';
-        // Azure neural voices reject the 'sapi' phoneme alphabet (legacy,
-        // non-neural voices only). Treat type=sapi as a *reference* setting
-        // — at synth time we transparently use the IPA column instead.
         $synthType = ($type === 'sapi') ? 'ipa' : $type;
-        $col  = 'tts_tune_phonetic_' . $synthType;
-        $phon = trim((string)($t[$col] ?? ''));
-        // If IPA is empty OR looks like obvious English-spelling rather
-        // than IPA, fall back to SUB so we don't 400 Azure. Heuristic:
-        // pure ASCII letters with no IPA-specific symbols (no ˈ ˌ ɑ ɛ ɪ
-        // ʊ ɔ ʃ θ ð ʒ ŋ ɹ ʔ ʕ etc.) is almost certainly not real IPA.
+        $phon = trim((string)($t['tts_tune_phonetic_' . $synthType] ?? ''));
+        // Bad/missing IPA → fall back to SUB so we don't 400 Azure. Skip the
+        // legacy-mirror fallback for IPA-typed rows (their mirror IS the same
+        // bad IPA); SUB-typed rules still get the mirror fallback below.
         if ($synthType === 'ipa' && ($phon === '' || ipaLooksFake($phon))) {
-            // Bad/missing IPA → try SUB. Skip the legacy-mirror fallback
-            // here because for IPA-typed bulk-imported rows the mirror
-            // *is* the same bad IPA, which would just round-trip the
-            // problem back into the regex. SUB-typed rules still get
-            // the mirror fallback below.
             $synthType = 'sub';
             $phon = trim((string)($t['tts_tune_phonetic_sub'] ?? ''));
-            if ($phon === '') continue; // no usable phonetic — skip rule
+            if ($phon === '') return null;
         } else {
             if ($phon === '') $phon = (string)($t['tts_tune_phonetic'] ?? '');
-            if ($phon === '') continue; // nothing to substitute with — skip rule
+            if ($phon === '') return null;
         }
-        $regex = tunePrintToRegex($print, $caseSensitive);
-        if (!preg_match($regex, $text)) continue;
-        $token   = sprintf("\x02TUNE_%d\x02",  $t['tts_tune_key']);
-        $tokenS  = sprintf("\x02TUNEs%d\x02", $t['tts_tune_key']); // possessive variant
+        $print = (string)$t['tts_tune_print'];
         if ($synthType === 'ipa') {
-            // Common typos: ASCII apostrophe/backtick instead of the IPA
-            // primary stress mark ˈ (U+02C8); hyphen instead of the IPA
-            // syllable-boundary marker . (period). Azure rejects hyphens
-            // in ph="" and returns HTTP 400 with an empty body.
+            // Typos: ASCII apostrophe/backtick → IPA primary stress ˈ (U+02C8);
+            // hyphen → syllable-boundary '.' (Azure 400s on hyphens in ph="").
             $phon = strtr($phon, ["'" => "\u{02C8}", '`' => "\u{02C8}"]);
             $phon = str_replace('-', '.', $phon);
             $ph = htmlspecialchars($phon, ENT_QUOTES | ENT_XML1);
-            // Strip half-rings (ʾ U+02BE, ʿ U+02BF) from the *surface text*
-            // of the phoneme tag. The `ph=` attribute already encodes the
-            // correct pronunciation in IPA; the surface text is only a visual
-            // / accessibility fallback. Azure ignores it entirely (so output
-            // stays byte-identical) but stricter engines like Inworld TTS try
-            // to articulate the U+02BF and produce an audible delay / glottal
-            // stop. Stripping keeps the SSML clean for everyone.
+            // Strip half-rings (ʾ ʿ) from the phoneme's SURFACE text only; the
+            // ph= attribute carries the real pronunciation. Azure ignores the
+            // surface text, but stricter engines try to articulate the U+02BF.
             $printSurface = preg_replace('/[\x{02BE}\x{02BF}]/u', '', $print);
             $printEsc = htmlspecialchars($printSurface, ENT_QUOTES | ENT_XML1);
             $repl  = "<phoneme alphabet=\"ipa\" ph=\"$ph\">$printEsc</phoneme>";
-            // Possessive variant: append /z/ to the IPA, append "'s" to
-            // the surface print so lipsync / display stays sensible.
+            // Possessive: append /z/ to the IPA and "'s" to the surface print.
             $phPoss = htmlspecialchars($phon . 'z', ENT_QUOTES | ENT_XML1);
             $replS = "<phoneme alphabet=\"ipa\" ph=\"$phPoss\">" . $printEsc . "&#39;s</phoneme>";
         } else {
             $repl  = buildSubReplSsml($print, $phon);
-            // Possessive variant in SUB: append plain "s" so the alias
-            // reads "Tor-ahs" as one continuous word instead of getting
-            // broken up at the apostrophe.
+            // Possessive: append plain "s" so the alias reads "Tor-ahs" as one
+            // continuous word instead of breaking at the apostrophe.
             $replS = buildSubReplSsml($print . "'s", $phon . 's');
         }
-        // Per-tune voice overrides (tts_tune_voice_code) are intentionally
-        // NOT emitted as nested <voice> elements. Azure's synthesize REST
-        // API rejects nested <voice> inside <voice> (and especially inside
-        // <mstts:express-as>) with HTTP 400. The phoneme/sub pronunciation
-        // correction from the tune is still applied; only the voice switch
-        // is suppressed. A proper implementation would split the text into
-        // sibling <voice> blocks at the <speak> level.
-        $tokenMap[$token]  = $repl;
-        $tokenMap[$tokenS] = $replS;
-        // preg_replace_callback so we can choose between the plain and
-        // possessive token based on whether match group 2 captured the
-        // trailing 's. Group 1 is the print word, group 2 the optional 's.
-        $cb = function($m) use ($token, $tokenS) {
-            return !empty($m[2]) ? $tokenS : $token;
-        };
-        if ($needsBold || $needsItalic) {
-            $text = applyTuneInTaggedRegions($text, $regex, $cb, $needsBold, $needsItalic);
-        } else {
-            $text = preg_replace_callback($regex, $cb, $text);
-        }
-    }
-    return $text;
+        return [$repl, $replS];
+    }, $tokenMap);
 }
 
 /**
@@ -777,9 +1062,10 @@ function applyTunes(string $text, array $tunes, array &$tokenMap): string {
  * "Yah</b>owah") are intentionally not matched — substitution stays
  * within a single text run for predictability.
  */
-function applyTuneInTaggedRegions(string $text, string $regex, $replacement, bool $needsBold, bool $needsItalic): string {
+function applyTuneInTaggedRegions(string $text, string $regex, $replacement, bool $needsBold, bool $needsItalic, ?int &$count = null): string {
     $bold = 0; $italic = 0;
     $out = '';
+    if ($count !== null) $count = 0;
     if (!preg_match_all('/<\/?[bi]\b[^>]*>|[^<]+/i', $text, $m)) return $text;
     foreach ($m[0] as $piece) {
         if ($piece[0] === '<') {
@@ -794,9 +1080,11 @@ function applyTuneInTaggedRegions(string $text, string $regex, $replacement, boo
             // Text run — substitute only if current state qualifies.
             $qual = (!$needsBold || $bold > 0) && (!$needsItalic || $italic > 0);
             if ($qual) {
+                $c = 0;
                 $out .= is_callable($replacement)
-                    ? preg_replace_callback($regex, $replacement, $piece)
-                    : preg_replace($regex, $replacement, $piece);
+                    ? preg_replace_callback($regex, $replacement, $piece, -1, $c)
+                    : preg_replace($regex, $replacement, $piece, -1, $c);
+                if ($count !== null) $count += $c;
             } else {
                 $out .= $piece;
             }
@@ -1020,6 +1308,7 @@ function buildVoiceBlock(string $text, array $cfg, string $category, ?string $ov
     }
     $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg));
     $text = rewriteClockTimes($text);   // Azure reads times fine; no-op unless spelled
+    $text = rewriteBareNumbers($text);  // Azure reads digits fine; no-op unless spelled
     // Apply tunes BEFORE pauses so tune regexes see the raw half-ring
     // and apostrophe-equivalent characters in the source. If pauses
     // ran first, "ʾ" (0 ms suppression pause) would have been swapped
@@ -1479,15 +1768,104 @@ function azureOutputFormats(): array {
     ];
 }
 
+/**
+ * From the offset just AFTER a top-level '(', return the decoded VISIBLE text
+ * of that parenthetical up to (but not including) its matching ')'. Skips HTML
+ * tags, decodes entities, and balances nested parens. Used only to classify a
+ * parenthetical (aside vs definition) — it does not drive segmentation, so the
+ * bib-span close-only quirk in segmentParagraph is irrelevant here.
+ */
+function ttsScanParenSpan(string $html, int $pos): string {
+    $n = strlen($html); $depth = 1; $out = '';
+    while ($pos < $n) {
+        $ch = $html[$pos];
+        if ($ch === '<') {                                   // skip a tag
+            $e = strpos($html, '>', $pos);
+            if ($e === false) break;
+            $pos = $e + 1; continue;
+        }
+        if ($ch === '&') {                                   // decode one entity
+            $semi = strpos($html, ';', $pos);
+            if ($semi !== false && $semi - $pos <= 8) {
+                $out .= html_entity_decode(substr($html, $pos, $semi - $pos + 1), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                $pos = $semi + 1; continue;
+            }
+            $out .= $ch; $pos++; continue;
+        }
+        if ($ch === '(') { $depth++; $out .= $ch; $pos++; continue; }
+        if ($ch === ')') { if (--$depth === 0) break; $out .= $ch; $pos++; continue; }
+        $out .= $ch; $pos++;
+    }
+    return $out;
+}
+
+/**
+ * Is this parenthetical an EDITORIAL ASIDE (narrate) rather than a translation
+ * or word-definition (drop)?
+ *
+ * The corpus rule: parenthetical text is left silent ONLY when it is a
+ * translation gloss or a word definition. Everything else — running editorial
+ * commentary the author set in parentheses — must be voiced, e.g. s07v02's
+ * "(I would have credited Muhammad with 5 remaining converts to Islam … but who
+ * am I to argue with the preceding Hadith chronicled in the History of
+ * al-Tabari?)".
+ *
+ * The hard part: an English translation gloss "(a box or a chest)" is
+ * surface-identical to an English aside "(the uncle of the Prophet)", and the
+ * overwhelming majority of parentheticals in these books ARE glosses,
+ * transliterations, grammatical parses, and citations. So this is deliberately
+ * HIGH-PRECISION / low-recall: it narrates only a parenthetical that reads as a
+ * substantial, English-dense standalone sentence, and stays silent on anything
+ * that looks like a gloss, transliteration, grammatical parse, or reference
+ * citation. Erring toward "drop" keeps the current (silent) behaviour and never
+ * voices romanized Hebrew — validated at ~617 asides across 173k parentheticals.
+ *
+ * Reference citations ("Isaiah 14:7", "Quran 035.025", "op. cit., p. 139") are
+ * treated as apparatus and stay silent, per the narration policy — they are
+ * caught by the numeric verse/page rules below.
+ */
+function ttsParentheticalIsAside(string $s): bool {
+    $t = trim($s);
+    if ($t === '') return false;
+    // Transliteration diacritics / Hebrew / Arabic script → definition.
+    if (preg_match('/[\x{02BE}\x{02BF}\x{0300}-\x{036F}\x{0590}-\x{05FF}\x{0600}-\x{06FF}]/u', $t)) return false;
+    // Gloss separators (– — |) mark a word-definition block.
+    if (preg_match('/[\x{2013}\x{2014}|]/u', $t)) return false;
+    // Grammatical metalanguage → a parse of a word, not prose.
+    if (preg_match('/\b(hifil|hofal|niphal|qal|piel|pual|hitpael|perfect|imperfect|imperative|participle|infinitive|construct|cohortative|jussive|paragogic|masculine|feminine)\b/i', $t)) return false;
+    // Reference citations (chapter:verse / chapter.verse, incl. ranges) stay silent.
+    if (preg_match('/\b\d+[:.]\d+(?:[-\x{2013}]\d+)?[a-z]?\b/u', $t)) return false;
+    // Source / self references (op. cit., ibid, p. 139, Volume 2, Chapter 3) stay silent.
+    if (preg_match('/\b(op\.?\s*cit|ibid|pp?\.?\s*\d+|Volume\s+\d+|Chapter\s+\d+)\b/i', $t)) return false;
+    // Romanized Hebrew/Arabic function tokens (no diacritics) → transliteration.
+    if (preg_match('/\b(wa|ky|huw|hem|hen|shanah|leb|midah|chalab|dabash|nagad|henah|zuwb|shabym|ruwm|qereb|yowm|shem)\b/', $t)) return false;
+    // English-prose density gate: a substantial, natural-English clause.
+    preg_match_all("/[A-Za-z']+/", mb_strtolower($t), $m);
+    $words = $m[0];
+    $nw = count($words);
+    if ($nw < 8) return false;
+    static $stop = null;
+    if ($stop === null) {
+        $stop = array_flip(explode(' ', 'the a an of to in is was are for with on by it he she they we i you and or but not this that these those his her their our your as at from into over under about which who whom whose because although though however while when where since therefore have has had will would could should may might must been being do does did'));
+    }
+    $eng = 0; foreach ($words as $w) if (isset($stop[$w])) $eng++;
+    $ratio = $eng / $nw;
+    $endsSentence = (bool)preg_match('/[.!?]["\x{201D}\x{2019}]?$/u', $t);
+    $hasTwo       = (bool)preg_match('/[.!?]\s+[A-Z]/', $t);
+    return ($ratio >= 0.30 && ($endsSentence || $hasTwo || $ratio >= 0.40));
+}
+
 /* ── segmentation ───────────────────────────────────────────────────
  * Walk paragraph_text_html and classify text into:
  *   main             — plain body text
  *   translation      — inside <b>
  *   word_definition  — inside ( ) (parenthesized definition block)
  *
- * Both '(' and ')' belong to the word_definition segment. Bible/Islam
- * detection is handled separately by per-series pre-passes in the
- * build worker — segmentParagraph stays HTML-structure-driven.
+ * Both '(' and ')' belong to the word_definition segment, EXCEPT when the
+ * parenthetical is an editorial aside (ttsParentheticalIsAside) — those route
+ * to 'main' so the commentary is narrated. Bible/Islam detection is handled
+ * separately by per-series pre-passes in the build worker — segmentParagraph
+ * stays HTML-structure-driven.
  */
 function segmentParagraph(string $html, ?array &$carry = null): array {
     $carry ??= [];
@@ -1515,6 +1893,13 @@ function segmentParagraph(string $html, ?array &$carry = null): array {
     // fall back to no Bible context. If the style isn't a known child
     // category, buildVoiceBlock's parent-walk falls back to 'bible'.
     $bibStack = [];
+    // When a TOP-LEVEL '(' opens, we look ahead to classify the whole
+    // parenthetical: an editorial aside routes its text to 'main' (narrated);
+    // a translation/definition stays 'word_definition' (dropped). Latched for
+    // the life of that top-level paren, cleared when it closes (depth → 0).
+    // Not carried across paragraphs — a continuation inheriting parenDepth>0
+    // from the carry defaults to the silent word_definition path, unchanged.
+    $topParenAside = false;
     $i = 0; $n = strlen($html);
     while ($i < $n) {
         $ch = $html[$i];
@@ -1558,10 +1943,36 @@ function segmentParagraph(string $html, ?array &$carry = null): array {
                 // tag doesn't match a known child category, via the
                 // parent walk in buildVoiceBlock.
                 $cat = end($bibStack) ?: 'bible';
+                // ⚠ A ")" in here still CLOSES a paren opened outside. The
+                // parser routinely splits a citation across the style
+                // boundary — "(Matthew 7:" in a plain span, "19)" in a
+                // <bib-nt> one (s06v04 ch4 ¶1324). Skipping the decrement
+                // (as this branch used to) left parenDepth stuck above zero
+                // forever: it carried into every following paragraph, which
+                // then read as word_definition (read_flag=false) and was
+                // synthesised as NOTHING. That one paragraph silenced 103.
+                //
+                // Close-only, deliberately. Letting a "(" in here OPEN a
+                // definition instead re-categorises text after the span in
+                // 7.5% of all paragraphs (Bukhari/Quran quotes are full of
+                // parenthetical glosses) — a huge voicing change for no
+                // benefit. Bib-internal parens stay invisible; only the
+                // unbalanced cross-boundary close is repaired.
+                if ($c === ')' && $parenDepth > 0) { if (--$parenDepth === 0) $topParenAside = false; }
             }
-            elseif ($c === '(') { $parenDepth++; $cat = 'word_definition'; }
-            elseif ($c === ')' && $parenDepth > 0) { $cat = 'word_definition'; $parenDepth--; }
-            elseif ($parenDepth > 0) { $cat = 'word_definition'; }
+            elseif ($c === '(') {
+                // At a top-level open, classify the parenthetical once. $i already
+                // points just past this '(' (a literal '(' takes the $i++ path),
+                // so the lookahead reads its inner text from here.
+                if ($parenDepth === 0) $topParenAside = ttsParentheticalIsAside(ttsScanParenSpan($html, $i));
+                $parenDepth++;
+                $cat = $topParenAside ? 'main' : 'word_definition';
+            }
+            elseif ($c === ')' && $parenDepth > 0) {
+                $cat = $topParenAside ? 'main' : 'word_definition';
+                if (--$parenDepth === 0) $topParenAside = false;
+            }
+            elseif ($parenDepth > 0) { $cat = $topParenAside ? 'main' : 'word_definition'; }
             elseif ($boldDepth  > 0) { $cat = 'translation'; }
             else                     { $cat = 'main'; }
             if ($cat !== $cur['category']) {
@@ -1820,6 +2231,48 @@ function ttsDropUnspeakableSegments(array $segments): array {
 }
 
 /**
+ * Bound segmentParagraph()'s cross-paragraph carry at a COMPLETE paragraph.
+ *
+ * The carry (bold/italic/paren depth + bib stack) exists so a logical paragraph
+ * the PDF parser cut at a page break resumes in the SAME format state — without
+ * it, the tail of a Hebrew word definition drops out of the definition voice
+ * mid-sentence. That is still needed: ~699 logical paragraphs end mid-clause
+ * with an open "(" whose closing ")" lives in the next row and which
+ * bundle_paragraphs.py never flagged paragraph_is_continuation.
+ *
+ * But the carry is UNBOUNDED, and the source books contain typos — a definition
+ * whose ")" the author simply never typed. There the open paren leaks out of its
+ * paragraph and every FOLLOWING paragraph inherits parenDepth>0, so it is tagged
+ * word_definition (read_flag=false), dropped by ttsCollapseSkippedSegments, and
+ * synthesised as NOTHING — a silent run that continues until some later stray
+ * ")" happens to absorb the depth. This silently lost s02v09 ch18 ¶3075-3077
+ * (¶3074 is missing one ")" — "…in the matter (hofal perfect third-person
+ * feminine singular)" opens two parens and closes one).
+ *
+ * The two cases are separable by how the paragraph ENDS. A page-break cut stops
+ * mid-word/mid-clause; a typo'd paragraph is a complete, terminally-punctuated
+ * sentence that just happens to still hold an open "(". So: when a paragraph
+ * ends on sentence-terminal punctuation, nothing may leak out of it — clear the
+ * carry. When it ends abruptly, keep carrying (that is the case the carry is for).
+ *
+ * ⚠ ";" and ":" are NOT terminal — YY definitions routinely wrap across a page
+ * break at a semicolon ("…to restore the relationship;" → "feminine of barak…").
+ *
+ * ⚠ Must be applied on EVERY segmentParagraph() call site that threads a carry,
+ * and identically in the build worker and admin-tts-build.php's coverage
+ * pre-pass — if the two disagree, the panel's paragraph status stops matching
+ * what synthesis actually produced.
+ */
+function ttsBoundCarryAtParagraphEnd(string $html, ?array &$carry): void {
+    $plain = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $plain = rtrim(preg_replace('/\s+/u', ' ', $plain));
+    if ($plain === '') return;                      // nothing to judge — leave the carry alone
+    if (preg_match('/[.!?…)\]}”’"\']$/u', $plain)) {
+        $carry = ['bold' => 0, 'italic' => 0, 'paren' => 0, 'bibStack' => []];
+    }
+}
+
+/**
  * Should content tagged with $category be synthesised at all?
  *
  * Walks the parent chain like buildVoiceBlock() and inspects
@@ -2023,74 +2476,20 @@ function ttsTuneRuleId(array $t): string {
  * (True IPA passthrough for phoneme engines like Kokoro is a future refinement.)
  */
 function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null, ?callable $flattenAlias = null): string {
-    $count = 0;
-    $matchedSeed = null;   // first matched tune's seed wins (FIFO across the prioritised list)
-    // Token round-trip prevents tune-N cascading onto tune-M's substitution.
-    // tunePrintToRegex normalises every apostrophe-class char into one class,
-    // so "Yisraʿel"→"yihsr-Ahehl" and "Yisraʾel"→"Yisrael" BOTH match source
-    // "Yisraʾel" — and BOTH match each other's plain-letter output. Replace
-    // each hit with \x02PT<n>\x02 (letterless), then strtr() the tokens back
-    // to their aliases at the end. The SSML path applyTunes() does the same.
     $tokenMap = [];
-    $tokenIdx = 0;
-    // Fast pre-filter. tunePrintToRegex + preg_replace_callback on 3,000+
-    // tunes took ~11 seconds per paragraph; the vast majority of tunes'
-    // Print word doesn't appear in the text at all. A cheap stripos check
-    // on the Print's apostrophe-stripped lowercase core (Print minus the
-    // apostrophe-class chars that tunePrintToRegex makes optional) skips
-    // ~95% of tunes before we touch their regex.
-    $textLower = mb_strtolower($text, 'UTF-8');
-    static $APOS_RE_FAST = '/[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]/u';
-    // Also strip apostrophe-class chars from the text-side of the pre-filter
-    // check. tunePrintToRegex treats those chars as optional in matching, so
-    // Print "Shabuwʿah" (core "Shabuwah") must be searchable against source
-    // text "Shabuwʿah" too — without this, half-ring words silently skip
-    // their tune and the raw character falls through to applyPauses, which
-    // emits an audible space where the ʿ used to be.
-    $textLowerCore = preg_replace($APOS_RE_FAST, '', $textLower);
-    foreach ($tunes as $t) {
-        $print = (string)($t['tts_tune_print'] ?? '');
-        if ($print === '') continue;
+    $text = substituteTunes($text, $tunes, function (array $t) use ($flattenAlias) {
+        // Local engines have no SSML phoneme tag — an IPA fallback would inject
+        // codepoints (ɑ ʁ ʕ) the engine's text→phoneme stage can't map, so use
+        // the 'sub' respelling only. No sub → skip so the English defaults win.
         $alias = trim((string)($t['tts_tune_phonetic_sub'] ?? ''));
-        // Local engines have no SSML phoneme tag — IPA fallback would inject
-        // codepoints (ɑ ʁ ʕ) the engine's text→phoneme stage can't map.
-        // Skip tunes with no 'sub' so the English defaults handle them.
-        if ($alias === '') continue;
-        // Fast pre-filter: strip apostrophe-class chars from Print and
-        // check if the resulting core appears in the (also-stripped)
-        // lowercased text. If not, no chance of a match — skip the regex.
-        $core = preg_replace($APOS_RE_FAST, '', $print);
-        if ($core === '' || mb_stripos($textLowerCore, $core, 0, 'UTF-8') === false) continue;
+        if ($alias === '') return null;
         $alias = str_replace(['[', ']', '{', '}'], '', $alias);
-        // Phonetic flattening (syllable-hyphen fusion) is engine-specific and
-        // is applied here ONLY when the caller supplies a flattener, which
-        // buildLocalSegment does exclusively for the Chatterbox family (see
-        // chatterboxFlattenPhonetic). Every other local engine receives the
-        // canonical hyphenated respelling untouched, so its syllable/stress
-        // structure survives. The DB value is never mutated.
+        // Phonetic flattening (syllable-hyphen fusion) is Chatterbox-specific,
+        // applied only when the caller supplies a flattener; every other local
+        // engine keeps the canonical hyphenated respelling. DB value untouched.
         if ($flattenAlias !== null) $alias = $flattenAlias($alias);
-        $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
-        $hits = 0;
-        $text = preg_replace_callback($regex, function ($m) use ($alias, &$tokenMap, &$tokenIdx) {
-            $tok = "\x02PT" . ($tokenIdx++) . "\x02";
-            $tokenMap[$tok] = !empty($m[2]) ? $alias . 's' : $alias;   // possessive 's
-            return $tok;
-        }, $text, -1, $hits);
-        if ($hits > 0) {
-            $count += $hits;
-            // First matched tune's seed wins. Each tune carries a
-            // [seed_min, seed_max] range; we pick a fresh random int in
-            // that range on every synth, so the same word can ring in
-            // multiple variants across a long book. Deterministic case
-            // (min == max) collapses to a single fixed seed.
-            if ($matchedSeed === null) {
-                $sMin = isset($t['tts_tune_seed_min']) ? (int)$t['tts_tune_seed_min'] : 0;
-                $sMax = isset($t['tts_tune_seed_max']) ? (int)$t['tts_tune_seed_max'] : $sMin;
-                if ($sMax < $sMin) $sMax = $sMin;
-                $matchedSeed = ($sMin === $sMax) ? $sMin : random_int($sMin, $sMax);
-            }
-        }
-    }
+        return [$alias, $alias . 's'];   // plain, possessive
+    }, $tokenMap, $count, $matchedSeed);
     if (!empty($tokenMap)) $text = strtr($text, $tokenMap);
     return $text;
 }
@@ -2108,76 +2507,38 @@ function applyTunesPlain(string $text, array $tunes, ?int &$count = null, &$matc
  * (no respelling means no stress capitals in the output).
  */
 function applyTunesInworld(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null): string {
-    $count = 0;
-    $matchedSeed = null;
     $tokenMap = [];
-    $tokenIdx = 0;
-    $textLower = mb_strtolower($text, 'UTF-8');
-    static $APOS_RE_FAST = '/[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]/u';
-    $textLowerCore = preg_replace($APOS_RE_FAST, '', $textLower);
-    foreach ($tunes as $t) {
-        $print = (string)($t['tts_tune_print'] ?? '');
-        if ($print === '') continue;
+    $text = substituteTunes($text, $tunes, function (array $t) {
         $type = (string)($t['tts_tune_phonetic_type'] ?? 'sub');
         $ipa  = trim((string)($t['tts_tune_phonetic_ipa'] ?? ''));
         $sub  = trim((string)($t['tts_tune_phonetic_sub'] ?? ''));
         // Choose the alias per the admin's phonetic_type setting.
         if ($type === 'ipa' && $ipa !== '') {
-            // Inworld supports STANDARD ENGLISH IPA only (per their docs).
-            // Hebrew/Arabic-specific IPA glyphs that mark Semitic phonemes
-            // not present in English phonology cause the engine to guess —
-            // ʕ (voiced pharyngeal, ayin) comes out as /k/, χ (voiceless
-            // uvular, chaf) likewise. Map each to the closest sound English
-            // IPA can express. The lexicon's IPA strings keep their accurate
-            // Semitic glyphs — this normalisation is Inworld-only.
+            // Inworld supports STANDARD ENGLISH IPA only. Semitic-specific
+            // glyphs make the engine guess (ʕ ayin → /k/, χ chaf likewise), so
+            // map each to the closest English sound. The lexicon keeps the
+            // accurate glyphs — this normalisation is Inworld-only. ʕ is
+            // DROPPED (not → ʔ): Inworld treats ʔ allophonically as /t/
+            // ("Yisrael"→"Yis-RAH-tail"); silent-ayin matches how English
+            // speakers say Hebrew names ("Israel", "Asaph").
             $ipaForInworld = strtr($ipa, [
-                // ʕ (voiced pharyngeal, ayin) — was mapped to ʔ (glottal stop)
-                // but Inworld's English sampler treats ʔ allophonically as /t/
-                // some fraction of calls ("Yisrael" → "Yis-RAH-tail"). Dropping
-                // entirely is the only Inworld-safe option; the silent-ayin
-                // pronunciation matches how English speakers actually say
-                // Hebrew names ("Israel", "Asaph"). Where the resulting
-                // vowel-vowel hiatus is itself a problem (e.g. /ɑɛ/ in
-                // "Yisrael" collapsing to a diphthong) the per-tune IPA needs
-                // an explicit syllable separator inserted in the lexicon.
                 "\u{0295}" => '',            // ʕ voiced pharyngeal (ayin) → drop
                 "\u{0127}" => 'h',           // ħ voiceless pharyngeal (chet) → h
                 "\u{0281}" => "\u{0279}",   // ʁ voiced uvular fricative → ɹ English r
                 "\u{03C7}" => 'h',           // χ voiceless uvular (chaf) → h
                 "\u{0263}" => 'g',           // ɣ voiced velar fricative → g
             ]);
-            // Inworld's inline-IPA syntax: wrap in slashes.
-            $alias = '/' . $ipaForInworld . '/';
+            $alias = '/' . $ipaForInworld . '/';   // Inworld inline-IPA syntax
         } elseif ($sub !== '') {
             $alias = $sub;
         } else {
-            continue;
+            return null;
         }
-        // Fast pre-filter (same as applyTunesPlain).
-        $core = preg_replace($APOS_RE_FAST, '', $print);
-        if ($core === '' || mb_stripos($textLowerCore, $core, 0, 'UTF-8') === false) continue;
-        // SUB-style stress markers ([slow] / {fast} braces) are noise to
-        // Inworld; strip them. Hyphens are syllable separators in sub
-        // respellings — strip so the engine doesn't break on them. (IPA
-        // already lacks these markers.)
+        // Strip SUB stress markers ([slow]/{fast}) and hyphens (syllable
+        // separators the engine would break on); IPA already lacks these.
         $alias = str_replace(['[', ']', '{', '}', '-'], '', $alias);
-        $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
-        $hits = 0;
-        $text = preg_replace_callback($regex, function ($m) use ($alias, &$tokenMap, &$tokenIdx) {
-            $tok = "\x02PT" . ($tokenIdx++) . "\x02";
-            $tokenMap[$tok] = !empty($m[2]) ? $alias . 's' : $alias;
-            return $tok;
-        }, $text, -1, $hits);
-        if ($hits > 0) {
-            $count += $hits;
-            if ($matchedSeed === null) {
-                $sMin = isset($t['tts_tune_seed_min']) ? (int)$t['tts_tune_seed_min'] : 0;
-                $sMax = isset($t['tts_tune_seed_max']) ? (int)$t['tts_tune_seed_max'] : $sMin;
-                if ($sMax < $sMin) $sMax = $sMin;
-                $matchedSeed = ($sMin === $sMax) ? $sMin : random_int($sMin, $sMax);
-            }
-        }
-    }
+        return [$alias, $alias . 's'];
+    }, $tokenMap, $count, $matchedSeed);
     if (!empty($tokenMap)) $text = strtr($text, $tokenMap);
     return $text;
 }
@@ -2195,57 +2556,28 @@ function applyTunesInworld(string $text, array $tunes, ?int &$count = null, &$ma
  * Same fast pre-filter + token round-trip as applyTunesPlain.
  */
 function applyTunesKokoro(string $text, array $tunes, ?int &$count = null, &$matchedSeed = null): string {
-    $count = 0;
-    $matchedSeed = null;
     $tokenMap = [];
-    $tokenIdx = 0;
-    $textLower = mb_strtolower($text, 'UTF-8');
-    static $APOS_RE_FAST = '/[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]/u';
-    $textLowerCore = preg_replace($APOS_RE_FAST, '', $textLower);
-    foreach ($tunes as $t) {
+    $text = substituteTunes($text, $tunes, function (array $t) {
         $print = (string)($t['tts_tune_print'] ?? '');
-        if ($print === '') continue;
         $type = (string)($t['tts_tune_phonetic_type'] ?? 'sub');
         $ipa  = trim((string)($t['tts_tune_phonetic_ipa'] ?? ''));
         $sub  = trim((string)($t['tts_tune_phonetic_sub'] ?? ''));
         $isIpa = ($type === 'ipa' && $ipa !== '');
         if ($isIpa) {
-            // misaki inline override; the bracket text is just the alignment
-            // grapheme -- misaki uses the slashed IPA for the audio. Strip any
-            // stray brackets from the print so the construct stays well-formed.
+            // misaki inline override [grapheme](/IPA/): the bracket text is
+            // alignment only, misaki reads the slashed IPA. Strip stray brackets.
             $repl = '[' . str_replace(['[', ']'], '', $print) . '](/' . $ipa . '/)';
         } elseif ($sub !== '') {
-            // Raw sub: strip only the SSML-ish [slow]/{fast} markers. Hyphens
-            // are kept (canonical form) -- Kokoro is never flattened.
+            // Raw sub: strip [slow]/{fast} markers; hyphens KEPT (never flattened).
             $repl = str_replace(['[', ']', '{', '}'], '', $sub);
         } else {
-            continue;
+            return null;
         }
-        $core = preg_replace($APOS_RE_FAST, '', $print);
-        if ($core === '' || mb_stripos($textLowerCore, $core, 0, 'UTF-8') === false) continue;
-        $regex = tunePrintToRegex($print, !empty($t['tts_tune_match_case_sensitive']));
-        $hits = 0;
-        $text = preg_replace_callback($regex, function ($m) use ($repl, $isIpa, &$tokenMap, &$tokenIdx) {
-            $tok = "\x02PT" . ($tokenIdx++) . "\x02";
-            // Possessive: for an IPA override append "'s" OUTSIDE the construct
-            // so misaki phonemises it in context; for a sub respelling append 's'.
-            if (!empty($m[2])) {
-                $tokenMap[$tok] = $isIpa ? $repl . "'s" : $repl . 's';
-            } else {
-                $tokenMap[$tok] = $repl;
-            }
-            return $tok;
-        }, $text, -1, $hits);
-        if ($hits > 0) {
-            $count += $hits;
-            if ($matchedSeed === null) {
-                $sMin = isset($t['tts_tune_seed_min']) ? (int)$t['tts_tune_seed_min'] : 0;
-                $sMax = isset($t['tts_tune_seed_max']) ? (int)$t['tts_tune_seed_max'] : $sMin;
-                if ($sMax < $sMin) $sMax = $sMin;
-                $matchedSeed = ($sMin === $sMax) ? $sMin : random_int($sMin, $sMax);
-            }
-        }
-    }
+        // Possessive: an IPA override appends "'s" OUTSIDE the construct so
+        // misaki phonemises it in context; a sub respelling appends plain 's'.
+        $replS = $isIpa ? $repl . "'s" : $repl . 's';
+        return [$repl, $replS];
+    }, $tokenMap, $count, $matchedSeed);
     if (!empty($tokenMap)) $text = strtr($text, $tokenMap);
     return $text;
 }
@@ -2284,6 +2616,61 @@ function ttsProviderEngineName(array $cfg, int $providerKey): string {
 }
 
 /**
+ * Wrap a single-word / very-short audition in a neutral carrier sentence so a
+ * self-hosted (token) engine renders the word MID-UTTERANCE — the same way it
+ * will inside a real book sentence — instead of cold and isolated.
+ *
+ * Why: XTTS / Coqui (and the other autoregressive local engines) produce a bare
+ * word at utterance start with no coarticulation and no lead-in, and on short
+ * inputs they mis-syllabify or spell it out ("Dowd" → "Doe Dad") in a way they
+ * DON'T when the same word sits between other words in a paragraph. That makes a
+ * single-word audition an unfaithful proxy for the book build — you tune against
+ * an artifact. Speaking the word inside a fixed neutral frame gives the engine a
+ * leading + trailing context word, so what you hear in the audition is what the
+ * build will produce.
+ *
+ * The whole frame is played. We deliberately do NOT trim back to the bare word:
+ * the sub-word silence cut that would require is the exact fragile step that made
+ * the old warmup-word handoff clip / repeat words (removed 2026-06-18). A neutral
+ * carrier that is spoken in full has no such failure mode.
+ *
+ * Applies only to a genuine short WORD audition. A real sentence is already
+ * representative, so this returns null (leave it untouched) when the input has
+ * interior sentence punctuation, is long, or is more than a few tokens. The
+ * caller gates further to gpu-tailnet engines (cloud SSML engines are
+ * context-stable and don't need this) and non-formatted text.
+ *
+ * Frame the RAW text (before buildLocalSegment) so pronunciation tunes, citation
+ * and clock rewrites still fire on the inner word exactly as in a book build.
+ *
+ * The carrier is CONFIGURABLE: $warmup is the leading word(s) and $cooldown the
+ * trailing word(s), assembled as "<warmup> <probe> <cooldown>". The defaults
+ * reproduce the original fixed "Say <word> again." frame. They surface as the
+ * "Warmup" / "Cooldown" fields on the Pronunciations preview bar and persist per
+ * tts_key (yy_tts.tts_audition_warmup / _cooldown). Clearing BOTH disables the
+ * frame (returns null → the bare word is auditioned untouched).
+ */
+const TTS_WORD_AUDITION_WARMUP_DEFAULT   = 'Say';
+const TTS_WORD_AUDITION_COOLDOWN_DEFAULT = 'again.';
+function ttsWordAuditionFrame(string $text, string $warmup = TTS_WORD_AUDITION_WARMUP_DEFAULT, string $cooldown = TTS_WORD_AUDITION_COOLDOWN_DEFAULT): ?string {
+    $t = trim($text);
+    if ($t === '') return null;
+    $probe = preg_replace('/\.+\s*$/u', '', $t);              // ignore a trailing period ("Dowd." means the word)
+    if ($probe === '' || $probe === null) return null;
+    if (preg_match('/[.!?]/u', $probe)) return null;          // any . ! ? left ⇒ an intentional sentence/question
+    if (mb_strlen($probe) > 40) return null;                  // long enough to be representative on its own
+    if (preg_match_all('/\S+/u', $probe) > 4) return null;    // more than a few tokens ⇒ a phrase, not a word
+    $warmup   = trim($warmup);
+    $cooldown = trim($cooldown);
+    if ($warmup === '' && $cooldown === '') return null;      // both carriers cleared ⇒ framing disabled
+    $parts = [];
+    if ($warmup   !== '') $parts[] = $warmup;                 // "Say"
+    $parts[] = $probe;                                        //  "Dowd"
+    if ($cooldown !== '') $parts[] = $cooldown;               //       "again."
+    return implode(' ', $parts);                              // "Say Dowd again."
+}
+
+/**
  * Build a provider-neutral plain-text request for a local-engine segment.
  * Mirrors buildVoiceBlock's citation-rewrite + tune steps but emits plain text
  * (no SSML) plus the category's prosody numbers.
@@ -2296,6 +2683,7 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     }
     $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
     $text = rewriteClockTimes($text, true);
+    $text = rewriteBareNumbers($text, true);
     $tuneHits = 0;
     $matchedTuneSeed = null;
     // Phonetic flattening is Chatterbox-specific: pass the flattener only when
@@ -2461,6 +2849,7 @@ function buildInworldSegment(string $text, array $cfg, string $category): array 
     }
     $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
     $text = rewriteClockTimes($text, true);
+    $text = rewriteBareNumbers($text, true);
     $tuneHits = 0;
     $matchedTuneSeed = null;
     $text = applyTunesInworld($text, ttsTunesForProvider($cfg, $providerKey, $voiceCode), $tuneHits, $matchedTuneSeed);
@@ -2534,6 +2923,7 @@ function buildElevenLabsSegment(string $text, array $cfg, string $category): arr
     }
     $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
     $text = rewriteClockTimes($text, true);
+    $text = rewriteBareNumbers($text, true);
     // Same applyTunes path Azure uses — IPA columns produce <phoneme> tags,
     // SUB columns produce <sub alias="..."> tags. Both render correctly on
     // ElevenLabs v3 / flash_v2 / turbo_v2.
@@ -2610,10 +3000,10 @@ function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?strin
         'provider' => $engine,
         'voice'    => $seg['voice'],
         'text'     => $seg['text'],
-        'phonemes' => $seg['phonemes'],
-        'rate'     => (int)$seg['rate'],
-        'pitch'    => (float)$seg['pitch'],
-        'volume'   => (int)$seg['volume'],
+        'phonemes' => $seg['phonemes'] ?? null,
+        'rate'     => (int)($seg['rate']   ?? 0),
+        'pitch'    => (float)($seg['pitch'] ?? 0.0),
+        'volume'   => (int)($seg['volume'] ?? 100),
         'format'   => $fmt,
     ];
     if (!empty($seg['style'])) $payload['style'] = (string)$seg['style'];
@@ -3193,9 +3583,9 @@ function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat,
             'voice'    => $seg['voice'],
             'text'     => $engineText,
             'phonemes' => '',                 // local segs bake pronunciation into the text; phonemes is null
-            'rate'     => (int)$seg['rate'],
-            'pitch'    => (float)$seg['pitch'],
-            'volume'   => (int)$seg['volume'],
+            'rate'     => (int)($seg['rate']   ?? 0),
+            'pitch'    => (float)($seg['pitch'] ?? 0.0),
+            'volume'   => (int)($seg['volume'] ?? 100),
             'format'   => $fmt,
         ];
         if (!empty($seg['style'])) $payload['style'] = (string)$seg['style'];

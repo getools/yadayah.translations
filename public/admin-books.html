@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1783692002">
+    <meta name="page-version" content="1784037603">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Books Admin - Yada Yah</title>
@@ -83,7 +83,7 @@
 <div id="app" class="container" style="display:none">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=20"></script>
+<script src="/js/admin-nav.js?v=21"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -405,7 +405,10 @@ function loadBooks() {
 // cron-flipbook-retry.sh) and 'stale' (parse out of date; the worker re-parses
 // on its next tick). 'waiting-docx' is deliberately excluded — it blocks on a
 // human re-upload, so polling it would just spin with nothing to observe.
-var PROC_STATES = ['queued', 'processing', 'running', 'pending', 'warning', 'download-pending', 'stale'];
+// 'flipbook-running' is set by book-pipeline-worker.sh's Phase 6 sweep for the
+// 2-4 minutes migrate_flipbook.sh takes to re-render a book's pages.
+var FLIP_RUNNING = 'flipbook-running';
+var PROC_STATES = ['queued', 'processing', 'running', 'pending', 'warning', 'download-pending', 'stale', FLIP_RUNNING];
 // Stacked local-time stamp: YYMMDD on one line, HH:MM on the next.
 // Returns RAW HTML (with <br>) — callers must NOT pass through esc(). Output
 // is purely numeric so no escaping concerns.
@@ -510,14 +513,38 @@ function flipCell(v) {
         // against the most-recent ancestor (PDF or DOCX) so a DOCX update
         // immediately marks the flipbook stale.
         var effSource = laterMtime(v.volume_pdf_mtime, v.volume_docx_mtime);
+        // A stale flipbook is never a dead end: book-pipeline-worker.sh's
+        // Phase 6 sweep rebuilds any book whose PDF is newer than its
+        // flipbook, one per 10-minute tick. So rather than the bare "stale"
+        // that artifactCell would render (which reads as "broken, and nobody
+        // is doing anything about it"), say which stage of that cascade the
+        // book is actually in.
+        var ft = new Date(v.volume_flip_mtime).getTime();
+        var st = effSource ? new Date(effSource).getTime() : 0;
+        if (ft && st && ft < st - 1000) {
+            if (ps === FLIP_RUNNING) {
+                return '<div class="status-cell proc-pulse">'
+                     + '<span class="status-icon status-proc" title="Flipbook is being rebuilt right now (rendering pages — takes 2-4 min)">⟳</span>'
+                     + '<div class="age">regenerating</div></div>';
+            }
+            return '<div class="status-cell proc-pulse">'
+                 + '<span class="status-icon status-proc" title="PDF is newer than this flipbook — the pipeline sweep rebuilds it automatically (next tick, ≤10 min). Last built: ' + esc(fullDt(v.volume_flip_mtime)) + '">⌛</span>'
+                 + '<div class="age">queued<br>' + ago(v.volume_flip_mtime) + '</div></div>';
+        }
         return artifactCell(true, v.volume_flip_mtime, effSource, ps, 'Flipbook');
     }
     if (!v.volume_pdf) {
         return '<div class="status-cell"><span class="status-icon status-miss" title="No PDF — upload a DOCX first">○</span></div>';
     }
-    return '<div class="status-cell">'
-         + '<span class="status-icon" style="color:#a36100;" title="PDF ready — flipbook not built yet (use Edit → Regenerate)">⌛</span>'
-         + '<div class="age" style="color:#a36100;">pending</div></div>';
+    // PDF exists but no flipbook — same sweep picks this up ("flipbook missing").
+    if (ps === FLIP_RUNNING) {
+        return '<div class="status-cell proc-pulse">'
+             + '<span class="status-icon status-proc" title="Flipbook is being generated right now (rendering pages — takes 2-4 min)">⏳</span>'
+             + '<div class="age">generating</div></div>';
+    }
+    return '<div class="status-cell proc-pulse">'
+         + '<span class="status-icon" style="color:#a36100;" title="PDF ready — the pipeline sweep builds the flipbook automatically (next tick, ≤10 min). Edit → Regenerate to jump the queue.">⌛</span>'
+         + '<div class="age" style="color:#a36100;">queued</div></div>';
 }
 
 // downloadHref: optional URL — when provided AND the artifact exists,

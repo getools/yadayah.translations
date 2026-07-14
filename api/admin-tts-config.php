@@ -15,6 +15,7 @@
  *   GET  ?action=category_voices&tts_key=N
  *
  *   POST { action:'save_system',         tts_key, output_format, region }
+ *   POST { action:'save_audition_frame', tts_key, warmup, cooldown }
  *   POST { action:'save_category_voice', tts_key, tts_category, voice_code, style, style_degree, rate_pct, pitch_st, volume }
  *   POST { action:'save_tune',           tts_key, tts_tune_key?, print, phonetic, phonetic_type, note, active }
  *   POST { action:'delete_tune',         tts_tune_key }
@@ -44,7 +45,8 @@ if ($method === 'GET' && $action === 'catalog') {
     // test wrongly offered them as pronunciation providers. Gate on "has a voice
     // OR is registered for the 'tts' functionality" (Azure 1 stays via voices).
     $provStmt = $db->query("
-        SELECT provider_key, provider_label, provider_settings->>'engine' AS engine
+        SELECT provider_key, provider_label, provider_settings->>'engine' AS engine,
+               provider_phonetic_capable, provider_ipa_capable
           FROM yy_provider p
          WHERE provider_active_flag = TRUE
            AND (
@@ -330,6 +332,23 @@ if ($action === 'save_system') {
     jsonResponse(['ok' => true]);
 }
 
+// Persist the single-word audition carrier ("Warmup <word> Cooldown") for this
+// tts_key. Surfaces as the Warmup / Cooldown fields on the Pronunciations
+// preview bar; consumed by ttsWordAuditionFrame in admin-tts-preview.php. Stored
+// trimmed (the frame re-joins the parts with single spaces); clearing both
+// disables framing.
+if ($action === 'save_audition_frame') {
+    $ttsKey = (int)($data['tts_key'] ?? 0);
+    if (!$ttsKey) errorResponse('tts_key required');
+    $stmt = $db->prepare("UPDATE yy_tts SET tts_audition_warmup = ?, tts_audition_cooldown = ? WHERE tts_key = ?");
+    $stmt->execute([
+        mb_substr(trim((string)($data['warmup']   ?? '')), 0, 120),
+        mb_substr(trim((string)($data['cooldown'] ?? '')), 0, 120),
+        $ttsKey,
+    ]);
+    jsonResponse(['ok' => true]);
+}
+
 if ($action === 'save_category_voice') {
     $ttsKey   = (int)($data['tts_key'] ?? 0);
     $category = trim((string)($data['tts_category'] ?? ''));
@@ -409,9 +428,13 @@ if ($action === 'save_tune') {
     $sort      = isset($data['sort']) && $data['sort'] !== '' ? (int)$data['sort'] : 0;
     // Seed range. Synth picks a random int in [min..max] for each
     // occurrence; deterministic when min == max. Pronunciation preview
-    // uses seed_max so auditions are reproducible. Defaults: min=0, max=999.
+    // uses seed_max so auditions are reproducible. Default is DETERMINISTIC
+    // (min=max=0): a chunk's seed is set by the first tuned word that matches
+    // it, so a random-range default (old 0/999) made whole paragraphs re-roll
+    // every render regardless of a pinned word's own seed. Opt into variability
+    // per-row by setting max>min explicitly.
     $seedMin = isset($data['seed_min']) && $data['seed_min'] !== '' ? (int)$data['seed_min'] : 0;
-    $seedMax = isset($data['seed_max']) && $data['seed_max'] !== '' ? (int)$data['seed_max'] : 999;
+    $seedMax = isset($data['seed_max']) && $data['seed_max'] !== '' ? (int)$data['seed_max'] : 0;
     if ($seedMin < 0) $seedMin = 0;
     if ($seedMax < $seedMin) $seedMax = $seedMin;  // never let max fall below min
     if (!$ttsKey || $print === '') errorResponse('tts_key, print required');
@@ -436,15 +459,29 @@ if ($action === 'save_tune') {
     // Look up the row's prior voice_code so we can detect a NULL→set
     // transition. That transition triggers CLONE-and-keep-original
     // behavior — the original stays voice=NULL (the catch-all) and a
-    // new row is inserted carrying the chosen voice.
+    // new row is inserted carrying the chosen voice. Also grab the prior
+    // Print + match flags: the occurrence count depends ONLY on those, so
+    // we recount solely when one of them changed (or the row is new) —
+    // editing phonetic/IPA/seed/provider/voice/note leaves the count intact.
     $priorVoice = null;
+    $needsRecount = ($tuneKey === 0);   // brand-new pronunciation always needs a count
     if ($tuneKey > 0) {
-        $pv = $db->prepare("SELECT tts_tune_voice_code FROM yy_tts_tune WHERE tts_tune_key = ? AND tts_key = ?");
+        $pv = $db->prepare("SELECT tts_tune_voice_code, tts_tune_print, tts_tune_match_bold, tts_tune_match_italic, tts_tune_match_case_sensitive FROM yy_tts_tune WHERE tts_tune_key = ? AND tts_key = ?");
         $pv->execute([$tuneKey, $ttsKey]);
-        $priorVoice = $pv->fetchColumn();
-        if ($priorVoice === false) $priorVoice = null;
+        $priorRow = $pv->fetch(PDO::FETCH_ASSOC);
+        if ($priorRow) {
+            $priorVoice = $priorRow['tts_tune_voice_code'];
+            if ($priorVoice === false) $priorVoice = null;
+            $needsRecount =
+                   ((string)$priorRow['tts_tune_print'] !== $print)
+                || ((bool)$priorRow['tts_tune_match_bold']           !== $mBold)
+                || ((bool)$priorRow['tts_tune_match_italic']         !== $mItalic)
+                || ((bool)$priorRow['tts_tune_match_case_sensitive'] !== $mCase);
+        }
     }
     $voiceTransitionNullToSet = ($tuneKey > 0 && $priorVoice === null && $voiceCode !== null && $voiceCode !== '');
+    // A voice-transition clone inserts a NEW row that needs its own count.
+    if ($voiceTransitionNullToSet) $needsRecount = true;
 
     if ($voiceTransitionNullToSet) {
         // Don't touch the original (voice-NULL) row's voice — only update
@@ -584,17 +621,38 @@ if ($action === 'save_tune') {
         $deactivatedKeys = array_map('intval', $deact->fetchAll(PDO::FETCH_COLUMN));
     }
 
+    // Recompute the occurrence count (# column) for every row of this Print,
+    // but ONLY when it can actually have changed: a brand-new pronunciation,
+    // a Print rename, or a bold/italic/case FILTER change. Editing phonetic/
+    // IPA/seed/provider/voice/note leaves the count untouched, so we skip the
+    // corpus scan there. Best effort: a counting hiccup must not fail the save.
+    $bookCount = null;
+    try {
+        if ($needsRecount) {
+            recountTuneBookCountForPrint($db, $ttsKey, $print);
+        }
+        $bcStmt = $db->prepare("SELECT tts_tune_book_count FROM yy_tts_tune WHERE tts_tune_key = ?");
+        $bcStmt->execute([$tuneKey]);
+        $bookCount = (int)$bcStmt->fetchColumn();
+    } catch (Throwable $e) {
+        error_log('recountTuneBookCountForPrint failed for print "' . $print . '": ' . $e->getMessage());
+    }
+
     jsonResponse([
         'ok'                 => true,
         'tts_tune_key'       => $tuneKey,
         'cloned'             => $cloned,
         'deactivated_keys'   => $deactivatedKeys,
+        'book_count'         => $bookCount,
     ]);
 }
 
 if ($action === 'delete_tune') {
     $tuneKey = (int)($data['tts_tune_key'] ?? 0);
     if (!$tuneKey) errorResponse('tts_tune_key required');
+    // No recount needed: each row's tts_tune_book_count is computed
+    // independently (one tune vs the corpus), so removing a row never changes
+    // any sibling's count.
     $db->prepare("DELETE FROM yy_tts_tune WHERE tts_tune_key = ?")->execute([$tuneKey]);
     jsonResponse(['ok' => true]);
 }

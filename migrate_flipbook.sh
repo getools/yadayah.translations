@@ -147,10 +147,17 @@ esc_php_squote() {
 TITLE_PHP=$(esc_sed_repl "$(esc_php_squote "$TITLE")")
 URL_SLUG_E=$(esc_sed_repl "$URL_SLUG")
 
+# Build stamp → flipbook-frame.php emits it as FLIPBOOK_CONFIG.bundleVersion,
+# and flipbook-viewer.js appends it as ?v= to every page/thumb/text/toc/search
+# URL. Those paths are byte-identical across rebuilds, so without a fresh
+# stamp a browser keeps serving the previous build's cached images.
+BUNDLE_VERSION=$(date -u +%Y%m%d%H%M%S)
+
 sed \
     -e "s|{{TITLE_PHP}}|$TITLE_PHP|g" \
     -e "s|{{TOTAL}}|$TOTAL|g" \
     -e "s|{{BOOK_CODE}}|$URL_SLUG_E|g" \
+    -e "s|{{BUNDLE_VERSION}}|$BUNDLE_VERSION|g" \
     "$TEMPLATE" > "$TMP/index.php"
 
 # Sanity: ensure no placeholder slipped through.

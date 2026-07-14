@@ -6,7 +6,7 @@
 if (!document.getElementById('error-reporter-js')) {
     var s = document.createElement('script');
     s.id = 'error-reporter-js';
-    s.src = '/js/error-reporter.js?v=11';
+    s.src = '/js/error-reporter.js?v=12';
     document.head.appendChild(s);
 }
 

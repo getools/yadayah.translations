@@ -425,6 +425,12 @@ $paragraphs = $mergedList;
 //   • volume_skip_pages — admin-managed comma-separated page ranges
 //     on yy_volume. Manual escape hatch for sections the auto-detector
 //     misses (front matter, appendices, calendar tables, etc.).
+//   • trailing back matter — the closing RESOURCES page (site links,
+//     contact, cover credit, version stamp). It has no numeric heading,
+//     so the parser maps it into the LAST chapter; without this it gets
+//     narrated as that chapter's ending. Detected by content, so it stays
+//     out even if a re-parse shifts the page numbers.
+$backMatterFrom = ttsBackMatterCutoff($db, (int)$volumeKey);
 $skipRangesStmt = $db->prepare("SELECT volume_skip_pages FROM yy_volume WHERE volume_key = ?");
 $skipRangesStmt->execute([$volumeKey]);
 $skipPagesRaw = (string)($skipRangesStmt->fetchColumn() ?: '');
@@ -434,15 +440,17 @@ foreach (preg_split('/\s*,\s*/', $skipPagesRaw, -1, PREG_SPLIT_NO_EMPTY) as $tok
     elseif (preg_match('/^\s*(\d+)\s*$/', $tok, $m))              $skipRanges[] = [(int)$m[1], (int)$m[1]];
 }
 $beforeCount = count($paragraphs);
-$paragraphs = array_values(array_filter($paragraphs, function ($p) use ($skipRanges) {
+$paragraphs = array_values(array_filter($paragraphs, function ($p) use ($skipRanges, $backMatterFrom) {
     if (!empty($p['paragraph_is_table'])) return false;
+    if ($backMatterFrom !== null && (int)$p['paragraph_number'] >= $backMatterFrom) return false;
     $pg = (int)($p['paragraph_page'] ?? 0);
     foreach ($skipRanges as $r) if ($pg >= $r[0] && $pg <= $r[1]) return false;
     return true;
 }));
 $skipped = $beforeCount - count($paragraphs);
 if ($skipped > 0) {
-    fwrite(STDERR, "skipped $skipped paragraph(s): " . count(array_filter($paragraphs, fn($p) => !empty($p['paragraph_is_table']))) . " table-flagged, ranges=" . $skipPagesRaw . "\n");
+    fwrite(STDERR, "skipped $skipped paragraph(s): " . count(array_filter($paragraphs, fn($p) => !empty($p['paragraph_is_table']))) . " table-flagged, ranges=" . $skipPagesRaw
+        . ($backMatterFrom !== null ? ", back-matter from paragraph $backMatterFrom" : '') . "\n");
 }
 $nPara = count($paragraphs);
 if (!$nPara) completeEmpty($db, $audioKey, "No narratable content (bibliography / back-matter / table / skip pages) — nothing to synthesize; chapter_key=$chapterKey, $beforeCount paragraph(s) all filtered.");
@@ -1124,6 +1132,7 @@ foreach ($paragraphs as $idx => $p) {
         // note below). Headings sit at chapter start so this is normally a
         // no-op, but it keeps the carry contract identical across all branches.
         segmentParagraph($rawHtml, $carryState);
+        ttsBoundCarryAtParagraphEnd($rawHtml, $carryState);
         $segs = [['category' => 'main', 'text' => $headingText]];
     } else if ($idx === 0 && $headingPlain !== '') {
         // Named front/back-matter heading ("AFTERWORD", "TOPICAL APPENDIX",
@@ -1141,6 +1150,7 @@ foreach ($paragraphs as $idx => $p) {
             . $named
             . "\x01PAUSE_0_{$pauseChapAfter}\x01";
         segmentParagraph($rawHtml, $carryState);
+        ttsBoundCarryAtParagraphEnd($rawHtml, $carryState);
         $segs = [['category' => 'main', 'text' => $headingText]];
     } else if (isset($introOverrides[(int)$p['paragraph_number']])) {
         // Paragraph was pre-classified by one of the prepass detectors:
@@ -1160,9 +1170,14 @@ foreach ($paragraphs as $idx => $p) {
         // paras 207-352 of s02v01 "Composition and Methodology" (body after an
         // extended-quote block whose preceding paragraph ended mid-definition).
         segmentParagraph($rawHtml, $carryState);
+        ttsBoundCarryAtParagraphEnd($rawHtml, $carryState);
         $segs = [['category' => $introOverrides[(int)$p['paragraph_number']], 'text' => $plainText]];
     } else {
         $segs = segmentParagraph($rawHtml, $carryState);
+        // A complete paragraph may not leak an open delimiter into the next one
+        // — a source typo (a definition missing its ")") would otherwise silence
+        // every paragraph after it. See ttsBoundCarryAtParagraphEnd().
+        ttsBoundCarryAtParagraphEnd($rawHtml, $carryState);
         if (!$segs) continue;
 
         // Subhead (italic paragraph right after the chapter heading).
