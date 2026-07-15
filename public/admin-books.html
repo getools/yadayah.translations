@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784066403">
+    <meta name="page-version" content="1784095203">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Books Admin - Yada Yah</title>
@@ -166,6 +166,14 @@
                     <button type="button" class="btn btn-secondary btn-sm" id="f-regen-flip" onclick="regenerateFlipbookFromForm(this)" style="white-space:nowrap;flex-shrink:0;">↻ Regen</button>
                 </div>
                 <div id="f-flip-status" style="font-size:0.78rem;color:#888;margin-top:4px;"></div>
+            </div>
+            <div class="field">
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <label style="margin:0;">TTS</label>
+                    <a id="f-tts-link" href="#" target="_blank" rel="noopener" style="flex:1;font-size:0.88rem;text-decoration:none;color:#31345A;word-break:break-all;">—</a>
+                    <button type="button" class="btn btn-secondary btn-sm" id="f-regen-tts" onclick="openTtsForVolume(this)" style="white-space:nowrap;flex-shrink:0;">↻ Regen</button>
+                </div>
+                <div id="f-tts-status" style="font-size:0.78rem;color:#888;margin-top:4px;"></div>
             </div>
             <div class="field">
                 <label style="display:block;margin-bottom:6px;"><input type="checkbox" id="f-active" checked> Active</label>
@@ -767,8 +775,34 @@ function showVolumeForm(record) {
     flipBtn.disabled = !(r.volume_code && r.volume_pdf && r.volume_pdf_mtime);
     flipBtn.dataset.volumeKey = r.volume_key;
     flipBtn.dataset.volumeCode = r.volume_code || '';
+
+    // TTS — deep-links to the narration studio (admin-tts) with this book
+    // pre-selected in the Books tab (?volume=<volume_key>, matched on the
+    // shared yy_volume.volume_key). Both the link and the Regen button open
+    // the same page in a new tab; the actual re-synthesis is done there
+    // (per-profile, per-chapter). Only available once the volume is saved.
+    var ttsLink = document.getElementById('f-tts-link');
+    var ttsBtn  = document.getElementById('f-regen-tts');
+    if (r.volume_key) {
+        var ttsHref = '/admin-tts?volume=' + encodeURIComponent(r.volume_key);
+        ttsLink.href = ttsHref;
+        ttsLink.textContent = 'Open narration studio →';
+        ttsLink.style.color = '#31345A';
+        ttsLink.style.pointerEvents = '';
+        ttsBtn.dataset.ttsHref = ttsHref;
+        ttsBtn.disabled = false;
+    } else {
+        ttsLink.removeAttribute('href');
+        ttsLink.textContent = 'Save the volume first';
+        ttsLink.style.color = '#888';
+        ttsLink.style.pointerEvents = 'none';
+        ttsBtn.dataset.ttsHref = '';
+        ttsBtn.disabled = true;
+    }
+
     document.getElementById('f-pdf-status').textContent = '';
     document.getElementById('f-flip-status').textContent = '';
+    document.getElementById('f-tts-status').textContent = '';
     var docxStatus = document.getElementById('f-docx-status');
     docxStatus.innerHTML = '';
     var fileInput = document.getElementById('f-docx-file');
@@ -914,6 +948,15 @@ function regeneratePdfFromForm(btn) {
     var volumeKey = parseInt(btn.dataset.volumeKey, 10);
     if (!volumeKey) return;
     regeneratePdf(volumeKey, btn);
+}
+// TTS "Regen" — there is no single-call whole-book re-synthesis (TTS builds
+// are per-profile and per-chapter, and share a single GPU queue). So this
+// simply opens the narration studio with the book selected, exactly like the
+// TTS link, where the admin picks a profile and rebuilds the chapters.
+function openTtsForVolume(btn) {
+    var href = btn.dataset.ttsHref || '';
+    if (!href) return;
+    window.open(href, '_blank', 'noopener');
 }
 function regenerateFlipbookFromForm(btn) {
     var volumeKey  = parseInt(btn.dataset.volumeKey, 10);

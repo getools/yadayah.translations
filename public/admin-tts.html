@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784066405">
+    <meta name="page-version" content="1784101474">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -633,6 +633,11 @@
                         title="Pause every chapter in this volume that's currently queued or running. Cached paragraphs are preserved for later Resume."
                         style="display:none;margin-left:auto;padding:6px 12px;border:1px solid #5c4a8a;background:#5c4a8a;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">
                     ⏸ Pause all queued
+                </button>
+                <button type="button" id="resume-all-btn" onclick="resumeAllPausedBuilds()"
+                        title="Resume every paused chapter in this volume. Each build continues from its first un-cached paragraph — no re-synthesis of completed paragraphs."
+                        style="display:none;margin-left:8px;padding:6px 12px;border:1px solid #2e7d32;background:#2e7d32;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">
+                    ▶ Resume all
                 </button>
                 <button type="button" id="build-all-btn" onclick="openBuildAllModal()" disabled
                         style="margin-left:8px;padding:6px 12px;border:1px solid #31345A;background:#31345A;color:#fff;border-radius:4px;cursor:pointer;font-size:0.85rem;">
@@ -1302,6 +1307,22 @@ document.querySelectorAll('.tts-tabs button').forEach(function(btn) {
 // has had a chance to hydrate from the server response.
 window.addEventListener('load', function() {
     if (!window.sessionState) return;
+    // Deep-link from admin-books: /admin-tts?volume=<volume_key> lands on the
+    // Books tab with that volume pre-selected. We pre-seed the same session-
+    // state keys the normal restore path reads (booksVolumeKey_<TTS_KEY> +
+    // activeTab), so activateTtsTab('books') → loadVolumes() selects the
+    // volume and arms its status stream just as a manual pick would.
+    // We ALSO overwrite the auto-bound 'volume-select' key: session-state
+    // auto-persists that <select> by its id and, once loadVolumes() fills in
+    // the options, its MutationObserver re-applies the *previously* saved
+    // volume (firing a change → loadChapters). Seeding it with the deep-link
+    // volume makes that restore agree instead of clobbering our selection.
+    var dlVol = parseInt(new URLSearchParams(location.search).get('volume') || '0', 10);
+    if (dlVol) {
+        sessionState.save('booksVolumeKey_' + TTS_KEY, dlVol);
+        sessionState.save('volume-select', String(dlVol));
+        sessionState.save('activeTab', 'books');
+    }
     var t = sessionState.load('activeTab', '');
     if (t) activateTtsTab(t);
     setPronsMode(sessionState.load('pronsMode', 'ipa'));
@@ -6287,6 +6308,7 @@ async function _loadChaptersImpl(volumeKey) {
     $('volume-summary').textContent = (r.volume.volume_label || '') + ' — ' + CHAPTERS.length + ' chapters';
     if (allBtn) allBtn.disabled = false;
     if (typeof updatePauseAllVisibility === 'function') updatePauseAllVisibility();
+    if (typeof updateResumeAllVisibility === 'function') updateResumeAllVisibility();
     $('chapters-table').style.display = '';
     // Lazy-load paragraph counts in parallel — initial render happens
     // immediately with the placeholder "—" for each row's Paragraphs cell.
@@ -6428,6 +6450,7 @@ function sseEnsureStream(volumeKey) {
             renderChapters();
             _paraSurgicalFromChapters(true);   // live SSE push → prompt row-flip
             if (typeof updatePauseAllVisibility === 'function') updatePauseAllVisibility();
+            if (typeof updateResumeAllVisibility === 'function') updateResumeAllVisibility();
         } catch (e) { console.error('sse tts_progress parse error', e); }
     });
     _SSE.addEventListener('ping', function () { _SSE_LAST_EVENT_AT = Date.now(); });
@@ -7608,9 +7631,64 @@ async function pauseAllQueuedBuilds() {
     }
     if (btn) { btn.disabled = false; }
     updatePauseAllVisibility();
+    if (typeof updateResumeAllVisibility === 'function') updateResumeAllVisibility();
     if (typeof loadChapters === 'function' && ACTIVE_VOLUME) loadChapters(ACTIVE_VOLUME);
     if (failed.length) {
         alert('Paused ' + paused + ' of ' + queued.length + ' chapter(s).\nFailed:\n' + failed.join('\n'));
+    }
+}
+
+// Show the Resume-all button only when there's something paused. Mirror of
+// updatePauseAllVisibility() — called from the same spots so the two buttons
+// swap in/out together as the queue moves between running and paused.
+function updateResumeAllVisibility() {
+    var btn = document.getElementById('resume-all-btn');
+    if (!btn) return;
+    var paused = (CHAPTERS || []).filter(function (c) {
+        return c.tts_audio_status === 'paused';
+    });
+    if (paused.length > 0) {
+        btn.style.display = '';
+        btn.textContent = '▶ Resume all (' + paused.length + ')';
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
+// Bulk-resume every paused chapter build for the current volume. Like
+// pauseAllQueuedBuilds(), it iterates client-side over the existing
+// per-chapter resume endpoint — the worker restarts from each chapter's
+// first un-cached paragraph, so completed paragraphs are never re-synthesised.
+async function resumeAllPausedBuilds() {
+    var paused = (CHAPTERS || []).filter(function (c) {
+        return c.tts_audio_status === 'paused';
+    });
+    if (paused.length === 0) { alert('No paused chapter builds to resume.'); return; }
+    if (!confirm('Resume ' + paused.length + ' paused chapter build' + (paused.length === 1 ? '' : 's') + '?')) return;
+    var btn = document.getElementById('resume-all-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Resuming…'; }
+    var resumed = 0, failed = [];
+    for (var __i = 0; __i < paused.length; __i++) {
+        var __ch = paused[__i];
+        try {
+            await api('/admin-tts-build.php?action=resume', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ action:'resume', tts_audio_key: __ch.tts_audio_key }),
+            });
+            __ch.tts_audio_status = 'running';
+            __ch.tts_audio_progress = __ch.tts_audio_progress || 0;
+            resumed++;
+        } catch (e) {
+            failed.push('ch' + __ch.tts_audio_key + ': ' + (e.message || e));
+        }
+    }
+    if (btn) { btn.disabled = false; }
+    updateResumeAllVisibility();
+    if (typeof updatePauseAllVisibility === 'function') updatePauseAllVisibility();
+    // Kick the polling loop back on so progress is visible immediately.
+    if (typeof loadChapters === 'function' && ACTIVE_VOLUME) loadChapters(ACTIVE_VOLUME);
+    if (failed.length) {
+        alert('Resumed ' + resumed + ' of ' + paused.length + ' chapter(s).\nFailed:\n' + failed.join('\n'));
     }
 }
 
@@ -7632,6 +7710,8 @@ async function pauseBuild(audioKey) {
     var c = (CHAPTERS || []).find(function (x) { return x.tts_audio_key === audioKey; });
     if (c) c.tts_audio_status = 'paused';
     if (typeof renderChapters === 'function') renderChapters();
+    if (typeof updatePauseAllVisibility === 'function') updatePauseAllVisibility();
+    if (typeof updateResumeAllVisibility === 'function') updateResumeAllVisibility();
 }
 
 // Resume a paused build. The worker scans the parts cache on startup and
@@ -7651,6 +7731,8 @@ async function resumeBuild(audioKey) {
     var c = (CHAPTERS || []).find(function (x) { return x.tts_audio_key === audioKey; });
     if (c) { c.tts_audio_status = 'running'; c.tts_audio_progress = c.tts_audio_progress || 0; }
     if (typeof renderChapters === 'function') renderChapters();
+    if (typeof updatePauseAllVisibility === 'function') updatePauseAllVisibility();
+    if (typeof updateResumeAllVisibility === 'function') updateResumeAllVisibility();
     // Kick the polling loop back on so the operator sees progress without
     // waiting for the next manual reload.
     loadChapters(ACTIVE_VOLUME);
