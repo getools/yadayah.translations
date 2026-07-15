@@ -1850,6 +1850,15 @@ function ttsParentheticalIsAside(string $s): bool {
     }
     $eng = 0; foreach ($words as $w) if (isset($stop[$w])) $eng++;
     $ratio = $eng / $nw;
+    // Reject an all-function-word parenthetical — e.g. a pronoun-list gloss
+    // "(I, me, we, us, you, she, he, they, them)": high stopword ratio but no
+    // content words, so it is a definition list, not editorial prose. Counted
+    // against a pronoun-inclusive function set kept SEPARATE from $stop so this
+    // guard does not perturb the $ratio thresholds above.
+    static $func = null;
+    if ($func === null) $func = $stop + array_flip(['me','us','him','them','hers','mine','yours','myself','himself','herself','themselves','ourselves']);
+    $content = 0; foreach ($words as $w) if (!isset($func[$w])) $content++;
+    if ($content < 2) return false;
     $endsSentence = (bool)preg_match('/[.!?]["\x{201D}\x{2019}]?$/u', $t);
     $hasTwo       = (bool)preg_match('/[.!?]\s+[A-Z]/', $t);
     return ($ratio >= 0.30 && ($endsSentence || $hasTwo || $ratio >= 0.40));

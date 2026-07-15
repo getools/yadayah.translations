@@ -148,31 +148,69 @@ function alignStarts(array $live, array $stream): array {
         $drift = 0.5 * $drift + 0.5 * ($best - $cum[$i] * $scale);
     }
 
-    // ---- (2) map every row -> baseline token index -> baseline time ----
-    $starts = array_fill(0, $R, 0.0);
-    $A = count($anchRow);
-    $tokAt = function (float $idx) use ($bt, $n): float {
-        $k = (int)round($idx); if ($k < 0) $k = 0; if ($k > $n-1) $k = $n-1;
-        return $bt[$k];
-    };
-    if ($A === 0) {
-        for ($i = 0; $i < $R; $i++) $starts[$i] = $tokAt($cum[$i] * $scale);
-    } else {
+    // ---- (2) map rows -> baseline token index (float) via anchors ----
+    // Piecewise-linear in cumulative-WORD space between bracketing anchors;
+    // linear extrapolation (by scale) outside the anchored span.
+    $buildIdx = function (array $aRow, array $aTok) use ($cum, $scale, $R): array {
+        $A = count($aRow); $idx = array_fill(0, $R, 0.0);
+        if ($A === 0) { for ($i=0;$i<$R;$i++) $idx[$i] = $cum[$i] * $scale; return $idx; }
+        $g = 0;
         for ($i = 0; $i < $R; $i++) {
-            if ($i <= $anchRow[0]) {                       // head extrapolation
-                $idx = $anchTok[0] - ($cum[$anchRow[0]] - $cum[$i]) * $scale;
-            } elseif ($i >= $anchRow[$A-1]) {              // tail extrapolation
-                $idx = $anchTok[$A-1] + ($cum[$i] - $cum[$anchRow[$A-1]]) * $scale;
-            } else {                                       // interior: bracket + interp
-                $g = 0; while ($g < $A-1 && $anchRow[$g+1] <= $i) $g++;
-                $r0=$anchRow[$g]; $r1=$anchRow[$g+1]; $t0=$anchTok[$g]; $t1=$anchTok[$g+1];
+            if ($i <= $aRow[0]) {
+                $idx[$i] = $aTok[0] - ($cum[$aRow[0]] - $cum[$i]) * $scale;
+            } elseif ($i >= $aRow[$A-1]) {
+                $idx[$i] = $aTok[$A-1] + ($cum[$i] - $cum[$aRow[$A-1]]) * $scale;
+            } else {
+                while ($g < $A-1 && $aRow[$g+1] <= $i) $g++;
+                while ($g > 0 && $aRow[$g] > $i) $g--;
+                $r0=$aRow[$g]; $r1=$aRow[$g+1]; $t0=$aTok[$g]; $t1=$aTok[$g+1];
                 $den = $cum[$r1] - $cum[$r0];
                 $frac = $den > 0 ? ($cum[$i] - $cum[$r0]) / $den : 0.0;
-                $idx = $t0 + $frac * ($t1 - $t0);
+                $idx[$i] = $t0 + $frac * ($t1 - $t0);
             }
-            $starts[$i] = $tokAt($idx);
         }
+        return $idx;
+    };
+    $tokTime = function (float $idx) use ($bt, $n): float {
+        $k = (int)round($idx); if ($k < 0) $k = 0; if ($k > $n-1) $k = $n-1; return $bt[$k];
+    };
+
+    // ---- (3) refine: add unigram anchors that AGREE with the bigram backbone ----
+    // Densifies sparse stretches (word sources whose live text was heavily
+    // reconciled → few exact bigrams) without the jitter unigrams caused when
+    // trusted blindly: a unigram anchor is kept only if it lands within TOL_SEC
+    // of the backbone estimate and preserves monotone token order.
+    $idx0 = $buildIdx($anchRow, $anchTok);
+    $isBigram = array_flip($anchRow);
+    $extraRow = []; $extraTok = [];
+    $TOL_SEC = 12.0; $UW = 60;
+    for ($i = 0; $i < $R; $i++) {
+        if (isset($isBigram[$i])) continue;
+        $lw = $lwAll[$i]; if (!$lw) continue;
+        $est = $idx0[$i]; $estT = $tokTime($est);
+        $lo = max(0, (int)round($est) - $UW); $hi = min($n-1, (int)round($est) + $UW);
+        $bestj = -1; $bd = PHP_INT_MAX;
+        for ($j = $lo; $j <= $hi; $j++) {
+            if ($tok[$j] !== $lw[0]) continue;
+            if (abs($bt[$j] - $estT) > $TOL_SEC) continue;
+            $d = abs($j - $est); if ($d < $bd) { $bd = $d; $bestj = $j; }
+        }
+        if ($bestj >= 0) { $extraRow[$i] = $i; $extraTok[$i] = $bestj; }
     }
+    // merge bigram + accepted unigram anchors, sorted by row, monotone token order
+    $mergeRow = $anchRow; $mergeTok = $anchTok;
+    foreach ($extraRow as $i => $_) { $mergeRow[] = $i; $mergeTok[] = $extraTok[$i]; }
+    array_multisort($mergeRow, SORT_ASC, $mergeTok);
+    $mR = []; $mT = []; $lastT = -1;
+    for ($k = 0; $k < count($mergeRow); $k++) {
+        if ($mergeTok[$k] <= $lastT) continue;      // enforce strictly increasing token idx
+        $mR[] = $mergeRow[$k]; $mT[] = $mergeTok[$k]; $lastT = $mergeTok[$k];
+    }
+
+    $idx = $buildIdx($mR, $mT);
+    $starts = array_fill(0, $R, 0.0);
+    for ($i = 0; $i < $R; $i++) $starts[$i] = $tokTime($idx[$i]);
+
     return [$starts, $anchRow, $content, $R];
 }
 
