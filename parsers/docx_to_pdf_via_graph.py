@@ -344,7 +344,7 @@ def _is_retryable_http(exc: Exception) -> bool:
 
 
 def convert_one(docx_path: Path, pdf_path: Path, *, do_validate: bool = True,
-                max_retries: int = 10) -> None:
+                max_retries: int = 4) -> None:
     """Upload → settle → render → download → delete. Differentiates
     retryable (5xx, timeout, connection) from fatal (auth, 4xx) errors.
     Backoff sequence designed for Microsoft's media-transform service
@@ -354,9 +354,18 @@ def convert_one(docx_path: Path, pdf_path: Path, *, do_validate: bool = True,
     the convert request often 500s immediately on freshly-uploaded
     larger DOCXes.
 
-    Backoffs by attempt:  30s, 60s, 120s, 240s, 300s, 600s, 600s, 600s,
-    600s, 600s (capped). Total worst-case wait: ~70 min before giving
-    up. Time-to-completion for a healthy file: ~15-30 seconds.
+    Backoffs by attempt:  20s, 45s, 90s (capped). Total worst-case wait:
+    ~2.5 min before giving up. Time-to-completion for a healthy file:
+    ~15-30 seconds.
+
+    The ladder is deliberately short: this converter is the *primary*
+    path, but the book-pipeline worker has a working Word-for-the-Web
+    fallback (~28 min/render). During a sustained Graph media-transform
+    outage (persistent 500s), grinding through a ~70-min retry ladder
+    per book before failing over just serialized ~1 extra hour onto every
+    volume in the queue for no gain. A few short retries still ride out a
+    genuinely transient single 5xx; anything longer belongs in the
+    fallback, not here.
 
     On retry, re-uploads the DOCX (cheap relative to the convert step) so
     we don't depend on the prior upload's lifetime in OneDrive.
@@ -365,10 +374,9 @@ def convert_one(docx_path: Path, pdf_path: Path, *, do_validate: bool = True,
     folder_id = _ensure_folder()
 
     # Backoffs after attempt N (index N-1). Microsoft typically recovers
-    # within 2-3 minutes for transient media-transform 5xx, but stubborn
-    # files can need 5-10 minutes between attempts.
-    backoffs = [30.0, 60.0, 120.0, 240.0, 300.0,
-                600.0, 600.0, 600.0, 600.0, 600.0]
+    # within 2-3 minutes for transient media-transform 5xx; if it hasn't
+    # by then, the Word-for-the-Web fallback is the right escalation.
+    backoffs = [20.0, 45.0, 90.0]
     last_exc: Exception | None = None
     item_id: str | None = None
 
