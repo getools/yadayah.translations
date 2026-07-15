@@ -266,6 +266,168 @@ function cfRowsToWords(array $rows, array $o = []): array {
     return $words;
 }
 
+// ── Word-baseline timestamp snapping ────────────────────────────────────────
+// When segments are (re)organised, a new segment's start is most accurate when
+// READ from a word-level baseline at the position of the segment's first
+// word(s), instead of interpolated from the old (possibly coarse) row times.
+// These helpers pick the best word-level baseline, build its word stream, and
+// re-anchor a sequence of cues onto it. FAIL-SAFE: if the baseline does not
+// align well (sparse/clustered anchors) the original starts are returned
+// unchanged, so a good interpolation is never degraded. Same technique the
+// 30s-grid re-time remediation used.
+
+// Word-level baselines, best first (mirrors the consensus init spine order).
+const CF_WORD_BASELINES = ['gpu-whisperx-word', 'gpu-whisper-large-v3-word',
+    'gpu-whisper-large-v3-turbo-word', 'gpu-parakeet-tdt-0.6b-v2-word', 'whisper-1-word-join'];
+
+/** Best word-level baseline model present for an item, or null. */
+function cfBestWordBaseline(PDO $db, int $itemKey): ?string {
+    $st = $db->prepare("SELECT DISTINCT feed_item_transcript_auto_model
+                          FROM yy_feed_item_transcript_auto WHERE feed_item_key = ?");
+    $st->execute([$itemKey]);
+    $have = array_flip($st->fetchAll(PDO::FETCH_COLUMN));
+    foreach (CF_WORD_BASELINES as $m) if (isset($have[$m])) return $m;
+    return null;
+}
+
+/** Ordered baseline WORD stream [['t'=>secs,'w'=>token], ...] from a model.
+ *  Word-level rows are used as-is; multi-word rows are spread via cfRowsToWords. */
+function cfBaselineWordStream(PDO $db, int $itemKey, string $model): array {
+    $rows = cfLoadAuto($db, $itemKey, $model);
+    if (!$rows) return [];
+    $tw = 0;
+    foreach ($rows as $r) $tw += max(1, count(preg_split('/\s+/u', trim($r['text']), -1, PREG_SPLIT_NO_EMPTY)));
+    if ($tw / count($rows) <= 1.3) {                    // already word-level
+        $stream = [];
+        foreach ($rows as $r) { $w = trim($r['text']); if ($w !== '') $stream[] = ['t' => (float)$r['secs'], 'w' => $w]; }
+        usort($stream, fn($a, $b) => $a['t'] <=> $b['t']);
+        return $stream;
+    }
+    return cfRowsToWords($rows);
+}
+
+/** Longest strictly-increasing subsequence by the SECOND element of each [a,b]
+ *  pair (the first element is assumed already non-decreasing). O(K log K) via
+ *  patience sorting. Returns the kept pairs in order. */
+function cfLisBySecond(array $pairs): array {
+    $K = count($pairs);
+    if ($K <= 1) return $pairs;
+    $vals = array_map(fn($p) => $p[1], $pairs);
+    $tailIdx = [];                      // tailIdx[L] = pair index of smallest tail of an increasing run of length L+1
+    $prev = array_fill(0, $K, -1);
+    for ($i = 0; $i < $K; $i++) {
+        $v = $vals[$i];
+        $lo = 0; $hi = count($tailIdx);
+        while ($lo < $hi) { $mid = ($lo + $hi) >> 1; if ($vals[$tailIdx[$mid]] < $v) $lo = $mid + 1; else $hi = $mid; }
+        $prev[$i] = $lo > 0 ? $tailIdx[$lo - 1] : -1;
+        if ($lo === count($tailIdx)) $tailIdx[] = $i; else $tailIdx[$lo] = $i;
+    }
+    $out = [];
+    for ($cur = end($tailIdx); $cur >= 0; $cur = $prev[$cur]) $out[] = $pairs[$cur];
+    return array_reverse($out);
+}
+
+/** Re-anchor an ordered list of cues onto a baseline word stream.
+ *  $cues: [['text'=>string,'start'=>float, ...], ...] in time order.
+ *  Returns cues with 'start' (+ 'secs'/'segment' if present) re-derived from the
+ *  baseline — or the originals unchanged when alignment is too sparse to trust.
+ *
+ *  Anchoring runs over the FULL concatenated word sequence of all cues (not just
+ *  cue-boundary words) so it works regardless of how the cues are segmented —
+ *  short caption fragments that start mid-sentence have weak first-word bigrams,
+ *  but the full stream always has distinctive bigrams nearby. Each word position
+ *  is matched to the baseline in a drift-tracked centered window (monotonic
+ *  floor, no teleport); then every cue's FIRST-word offset is piecewise-linear
+ *  mapped (in word space) to a baseline token index and its smooth time is read
+ *  there (interp the INDEX, never the time). Fills &$stats. */
+function cfSnapStartsToBaseline(array $cues, array $stream, array &$stats = []): array {
+    $R = count($cues);
+    $stats = ['applied' => false, 'rate' => 0.0, 'rows' => $R];
+    if ($R < 4 || count($stream) < 5) return $cues;
+
+    // baseline word tokens + times
+    $tok = []; $bt = [];
+    foreach ($stream as $s) foreach (cfWords($s['w']) as $ww) { $tok[] = $ww; $bt[] = (float)$s['t']; }
+    $n = count($tok);
+    if ($n < 5) return $cues;
+
+    // full live word sequence + each cue's first-word offset into it
+    $lw = []; $cueOff = [];
+    foreach ($cues as $cu) { $cueOff[] = count($lw); foreach (cfWords((string)$cu['text']) as $w) $lw[] = $w; }
+    $M = count($lw);
+    if ($M < 4) return $cues;
+    $scale = $n / $M;
+
+    // (1) Candidate word->token anchors, then a Longest-Increasing-Subsequence
+    //     cleanup. A predicted cursor `pt` (advances by `scale`/word, snaps to a
+    //     match only when the match is CLOSE to the estimate) proposes a nearest
+    //     TRIGRAM match in a centered window for each word. Trigrams rarely
+    //     repeat, so false matches are few; the LIS over the candidates' token
+    //     indices then discards the occasional out-of-order false anchor (e.g. a
+    //     common phrase that also occurs in the outro) that would otherwise
+    //     ratchet a greedy tracker to the end. Result: monotonic, clean anchors.
+    $cand = []; $pt = 0.0; $W = 150; $stride = 2; $step = $scale * $stride;
+    for ($w = 0; $w < $M - 2; $w += $stride) {
+        $exp = (int)round($pt);
+        $lo = max(0, $exp - $W); $hi = min($n - 2, $exp + $W);
+        $w0 = $lw[$w]; $w1 = $lw[$w + 1]; $w2 = $lw[$w + 2];
+        $best = -1; $bd = PHP_INT_MAX;
+        for ($j = $lo; $j < $hi; $j++) {
+            if ($tok[$j] !== $w0 || $tok[$j + 1] !== $w1 || $tok[$j + 2] !== $w2) continue;
+            $d = abs($j - $exp); if ($d < $bd) { $bd = $d; $best = $j; }
+        }
+        if ($best >= 0) { $cand[] = [$w, $best]; if (abs($best - $exp) <= 40) $pt = $best; }
+        $pt += $step;
+    }
+    // LIS (strictly increasing token index) over the candidates — keeps the
+    // consistent monotonic backbone, drops outliers in either direction.
+    $lis = cfLisBySecond($cand);
+    $aW = []; $aT = [];
+    foreach ($lis as $c) { $aW[] = $c[0]; $aT[] = $c[1]; }
+    $A = count($aW);
+
+    // coverage in WORD space — longest unanchored run + how close anchors reach
+    // each end (extrapolated ends are the risky part → keep them short).
+    $attempts = (int)ceil($M / $stride);
+    $rate = $attempts > 0 ? $A / $attempts : 0.0;
+    $longest = 0; $head = $M; $tail = $M;
+    if ($A) {
+        $prev = -1; foreach ($aW as $w) { $longest = max($longest, $w - $prev); $prev = $w; }
+        $longest = max($longest, ($M - 1) - $prev);
+        $head = $aW[0]; $tail = ($M - 1) - end($aW);
+    }
+    $runCap = max(120, (int)ceil($M * 0.05)); $endCap = max(60, (int)ceil($M * 0.03));
+    $stats = ['applied' => false, 'rate' => round($rate, 3), 'rows' => $R, 'anchors' => $A,
+              'words' => $M, 'longest_run' => $longest, 'head' => $head, 'tail' => $tail, 'baseline_words' => $n];
+    if ($rate < 0.40 || $longest > $runCap || $head > $endCap || $tail > $endCap) return $cues;
+
+    // (2) map each cue's first-word offset -> baseline token idx -> smooth time
+    $tt = function (float $idx) use ($bt, $n): float {
+        $k = (int)round($idx); if ($k < 0) $k = 0; if ($k > $n - 1) $k = $n - 1; return $bt[$k];
+    };
+    $g = 0;
+    $mapIdx = function (int $wordPos) use ($aW, $aT, $A, $scale, &$g): float {
+        if ($wordPos <= $aW[0]) return $aT[0] - ($aW[0] - $wordPos) * $scale;
+        if ($wordPos >= $aW[$A - 1]) return $aT[$A - 1] + ($wordPos - $aW[$A - 1]) * $scale;
+        while ($g < $A - 1 && $aW[$g + 1] <= $wordPos) $g++;
+        while ($g > 0 && $aW[$g] > $wordPos) $g--;
+        $den = $aW[$g + 1] - $aW[$g];
+        $frac = $den > 0 ? ($wordPos - $aW[$g]) / $den : 0.0;
+        return $aT[$g] + $frac * ($aT[$g + 1] - $aT[$g]);
+    };
+    $out = $cues; $last = -1.0;
+    for ($i = 0; $i < $R; $i++) {
+        $s = $tt($mapIdx($cueOff[$i]));
+        if ($s <= $last) $s = $last + 0.001;            // strictly increasing (no dup segments)
+        $last = $s;
+        $out[$i]['start'] = $s;
+        if (array_key_exists('secs', $out[$i]))    $out[$i]['secs'] = round($s, 3);
+        if (array_key_exists('segment', $out[$i])) $out[$i]['segment'] = cfSecsToInterval($s);
+    }
+    $stats['applied'] = true;
+    return $out;
+}
+
 // ── Reconciliation helpers (moved from admin-transcript-captionfit.php) ──────
 //   DB loaders, baseline↔live alignment, and LLM prompt building shared by
 //   Smart Captions (ai_chunk) and the consensus init worker's auto-reconcile.

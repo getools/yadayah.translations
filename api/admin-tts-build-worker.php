@@ -777,22 +777,24 @@ function ttsFindPageBreakRatios(string $paraText, array $nextPageTexts): array {
         $g = ttsNormalizeForMatch($pageText);
         if ($g === '') break;
         $bestRatio = -1.0;
-        // Shrink the suffix length geometrically until we either match or
-        // hit the floor. Floor at 25 chars to avoid spurious matches on
-        // common short phrases.
-        $minL = 25;
-        for ($L = $plen; $L >= $minL; ) {
-            $suffix = mb_substr($p, -$L);
-            $pos = mb_strpos($g, $suffix);
-            if ($pos !== false && $pos < 400) {
-                $bestRatio = ($plen - $L) / $plen;
-                break;
-            }
-            $next = (int)floor($L * 0.85);
-            if ($next === $L) $next--;
-            $L = $next;
+        // Binary-search the LARGEST suffix length whose text still appears in
+        // the next page (within the ~400-char header-noise window). "Matches"
+        // is monotonic — any suffix longer than this page's own portion reaches
+        // back into the PREVIOUS page's text, which isn't present here — so the
+        // largest matching suffix pins the break to the exact character. The
+        // old geometric ×0.85 shrink stopped at the first match on a coarse
+        // ladder, which routinely overshot the boundary by up to ~15% of the
+        // tail and dropped the first words of the new page from its audio.
+        // Floor at 25 chars to avoid spurious matches on common short phrases.
+        $lo = 25; $hi = $plen; $bestL = -1;
+        while ($lo <= $hi) {
+            $mid = intdiv($lo + $hi, 2);
+            $pos = mb_strpos($g, mb_substr($p, -$mid));
+            if ($pos !== false && $pos < 400) { $bestL = $mid; $lo = $mid + 1; }
+            else                              { $hi  = $mid - 1; }
         }
-        if ($bestRatio < 0) break;   // paragraph doesn't extend further
+        if ($bestL < 0) break;   // paragraph doesn't extend further
+        $bestRatio = ($plen - $bestL) / $plen;
         $out[$k] = $bestRatio;
     }
     return $out;
@@ -955,10 +957,18 @@ $emitPageBreakMarkers = function (array $p, ?int $paraStartPage, int $paraStartM
     }
     foreach ($byPage as $crossedPage => $cont) {
         $kOffset = (int)$crossedPage - $paraStartPage;
-        // Prefer the text-matched ratio; else char-offset ratio from coalesce.
-        $ratio = $ratios[$kOffset] ?? null;
+        // The coalesce pass recorded the EXACT character at which this
+        // continuation (and therefore this page) begins in the combined text
+        // ($cont['char_at']) — that is authoritative. The fuzzy text match only
+        // approximates it, so prefer char_at here and fall back to the matched
+        // ratio (then to head start) only when char_at is somehow unavailable.
+        // Both paths feed the same linear char→time interpolation below, so the
+        // exact character is strictly the better input.
+        $ratio = (isset($cont['char_at']) && $totalLen > 0)
+               ? min(0.999, max(0.0, $cont['char_at'] / $totalLen))
+               : ($ratios[$kOffset] ?? null);
         if ($ratio === null) {
-            $ratio = min(0.999, max(0.0, ($cont['char_at'] ?? 0) / $totalLen));
+            continue;   // no exact break and no text match — don't guess
         }
         $brkMs = (int)round($paraStartMs + $ratio * $paragraphMs);
         // Key to the continuation paragraph that begins this page (not the head)

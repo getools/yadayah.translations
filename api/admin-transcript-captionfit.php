@@ -192,6 +192,24 @@ if ($action === 'fit_preview') {
     $w2wOpts = ($opts['break_gap'] > 0) ? ['cps' => (float)$opts['cps']] : [];
     $words = cfRowsToWords($rows, $w2wOpts);
     $cues = cfReflow($words, $opts);
+    // Re-anchor timing to a word-level baseline. Re-flowing the EDITED text
+    // (source 'current') derives each cue's start by interpolating the old row
+    // times, which are only as good as the current segmentation (and are flat-
+    // wrong on the legacy 30s-grid items). When a word-level baseline exists,
+    // snap each new cue's start to the baseline time of its first word(s) — the
+    // accurate source. FAIL-SAFE: cfSnapStartsToBaseline returns the cues
+    // unchanged if the baseline can't be aligned confidently, so a good
+    // interpolation is never degraded. Only for whole-transcript re-flows
+    // ($win === null): a scoped slice's word-count alignment can't be seeded
+    // reliably, so scoped re-sizes keep their (local, usually fine) timing.
+    $snapStats = ['applied' => false];
+    if ($source === 'current' && $win === null) {
+        $wb = cfBestWordBaseline($db, $itemKey);
+        if ($wb) {
+            $bstream = cfBaselineWordStream($db, $itemKey, $wb);
+            if ($bstream) { $cues = cfSnapStartsToBaseline($cues, $bstream, $snapStats); $snapStats['baseline'] = $wb; }
+        }
+    }
     // Stamp each cue with the speaker active at its start so the 👤 column
     // survives re-sizing (NULL when the transcript has no speaker labels).
     $out = array_map(fn($c) => [
@@ -212,7 +230,8 @@ if ($action === 'fit_preview') {
         'text'    => $r['text'],
     ], $beforeRows);
     jsonResponse(['source' => $source, 'in_rows' => count($rows), 'in_words' => count($words),
-                  'cues' => $out, 'count' => count($out), 'before' => $before]);
+                  'cues' => $out, 'count' => count($out), 'before' => $before,
+                  'timing_snap' => $snapStats]);
 }
 
 if ($action === 'fit_apply') {
