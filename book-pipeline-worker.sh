@@ -923,8 +923,24 @@ fi
 # their parse work was never triggered (e.g. docx was uploaded before the
 # parser pipeline existed, or a previous parse errored). Process at most 1
 # per tick to avoid hogging the host. The next 2-min tick picks up the next.
+#
+# CRITICAL — never parse ahead of the PDF. The parser reads the *rendered
+# PDF* (parse_volume_from_bundle.py is PDF-only), so parsing a volume whose
+# fresh PDF hasn't been generated yet re-extracts the OLD content and stamps
+# it with a NEW parse time — which fools both volume_parse_status ('success')
+# and the admin UI's docx-newer-than-parse staleness check, showing a bogus
+# up-to-date ✓ against stale paragraphs. When a new DOCX is uploaded the
+# upload handler sets pipeline_status='queued' (and parse_status='queued');
+# we must leave the parse alone until the docx→pdf pipeline has actually
+# produced the new PDF. So skip any volume whose pipeline still owes a PDF
+# render for the current docx: 'queued' (upload/regeneration pending),
+# 'running' (rendering now), 'waiting-docx' (source missing), 'error'
+# (render failed). 'success'/'warning'/'flipbook-*'/NULL all mean the PDF is
+# present, so those remain eligible — and the main job's own Phase 4 handles
+# the freshly-rendered case in-band. Mirrors the same guard the stale-sweep
+# uses at Phase 6.
 if [ -x /opt/yada-www/parsers/parse_volume_from_bundle.py ]; then
-    parse_target=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -At -c "SELECT volume_key FROM yy_volume WHERE volume_docx IS NOT NULL AND (volume_parse_status IS NULL OR volume_parse_status IN ('queued','stale')) ORDER BY CASE WHEN volume_parse_status='queued' THEN 0 ELSE 1 END, volume_key LIMIT 1")
+    parse_target=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -At -c "SELECT volume_key FROM yy_volume WHERE volume_docx IS NOT NULL AND (volume_parse_status IS NULL OR volume_parse_status IN ('queued','stale')) AND COALESCE(volume_pipeline_status,'') NOT IN ('queued','running','waiting-docx','error') ORDER BY CASE WHEN volume_parse_status='queued' THEN 0 ELSE 1 END, volume_key LIMIT 1")
     if [ -n "$parse_target" ]; then
         log "Parse-sweep: picking up volume $parse_target"
         DID_WORK=1
