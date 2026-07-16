@@ -173,8 +173,10 @@ function loadTtsConfig(PDO $db, int $ttsKey, ?int $profileKey = null): array {
  * pronunciation tunes — including the book name itself getting its
  * own phoneme tag.
  */
-function rewriteBibleCitations(string $text, array $bookNames): string {
+function rewriteBibleCitations(string $text, array $bookNames, int $beforeMs = 0, int $afterMs = 0): string {
     if (!$bookNames) return $text;
+    $bB = ttsPausePlaceholder($beforeMs);
+    $bA = ttsPausePlaceholder($afterMs);
     static $aposClassOpt = "[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]?";
     static $aposClass    = "[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]";
     $patterns = [];
@@ -198,14 +200,14 @@ function rewriteBibleCitations(string $text, array $bookNames): string {
     // "here is Galatians 2:4:" (colon introducing the quote) must still rewrite,
     // otherwise "2:4" is spoken as one run-together number.
     $re = '/(?<![A-Za-z])(' . $bookAlt . ')(\s*(?:\/\s*[A-Za-z][A-Za-z\s]+?\s+)?)(\d+):(\d+)(?:-(\d+))?(?!:?\d)/iu';
-    return preg_replace_callback($re, function ($m) {
+    return preg_replace_callback($re, function ($m) use ($bB, $bA) {
         $book   = $m[1];
         $sep    = rtrim($m[2]) === '' ? ' ' : $m[2];
         $chap   = (int)$m[3];
         $vFrom  = (int)$m[4];
         $vTo    = isset($m[5]) ? (int)$m[5] : 0;
         $verses = $vTo > 0 ? "Verses $vFrom to $vTo" : "Verse $vFrom";
-        return $book . rtrim($sep) . " Chapter $chap, $verses";
+        return $bB . $book . rtrim($sep) . " Chapter $chap, $verses" . $bA;
     }, $text);
 }
 
@@ -278,6 +280,32 @@ function ttsCitePauseMs(array $cfg): int {
 }
 
 /**
+ * Silence (ms) inserted immediately BEFORE and AFTER a whole scripture / Mein
+ * Kampf citation label — so a reference that introduces a quote is set off from
+ * the surrounding narration and from the quotation it precedes:
+ *   "…identical to the Quran and Hadith. <before> Mein Kampf, Preface <after> “I have…"
+ * Read from the '__cite_before__' / '__cite_after__' sentinel rows in the Pause
+ * tab (same mechanism as '__cite_pause__'), so an admin can tune or disable it
+ * without a code change. 0 (or no row) = no edge pause. Applied by the three
+ * citation rewriters (Bible / Islamic / Mein Kampf) to every match, on both the
+ * Azure and self-hosted engine paths. MAX across rows; clamped to 0..5000.
+ */
+function ttsCiteEdgePauseMs(array $cfg): array {
+    $before = 0; $after = 0;
+    foreach ($cfg['pauses'] ?? [] as $p) {
+        $s = $p['tts_pause_search'] ?? '';
+        if     ($s === '__cite_before__') $before = max($before, (int)$p['tts_pause_ms']);
+        elseif ($s === '__cite_after__')  $after  = max($after,  (int)$p['tts_pause_ms']);
+    }
+    return ['before' => max(0, min(5000, $before)), 'after' => max(0, min(5000, $after))];
+}
+
+/** PAUSE placeholder for a given ms (empty string when 0), matching applyPauses' token shape. */
+function ttsPausePlaceholder(int $ms): string {
+    return $ms > 0 ? sprintf("\x01PAUSE_0_%d\x01", $ms) : '';
+}
+
+/**
  * Spell a non-negative integer in English words, space-separated (no hyphens —
  * autoregressive local engines can choke on "forty-two"). "142" -> "one hundred
  * forty two". Used to keep Chatterbox/Kokoro/etc. from mangling multi-digit
@@ -309,17 +337,19 @@ function numberToWords(int $n): string {
  * heard as "forty two". Callers pass $spell=true on the local / ElevenLabs /
  * Inworld paths and false (digits) for Azure.
  */
-function rewriteIslamicCitations(string $text, int $pauseMs = 0, bool $spell = false): string {
+function rewriteIslamicCitations(string $text, int $pauseMs = 0, bool $spell = false, int $beforeMs = 0, int $afterMs = 0): string {
     $brk = $pauseMs > 0 ? sprintf("\x01PAUSE_0_%d\x01", $pauseMs) : '';
     $sep = ', ' . $brk;   // comma + optional break between citation parts
+    $bB  = ttsPausePlaceholder($beforeMs);   // edge pause before the whole citation
+    $bA  = ttsPausePlaceholder($afterMs);    // edge pause after the whole citation
     $num = function ($n) use ($spell) { return $spell ? numberToWords((int)$n) : (string)(int)$n; };
     // Quran chapter:verse -> "Quran <ch>, <vs>[ to <end>]"
     $text = preg_replace_callback(
         '/\b(Qur[\x{2019}\x{02BE}\x{0027}]?an|Koran)\s+0*(\d+)\s*[:.]\s*0*(\d+)(?:\s*[-\x{2013}\x{2014}]\s*0*(\d+))?/u',
-        function ($m) use ($sep, $num) {
+        function ($m) use ($sep, $num, $bB, $bA) {
             $out = $m[1] . ' ' . $num($m[2]) . $sep . $num($m[3]);
             if (isset($m[4]) && $m[4] !== '') $out .= ' to ' . $num($m[4]);
-            return $out;
+            return $bB . $out . $bA;
         },
         $text
     );
@@ -327,20 +357,20 @@ function rewriteIslamicCitations(string $text, int $pauseMs = 0, bool $spell = f
     // optional abbreviated range). Digit required after the colon.
     $text = preg_replace_callback(
         '/\bIshaq\s*:\s*0*(\d+)(?:\s*[-\x{2013}\x{2014}]\s*0*(\d+))?/u',
-        function ($m) use ($sep, $num) {
+        function ($m) use ($sep, $num, $bB, $bA) {
             $out = 'Ishaq' . $sep . $num($m[1]);
             if (isset($m[2]) && $m[2] !== '') $out .= ' to ' . $num($m[2]);
-            return $out;
+            return $bB . $out . $bA;
         },
         $text
     );
     // Tabari Roman-volume:page "Tabari IX:69" -> "Tabari, 9, 69".
     $text = preg_replace_callback(
         '/\bTabari\s+([IVXLCDM]+)\s*:\s*0*(\d+)(?:\s*[-\x{2013}\x{2014}]\s*0*(\d+))?/u',
-        function ($m) use ($sep, $num) {
+        function ($m) use ($sep, $num, $bB, $bA) {
             $out = 'Tabari' . $sep . $num(romanToInt($m[1])) . $sep . $num($m[2]);
             if (isset($m[3]) && $m[3] !== '') $out .= ' to ' . $num($m[3]);
-            return $out;
+            return $bB . $out . $bA;
         },
         $text
     );
@@ -349,23 +379,54 @@ function rewriteIslamicCitations(string $text, int $pauseMs = 0, bool $spell = f
     // stray "Muslim: 5".
     $text = preg_replace_callback(
         '/\b(Bukhari|Muslim)\s*:\s*([A-Z]\d+(?:[A-Z]\d+)+)/u',
-        function ($m) use ($sep, $num) {
+        function ($m) use ($sep, $num, $bB, $bA) {
             preg_match_all('/([A-Z]+)(\d+)/', $m[2], $groups, PREG_SET_ORDER);
             $parts = [];
             foreach ($groups as $g) { $parts[] = $g[1] . ' ' . $num($g[2]); }
-            return $m[1] . $sep . implode($sep, $parts);
+            return $bB . $m[1] . $sep . implode($sep, $parts) . $bA;
         },
         $text
     );
     // Rare Bukhari/Muslim book:number "Muslim 37:6676" -> "Muslim, 37, 6676".
     $text = preg_replace_callback(
         '/\b(Bukhari|Muslim)\s+0*(\d+)\s*[:.]\s*0*(\d+)/u',
-        function ($m) use ($sep, $num) {
-            return $m[1] . $sep . $num($m[2]) . $sep . $num($m[3]);
+        function ($m) use ($sep, $num, $bB, $bA) {
+            return $bB . $m[1] . $sep . $num($m[2]) . $sep . $num($m[3]) . $bA;
         },
         $text
     );
     return $text;
+}
+
+/**
+ * Rewrite Mein Kampf citations so the source name and its page/section read
+ * as two spoken parts. The parser glues the reference to the title with a
+ * colon and no space ("Mein Kampf:1", "Mein Kampf:Preface", "Mein Kampf:
+ * Dedication"); left raw, the local autoregressive engines that voice the
+ * kampf/Adolph category mangle or DROP the colon-glued tail (the same defect
+ * documented for "Ishaq:315" in rewriteIslamicCitations — heard as "Ishaq
+ * thousand three five"). Replacing the colon with ", " gives the engine a
+ * clean prosodic break: "Mein Kampf, Preface" / "Mein Kampf, one".
+ *
+ * $spell mirrors rewriteIslamicCitations: on the local / ElevenLabs /
+ * Inworld paths a numeric page is spelled in words (those engines drop the
+ * hundreds place — "414" was heard as "fourteen"); Azure reads digits fine.
+ * Only fires on the genuine "Mein Kampf:<page-or-section>" citation shape,
+ * so prose mentioning the title without a colon ("Mein Kampf and the Quran
+ * were comprised of the same raw material") is untouched.
+ */
+function rewriteKampfCitations(string $text, bool $spell = false, int $beforeMs = 0, int $afterMs = 0): string {
+    $bB = ttsPausePlaceholder($beforeMs);
+    $bA = ttsPausePlaceholder($afterMs);
+    return preg_replace_callback(
+        '/\bMein\s+Kampf\s*:\s*(\d+|[A-Za-z][A-Za-z]+)/u',
+        function ($m) use ($spell, $bB, $bA) {
+            $ref = $m[1];
+            if (ctype_digit($ref) && $spell) $ref = numberToWords((int)$ref);
+            return $bB . 'Mein Kampf, ' . $ref . $bA;
+        },
+        $text
+    );
 }
 
 /**
@@ -1303,10 +1364,12 @@ function buildVoiceBlock(string $text, array $cfg, string $category, ?string $ov
     // token by applyTunes. After expansion, applyTunes can still match
     // the book name normally; the appended "Chapter N, Verse M" is plain
     // text that Azure reads naturally.
+    $citeEdge = ttsCiteEdgePauseMs($cfg);   // pause before/after a whole citation label
     if (!empty($cfg['bible_books'])) {
-        $text = rewriteBibleCitations($text, $cfg['bible_books']);
+        $text = rewriteBibleCitations($text, $cfg['bible_books'], $citeEdge['before'], $citeEdge['after']);
     }
-    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg));
+    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), false, $citeEdge['before'], $citeEdge['after']);
+    $text = rewriteKampfCitations($text, false, $citeEdge['before'], $citeEdge['after']);   // Azure reads digits fine; just un-glues the colon
     $text = rewriteClockTimes($text);   // Azure reads times fine; no-op unless spelled
     $text = rewriteBareNumbers($text);  // Azure reads digits fine; no-op unless spelled
     // Apply tunes BEFORE pauses so tune regexes see the raw half-ring
@@ -2008,6 +2071,60 @@ function segmentParagraph(string $html, ?array &$carry = null): array {
         $s['text'] = trim($s['text']);
     }
     unset($s);
+    // Mein Kampf citation -> quote voice. The color parser tags only the
+    // citation LABEL ("Mein Kampf:1", "Mein Kampf:Preface") with
+    // data-style="kampf" (-> category 'kampf', the Adolph voice); the
+    // Hitler quotation that follows is left in plain italic and so routes
+    // to 'main' (the Craig Winn narrator) — the listener hears the citation
+    // in one voice and the quote it introduces in another. Re-tag the
+    // quotation run that follows each "Mein Kampf:<ref>" label to 'kampf'
+    // so the citation AND its quote read in Hitler's voice.
+    //
+    // Care is required because data-style="kampf" is ALSO used for many
+    // non-Hitler extended quotes (Chabad/rabbinical, Chesterton, etc.),
+    // where the kampf segment is the quote BODY and the surrounding 'main'
+    // is genuine narration that must NOT move. So this only fires when a
+    // genuine "Mein Kampf:<ref>" label is present, and within a paragraph:
+    //   • a label opens a quote run;
+    //   • a following segment joins the run only if it opens with a quote
+    //     char (a fresh quotation) or is a continuation immediately after a
+    //     word_definition gloss (the quote wraps an inline "(gloss)");
+    //   • narration resuming after the quote closes (a 'main' that neither
+    //     opens a quote nor follows a gloss — e.g. "But then, when they
+    //     wouldn't surrender, Muhammad became enraged.") ends the run and
+    //     is left as 'main';
+    //   • a scripture-source segment (Quran/Ishaq/…) also ends the run so
+    //     the Islamic retag below still owns those quotes.
+    $hasKampfLabel = false;
+    foreach ($merged as $s) {
+        if ($s['category'] === 'kampf' && preg_match('/^\s*Mein\s+Kampf\s*:/iu', $s['text'])) { $hasKampfLabel = true; break; }
+    }
+    if ($hasKampfLabel) {
+        $kampfScripture = ['islam','quran','bukhari','muslim','tabari','ishaq',
+                           'kjv','nas','na','nlt','jps','niv','esv','lv','nt','paul','bible',
+                           'yusuf_ali','pickthal','shakir','ahmed_ali','noble_quran','word_by_word'];
+        $kampfOpeners = ["\u{201C}", "\u{2018}", '"', "'"]; // “ ‘ " '
+        $inQuote = false;
+        $n = count($merged);
+        for ($qi = 0; $qi < $n; $qi++) {
+            $c = $merged[$qi]['category'];
+            if ($c === 'kampf' && preg_match('/^\s*Mein\s+Kampf\s*:/iu', $merged[$qi]['text'])) { $inQuote = true; continue; }
+            if (!$inQuote) continue;
+            if (in_array($c, $kampfScripture, true)) { $inQuote = false; continue; }
+            if ($c === 'kampf') continue;             // kampf quote body already correct
+            if ($c === 'word_definition') continue;   // inline gloss stays silent; run continues past it
+            if ($c === 'main' || $c === 'other' || $c === 'quote') {
+                $t = ltrim($merged[$qi]['text']);
+                $opensQuote = in_array(mb_substr($t, 0, 1), $kampfOpeners, true);
+                $afterGloss = $qi > 0 && $merged[$qi - 1]['category'] === 'word_definition';
+                if ($opensQuote || $afterGloss) {
+                    $merged[$qi]['category'] = 'kampf';
+                } else {
+                    $inQuote = false;                 // narration resumed — leave as-is, close the run
+                }
+            }
+        }
+    }
     // Islamic citation -> quote voice. The color parser tags an
     // Islamic-source citation label ("Quran 005:033", "Ishaq:515") with
     // its source style (data-style="quran"/"ishaq"/... -> category
@@ -2687,10 +2804,12 @@ function ttsWordAuditionFrame(string $text, string $warmup = TTS_WORD_AUDITION_W
 function buildLocalSegment(string $text, array $cfg, string $category): array {
     $providerKey = ttsResolveProviderKey($cfg, $category);
     $voiceCode   = ttsResolveVoiceCode($cfg, $category) ?? '';
+    $citeEdge = ttsCiteEdgePauseMs($cfg);   // pause before/after a whole citation label
     if (!empty($cfg['bible_books'])) {
-        $text = rewriteBibleCitations($text, $cfg['bible_books']);
+        $text = rewriteBibleCitations($text, $cfg['bible_books'], $citeEdge['before'], $citeEdge['after']);
     }
-    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
+    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true, $citeEdge['before'], $citeEdge['after']);
+    $text = rewriteKampfCitations($text, true, $citeEdge['before'], $citeEdge['after']);
     $text = rewriteClockTimes($text, true);
     $text = rewriteBareNumbers($text, true);
     $tuneHits = 0;
@@ -2853,10 +2972,12 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
 function buildInworldSegment(string $text, array $cfg, string $category): array {
     $providerKey = ttsResolveProviderKey($cfg, $category);
     $voiceCode   = ttsResolveVoiceCode($cfg, $category) ?? '';
+    $citeEdge = ttsCiteEdgePauseMs($cfg);   // pause before/after a whole citation label
     if (!empty($cfg['bible_books'])) {
-        $text = rewriteBibleCitations($text, $cfg['bible_books']);
+        $text = rewriteBibleCitations($text, $cfg['bible_books'], $citeEdge['before'], $citeEdge['after']);
     }
-    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
+    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true, $citeEdge['before'], $citeEdge['after']);
+    $text = rewriteKampfCitations($text, true, $citeEdge['before'], $citeEdge['after']);
     $text = rewriteClockTimes($text, true);
     $text = rewriteBareNumbers($text, true);
     $tuneHits = 0;
@@ -2927,10 +3048,12 @@ function buildInworldSegment(string $text, array $cfg, string $category): array 
 function buildElevenLabsSegment(string $text, array $cfg, string $category): array {
     $providerKey = ttsResolveProviderKey($cfg, $category);
     $voiceCode   = ttsResolveVoiceCode($cfg, $category) ?? '';
+    $citeEdge = ttsCiteEdgePauseMs($cfg);   // pause before/after a whole citation label
     if (!empty($cfg['bible_books'])) {
-        $text = rewriteBibleCitations($text, $cfg['bible_books']);
+        $text = rewriteBibleCitations($text, $cfg['bible_books'], $citeEdge['before'], $citeEdge['after']);
     }
-    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true);
+    $text = rewriteIslamicCitations($text, ttsCitePauseMs($cfg), true, $citeEdge['before'], $citeEdge['after']);
+    $text = rewriteKampfCitations($text, true, $citeEdge['before'], $citeEdge['after']);
     $text = rewriteClockTimes($text, true);
     $text = rewriteBareNumbers($text, true);
     // Same applyTunes path Azure uses — IPA columns produce <phoneme> tags,

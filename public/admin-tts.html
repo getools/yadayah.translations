@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784101474">
+    <meta name="page-version" content="1784181607">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -5904,15 +5904,20 @@ function buildPauseRow(p) {
     // consumed elsewhere (the flipbook viewer reads __new_chapter__).
     // Render them with a fixed, friendly label and lock the Character(s)
     // field so admins can only tweak the ms value.
-    var SENTINEL_LABELS = { '__new_chapter__': 'New Chapter' };
-    var sentinel = SENTINEL_LABELS[p.tts_pause_search] || null;
-    if (sentinel) {
+    var SENTINEL_LABELS = {
+        '__new_chapter__': { label: 'New Chapter',                dflt: 2000, title: 'Silence (ms) between chapter MP3s during sequential flipbook playback.' },
+        '__cite_before__': { label: 'Before citation',           dflt: 400,  title: 'Silence (ms) inserted BEFORE a whole scripture / Mein Kampf citation label (Quran, Ishaq, Tabari, Bukhari, Muslim, Bible book:verse, Mein Kampf:ref), setting it off from the preceding narration.' },
+        '__cite_after__':  { label: 'After citation',            dflt: 700,  title: 'Silence (ms) inserted AFTER a citation label, before the quotation it introduces.' },
+        '__cite_pause__':  { label: 'Within citation (parts)',   dflt: 400,  title: 'Silence (ms) between the parts of a citation (source / chapter / verse), e.g. "Quran 5 [pause] 33".' }
+    };
+    var sentinelDef = SENTINEL_LABELS[p.tts_pause_search] || null;
+    if (sentinelDef) {
         tr.dataset.sentinel = p.tts_pause_search;
         tr.innerHTML =
-            '<td><strong>' + sentinel + '</strong>' +
+            '<td><strong>' + sentinelDef.label + '</strong>' +
                 '<input type="hidden" class="f-search" value="' + escapeHtml(p.tts_pause_search) + '">' +
             '</td>' +
-            '<td><input type="number" class="f-ms" value="' + ((p.tts_pause_ms == null) ? 2000 : p.tts_pause_ms) + '" min="0" max="60000" step="100" title="Silence (ms) between chapter MP3s during sequential flipbook playback."></td>' +
+            '<td><input type="number" class="f-ms" value="' + ((p.tts_pause_ms == null) ? sentinelDef.dflt : p.tts_pause_ms) + '" min="0" max="60000" step="100" title="' + escapeHtml(sentinelDef.title) + '"></td>' +
             '<td><input type="text"   class="f-note" value="' + escapeHtml(p.tts_pause_note || '') + '"></td>' +
             '<td class="col-toggle"><input type="checkbox" class="f-active"' + (p.tts_pause_active_flag !== false ? ' checked' : '') + '></td>' +
             '<td class="col-actions"></td>';  // no delete — sentinel is permanent
@@ -6827,13 +6832,26 @@ function _paraSummaryText(rows) {
     if (miss)   s += ' · ⚠ ' + miss + ' need attention';
     return s;
 }
+// Page cell → deep-link into the flipbook at this paragraph's page, opened
+// in a new window. Same page domain + URL shape as the chapter "Read" link
+// ('/<volume_code>/#page=N'). Falls back to plain text when the volume slug
+// isn't known yet or the paragraph has no page (e.g. tables / continuations).
+function _paraPageCellHtml(p) {
+    if (p.paragraph_page == null) return '<span style="color:#666;">—</span>';
+    if (!ACTIVE_VOLUME_CODE) return '<span style="color:#666;">' + escapeHtml(p.paragraph_page) + '</span>';
+    var href = '/' + ACTIVE_VOLUME_CODE + '/#page=' + encodeURIComponent(p.paragraph_page);
+    return '<a href="' + escapeHtml(href) + '" target="_blank" rel="noopener" '
+         + 'title="Open page ' + escapeHtml(p.paragraph_page) + ' in the flipbook (new window)" '
+         + 'style="color:#31345A;text-decoration:none;font-weight:600;white-space:nowrap;">'
+         + 'p.' + escapeHtml(p.paragraph_page) + ' →</a>';
+}
 function _paraRowHtml(p, posInChapter, ak) {
     var meta = _paraStatusMeta(p.status);
     var rowStyle = meta.bg ? ('background:' + meta.bg + ';') : '';
     return '<tr data-idx="' + p.idx + '" data-part-idx="' + (p.part_idx == null ? '' : p.part_idx) + '" data-sig="' + _paraRowSig(p) + '" style="border-bottom:1px solid #eee;' + rowStyle + '">'
          +   '<td style="text-align:right;padding:3px 6px;color:#222;font-weight:600;" title="Position in chapter">' + (posInChapter + 1) + '</td>'
          +   '<td style="text-align:right;padding:3px 6px;color:#888;font-size:0.78rem;" title="paragraph_number — unique per volume">' + p.paragraph_number + '</td>'
-         +   '<td style="padding:3px 6px;color:#666;">' + (p.paragraph_page == null ? '—' : p.paragraph_page) + '</td>'
+         +   '<td style="padding:3px 6px;">' + _paraPageCellHtml(p) + '</td>'
          +   '<td style="padding:3px 6px;">' + escapeHtml(p.preview || '') + '</td>'
          +   '<td style="padding:3px 6px;">' + _paraAudioCellHtml(p) + '</td>'
          +   '<td data-has="' + (p.part_idx == null ? '0' : '1') + '" style="padding:3px 6px;text-align:right;white-space:nowrap;">' + _paraActionsHtml(p, ak) + '</td>'

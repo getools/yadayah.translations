@@ -627,6 +627,63 @@ for ($k = 0; $k < $nPara; $k++) {
     $k = $end; // skip past the block so we don't re-detect inside it
 }
 
+// ── Multi-paragraph Mein Kampf quote continuation ──────────────────────
+// A Hitler quotation can span a real paragraph break: the "Mein Kampf:<ref>"
+// label + opening “ sit in paragraph P (already voiced Adolph by
+// segmentParagraph's kampf retag), but the closing ” lands in the NEXT
+// paragraph Q, which carries no kampf style and would otherwise route to
+// 'main' (the Winn narrator) — only half the quote reads in Hitler's voice.
+//
+// The source colour-styles Hitler quotes but is INCONSISTENT about closing ”
+// marks, so an open-quote state CANNOT be carried safely across paragraphs: a
+// dropped ” would cascade Adolph through pages of narration (verified: ck345
+// ¶3936 leaves a quote unclosed and would swallow ¶3938-3949). Instead this
+// uses tight, adjacent-pair guards that a narration paragraph cannot satisfy:
+//   • P ends INSIDE an open MK quote — its last segment is 'kampf' and, after
+//     P's last "Mein Kampf:" label, its kampf spans hold more “ than ”;
+//   • Q has NO styled content (no data-style, no bold) — a plain continuation;
+//   • Q ENDS with ” and net-CLOSES the quote (more ” than “).
+// Verified corpus-wide: 1 match, 0 false positives (s07v03 ck348 ¶371→372).
+$mkIsLabel = function (array $s): bool {
+    return $s['category'] === 'kampf' && preg_match('/^\s*Mein\s+Kampf\s*:/iu', $s['text']);
+};
+for ($k = 0; $k + 1 < $nPara; $k++) {
+    $P = $paragraphs[$k];
+    if (!empty($P['paragraph_is_table'])) continue;
+    $pHtml = (string)$P['paragraph_text_html'];
+    if (stripos($pHtml, 'kampf') === false) continue;          // cheap precheck
+    $tmpCarry = [];
+    $pSegs = segmentParagraph(preprocessFontFilter($pHtml, $cfg['fonts'] ?? []), $tmpCarry);
+    if (!$pSegs) continue;
+    $last = end($pSegs);
+    if (($last['category'] ?? '') !== 'kampf') continue;
+    $labelIdx = -1;
+    foreach ($pSegs as $ix => $s) if ($mkIsLabel($s)) $labelIdx = $ix;
+    if ($labelIdx < 0) continue;
+    $bal = 0;                                                  // net “/” in P's kampf spans after its last label
+    for ($ix = $labelIdx + 1; $ix < count($pSegs); $ix++) {
+        if (($pSegs[$ix]['category'] ?? '') === 'kampf') {
+            $bal += substr_count($pSegs[$ix]['text'], "\u{201C}") - substr_count($pSegs[$ix]['text'], "\u{201D}");
+        }
+    }
+    if ($bal <= 0) continue;                                   // P closes its own quote — nothing carries
+    // Next non-table paragraph is the candidate continuation Q.
+    $j = $k + 1;
+    while ($j < $nPara && !empty($paragraphs[$j]['paragraph_is_table'])) $j++;
+    if ($j >= $nPara) continue;
+    $Q = $paragraphs[$j];
+    if (isset($introOverrides[(int)$Q['paragraph_number']])) continue;
+    $qHtml = (string)$Q['paragraph_text_html'];
+    if (stripos($qHtml, 'data-style=') !== false) continue;    // styled → not a plain continuation
+    if (preg_match('/<b\b/i', $qHtml)) continue;               // bold → translation, not a Hitler quote
+    $qPlain = trim((string)$Q['paragraph_text_plain']);
+    if ($qPlain === '' || mb_substr($qPlain, -1) !== "\u{201D}") continue;                 // must close with ”
+    if (substr_count($qPlain, "\u{201D}") <= substr_count($qPlain, "\u{201C}")) continue;  // must net-close
+    $introOverrides[(int)$Q['paragraph_number']] = 'kampf';
+    fwrite(STDERR, sprintf("mein-kampf continuation: paragraph %d tagged 'kampf' (continues %d)\n",
+        (int)$Q['paragraph_number'], (int)$P['paragraph_number']));
+}
+
 // ── Quran multi-translation block detection ────────────────────────────
 // A single Quran verse is sometimes quoted with several named English
 // translations, each on its own line: "Yusuf Ali: …", "Pickthal: …",
