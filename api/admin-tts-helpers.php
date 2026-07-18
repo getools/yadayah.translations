@@ -609,13 +609,20 @@ function preprocessFontFilter(string $html, array $fonts): string {
         }
         $i = $gt + 1;
     }
-    return $out;
+    return fontFilterCleanupJunctions($out);
 }
 
 /**
  * Emit (or suppress) literal text based on the current font stack.
  * If the innermost data-font on the stack is marked skip, the text is
  * dropped; otherwise it passes through unchanged.
+ *
+ * A dropped run is replaced with the FONT_DROP_SENTINEL (\x02) rather than
+ * an empty string, so preprocessFontFilter can find the seam afterwards and
+ * clean the junction the missing glyph left behind (a stray space before
+ * punctuation, or a now-orphaned "|"/"–" separator that only sat there to
+ * introduce the glyph). See fontFilterCleanupJunctions(). An empty run drops
+ * to nothing — there is no seam to mark.
  */
 function fontFilterEmit(string $text, array $stack, array $fonts): string {
     // Find the innermost non-empty font on the stack — that's the
@@ -623,10 +630,52 @@ function fontFilterEmit(string $text, array $stack, array $fonts): string {
     for ($j = count($stack) - 1; $j >= 0; $j--) {
         $f = $stack[$j];
         if ($f === '') continue;
-        if (!empty($fonts[$f]) && !empty($fonts[$f]['skip'])) return '';
+        if (!empty($fonts[$f]) && !empty($fonts[$f]['skip'])) {
+            return $text === '' ? '' : FONT_DROP_SENTINEL;
+        }
         break; // Found innermost real font; not skipped → emit text.
     }
     return $text;
+}
+
+/** Marks in the filtered stream where a skipped-font (glyph) run was removed. */
+const FONT_DROP_SENTINEL = "\x02";
+
+/**
+ * Close the seam a dropped glyph left in the text.
+ *
+ * When preprocessFontFilter drops a skipped glyph-font run mid-sentence, the
+ * characters that framed the glyph stay behind and now dangle: the space that
+ * preceded "…rope 8. So" becomes "…rope . So", and the separator an author put
+ * there only to introduce the glyph ("the Ghah | 8 serves", "ʾelowah – 8,")
+ * is left pointing at nothing. Read aloud these become a stray pause, a floating
+ * "slash/dash", or a space before the comma — the "holes" a skipped glyph makes.
+ *
+ * Each drop is a FONT_DROP_SENTINEL. For every sentinel (or run of them) this:
+ *   1. swallows the whitespace and the one adjacent inline separator ( | – — )
+ *      that bordered the glyph on either side, and
+ *   2. re-glues the two sides — tight against following closing punctuation or a
+ *      preceding opener, otherwise with a single space.
+ * It only ever fires AT a sentinel, so text that never touched a skipped span is
+ * left exactly as it was (the "glyph-drop junctions only" contract).
+ */
+function fontFilterCleanupJunctions(string $s): string {
+    if (strpos($s, FONT_DROP_SENTINEL) === false) return $s;
+    // Inline separators that exist only to introduce the glyph. Deliberately
+    // NOT ASCII '-' or '/': those appear inside real words / "Mizmowr / Psalm".
+    $sep = '\\|\\x{2013}\\x{2014}';
+    // Collapse each sentinel cluster — plus the whitespace and single adjacent
+    // separator on each side — down to one bare sentinel.
+    $s = preg_replace(
+        '/[ \\t]*[' . $sep . ']?[ \\t]*' . FONT_DROP_SENTINEL .
+        '(?:[ \\t]*[' . $sep . ']?[ \\t]*' . FONT_DROP_SENTINEL . ')*' .
+        '[ \\t]*[' . $sep . ']?[ \\t]*/u',
+        FONT_DROP_SENTINEL, $s);
+    // Re-glue. Tight before closing punctuation, tight after an opener, else a
+    // single space so two words don't fuse.
+    $s = preg_replace('/' . FONT_DROP_SENTINEL . '(?=[.,;:!?)\\]}”’"\'])/u', '', $s);
+    $s = preg_replace('/(?<=[(\\[{“‘"\'])' . FONT_DROP_SENTINEL . '/u', '', $s);
+    return str_replace(FONT_DROP_SENTINEL, ' ', $s);
 }
 
 /**
@@ -1939,6 +1988,60 @@ function ttsParentheticalIsAside(string $s): bool {
  * separately by per-series pre-passes in the build worker — segmentParagraph
  * stays HTML-structure-driven.
  */
+/**
+ * Split a styled quote-voice segment at the close of its attributed quotation.
+ *
+ * The kampf / Islamic-source retags below assign a styled quote VOICE to whole
+ * segments, but a quotation can CLOSE partway through a segment when its closing
+ * ” and the narration that follows share formatting — e.g. an unstyled Hitler
+ * quote body ("…do his will.”) and the Winn narration after it ("Hitler saw
+ * himself…") are one 'main' run, so retagging the run to 'kampf' drags the
+ * narration into Hitler's voice. This returns [$quotePart, $narrationPart] where
+ * $quotePart is the attributed quotation (through its closing ”) and
+ * $narrationPart is the resumed narration ('' when the whole segment is quote).
+ *
+ * High precision — the same rule the segment-level retag uses, applied WITHIN a
+ * segment:
+ *   • only a segment that OPENS with a double quote is a candidate (a run that
+ *     begins in narration is left untouched);
+ *   • we walk the “/” balance (single quotes ‘ ’ ' are apostrophe-ambiguous and
+ *     never counted) and cut at the first close whose next non-space char is a
+ *     WORD — narration resumed;
+ *   • a close immediately followed by another opening quote is a SERIAL quoted
+ *     phrase in the same voice (scripture word-lists: “the LORD,” “those who,”)
+ *     and is kept intact — no split;
+ *   • a quotation that never net-closes (spans to the segment end) is returned
+ *     whole so the caller's cross-paragraph carry still owns it.
+ */
+function ttsSplitAttributedQuote(string $text): array {
+    $chars = mb_str_split($text);
+    $n = count($chars);
+    $lead = ltrim($text);
+    $f = mb_substr($lead, 0, 1);
+    if ($f !== "\u{201C}" && $f !== '"') return [$text, ''];   // must open with a “ / "
+    $bal = 0; $started = false;
+    for ($i = 0; $i < $n; $i++) {
+        $c = $chars[$i];
+        if ($c === "\u{201C}") { $bal++; $started = true; }
+        elseif ($c === "\u{201D}") { if ($bal > 0) $bal--; }
+        elseif ($c === '"') { if ($bal > 0 && $started) { $bal--; } else { $bal++; $started = true; } }
+        if ($started && $bal === 0) {
+            $j = $i + 1;
+            while ($j < $n && preg_match('/\s/u', $chars[$j])) $j++;
+            if ($j >= $n) return [$text, ''];                   // nothing after the close → all quote
+            $next = $chars[$j];
+            if ($next === "\u{201C}" || $next === '"' || $next === "\u{2018}" || $next === "'") {
+                $started = false;                                // serial phrase, same voice — keep going
+                continue;
+            }
+            $quote = trim(implode('', array_slice($chars, 0, $i + 1)));
+            $rest  = trim(implode('', array_slice($chars, $j)));
+            return [$quote, $rest];                              // narration resumed → split
+        }
+    }
+    return [$text, ''];                                          // quotation never net-closed
+}
+
 function segmentParagraph(string $html, ?array &$carry = null): array {
     $carry ??= [];
     $segments = [];
@@ -2149,6 +2252,29 @@ function segmentParagraph(string $html, ?array &$carry = null): array {
         }
         unset($s);
     }
+    // ── Attributed-quote bleed guard (unified — every styled quote voice) ──
+    // Both retags above assign a quote VOICE to whole segments, but a quotation
+    // can close partway through a segment when its closing ” and the narration
+    // after it share formatting (the Hitler-quote/Winn-narration case, and the
+    // same shape for scripture and Bible voices). Split each styled quote-voice
+    // segment at the close of its attributed quotation so post-quote narration
+    // reverts to 'main'. Runs on QUOTE VOICES ONLY — never on 'main' narration —
+    // and ttsSplitAttributedQuote leaves serial/nested quoted phrases intact, so
+    // scripture word-lists ("the LORD," "those who,") and multi-sentence quotes
+    // are untouched. This replaces the kampf-only whole-paragraph continuation
+    // special case with one high-precision rule for all voices.
+    $quoteVoices = ['kampf', 'quran', 'bukhari', 'muslim', 'tabari', 'ishaq', 'islam',
+                    'kjv', 'nas', 'na', 'nlt', 'jps', 'niv', 'esv', 'lv', 'nt', 'paul',
+                    'bible', 'quote', 'other'];
+    $split = [];
+    foreach ($merged as $s) {
+        if (!in_array($s['category'], $quoteVoices, true)) { $split[] = $s; continue; }
+        [$q, $rest] = ttsSplitAttributedQuote($s['text']);
+        if ($rest === '') { $split[] = $s; continue; }
+        $split[] = ['category' => $s['category'], 'text' => $q];
+        $split[] = ['category' => 'main', 'text' => $rest];
+    }
+    $merged = $split;
     // Hand the final depths back to the caller so it can pass them in to
     // the next paragraph's call. Continuation handling lives in the worker
     // loop — see the $carryState variable around the segmentParagraph
@@ -3863,4 +3989,476 @@ function pvConcatMp3sWithPauses(array $items, ?string &$err = null, string $outF
     @unlink($out);
     if ($bytes === false || $bytes === '') { $err = 'ffmpeg assembly failed'; return $byteConcat(); }
     return $bytes;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Per-word occurrence locator + targeted re-synth queueing
+ *
+ * Powers the admin-tts "# occurrences" click-through: given one tune, find
+ * every Series / Volume / Chapter whose paragraphs actually match it (using
+ * the real synth matcher, so the tally agrees with tts_tune_book_count), then
+ * let the operator re-queue the affected chapters so their audio re-renders
+ * with the current pronunciation. The regen mirrors the proven one-off
+ * _*_resweep.php scripts: delete only the positional part files of the
+ * matching paragraphs and flip a 'complete' chapter to 'pending' so the build
+ * watchdog rebuilds it, reusing every unaffected cached part.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/** Parse a volume's volume_skip_pages ("3-5, 9") into [[lo,hi], …] ranges. */
+function ttsVolumeSkipRanges(PDO $db, int $volumeKey): array {
+    $ranges = [];
+    if ($volumeKey <= 0) return $ranges;
+    $sr = $db->prepare("SELECT volume_skip_pages FROM yy_volume WHERE volume_key = ?");
+    $sr->execute([$volumeKey]);
+    foreach (preg_split('/\s*,\s*/', (string)($sr->fetchColumn() ?: ''), -1, PREG_SPLIT_NO_EMPTY) as $tok) {
+        if (preg_match('/^\s*(\d+)\s*-\s*(\d+)\s*$/', $tok, $m))  $ranges[] = [(int)$m[1], (int)$m[2]];
+        elseif (preg_match('/^\s*(\d+)\s*$/', $tok, $m))         $ranges[] = [(int)$m[1], (int)$m[1]];
+    }
+    return $ranges;
+}
+
+/**
+ * Map each paragraph_number of a chapter to its zero-based PLAY index — the
+ * position of its part file (p%05d.mp3), i.e. the build's segment order.
+ * Tables and skip-page paragraphs are dropped; a continuation paragraph folds
+ * into its head paragraph's index. Identical to the resweep scripts' logic so
+ * the part paths line up with what the build actually wrote.
+ */
+function ttsChapterPlayIndexMap(array $paragraphRows, array $skipRanges): array {
+    $inSkip = function (?int $pg) use ($skipRanges): bool {
+        if ($pg === null) return false;
+        foreach ($skipRanges as $r) if ($pg >= $r[0] && $pg <= $r[1]) return true;
+        return false;
+    };
+    $map = []; $widx = 0; $lastHeadIdx = null;
+    foreach ($paragraphRows as $r) {
+        $num = (int)$r['paragraph_number'];
+        $pg  = $r['paragraph_page'] !== null ? (int)$r['paragraph_page'] : null;
+        if (!empty($r['paragraph_is_continuation'])) {
+            if ($lastHeadIdx !== null) $map[$num] = $lastHeadIdx;
+            continue;
+        }
+        if (!empty($r['paragraph_is_table']) || $inSkip($pg)) continue;
+        $map[$num]   = $widx;
+        $lastHeadIdx = $widx;
+        $widx++;
+    }
+    return $map;
+}
+
+/**
+ * Series → Volumes → Chapters tree of everywhere ONE tune actually matches,
+ * with per-node occurrence + paragraph counts and per-chapter built-audio
+ * status. Candidate paragraphs come from the same SQL pre-filter used by
+ * recountTuneBookCountForPrint; each candidate is then confirmed with the real
+ * matcher (gate-aware) so the tally agrees with the "# occurrences" column.
+ */
+function ttsWordLocations(PDO $db, int $ttsKey, array $tune): array {
+    $core = ttsNormalizeCore((string)$tune['tts_tune_print']);
+    $empty = ['print' => (string)$tune['tts_tune_print'], 'series' => [],
+              'total_occurrences' => 0, 'total_chapters' => 0];
+    if ($core === '') return $empty;
+
+    $gated = ttsTuneIsFormatGated($tune);
+    $fonts = $gated ? ttsLoadFontRules($db, $ttsKey) : [];
+
+    $cand = $db->prepare(
+        "SELECT p.chapter_key, p.volume_key, p.series_key,
+                p.paragraph_text_plain, p.paragraph_text_html,
+                s.series_number, COALESCE(s.series_label, s.series_name) AS series_label, s.series_sort,
+                v.volume_number, v.volume_label, v.volume_sort,
+                c.chapter_number, c.chapter_name, c.chapter_sort
+           FROM yy_paragraph p
+           JOIN yy_series  s ON s.series_key  = p.series_key
+           JOIN yy_volume  v ON v.volume_key  = p.volume_key
+           JOIN yy_chapter c ON c.chapter_key = p.chapter_key
+          WHERE p.paragraph_text_html <> ''
+            AND v.volume_active_flag = TRUE
+            AND position(:core in lower(regexp_replace(p.paragraph_text_plain, '[' || :apos || ']', '', 'g'))) > 0"
+    );
+    $cand->execute([':core' => $core, ':apos' => TTS_APOS_CHARS]);
+
+    $chapters = [];   // chapter_key => aggregate node
+    foreach ($cand->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $hits = $gated
+            ? ttsCountTuneInHtml(preprocessFontFilter((string)$r['paragraph_text_html'], $fonts), $tune)
+            : ttsCountTuneInHtml((string)$r['paragraph_text_plain'], $tune);
+        if ($hits <= 0) continue;
+        $ck = (int)$r['chapter_key'];
+        if (!isset($chapters[$ck])) {
+            $chapters[$ck] = [
+                'chapter_key'    => $ck,
+                'volume_key'     => (int)$r['volume_key'],
+                'series_key'     => (int)$r['series_key'],
+                'series_number'  => (int)$r['series_number'],
+                'series_label'   => (string)$r['series_label'],
+                'series_sort'    => (int)$r['series_sort'],
+                'volume_number'  => (int)$r['volume_number'],
+                'volume_label'   => (string)($r['volume_label'] ?: 'untitled'),
+                'volume_sort'    => (int)$r['volume_sort'],
+                'chapter_number' => (int)$r['chapter_number'],
+                'chapter_name'   => (string)($r['chapter_name'] ?? ''),
+                'chapter_sort'   => (int)$r['chapter_sort'],
+                'occurrences'    => 0,
+                'paragraphs'     => 0,
+            ];
+        }
+        $chapters[$ck]['occurrences'] += $hits;
+        $chapters[$ck]['paragraphs']  += 1;
+    }
+
+    // Built-audio status per matching chapter, for this profile's tts_key.
+    $ckList = array_keys($chapters);
+    $audioByChapter = [];
+    if ($ckList) {
+        $in  = implode(',', array_fill(0, count($ckList), '?'));
+        $ast = $db->prepare(
+            "SELECT chapter_key, tts_audio_status
+               FROM yy_tts_audio
+              WHERE tts_audio_active_flag = TRUE AND tts_key = ? AND chapter_key IN ($in)");
+        $ast->execute(array_merge([$ttsKey], $ckList));
+        foreach ($ast->fetchAll(PDO::FETCH_ASSOC) as $a) {
+            $audioByChapter[(int)$a['chapter_key']][] = (string)$a['tts_audio_status'];
+        }
+    }
+
+    // Fold flat chapter list into series → volumes → chapters.
+    $seriesMap = [];
+    $totalOcc = 0; $totalCh = 0;
+    foreach ($chapters as $c) {
+        $totalOcc += $c['occurrences']; $totalCh++;
+        $sk = $c['series_key']; $vk = $c['volume_key'];
+        if (!isset($seriesMap[$sk])) {
+            $seriesMap[$sk] = [
+                'series_key' => $sk,
+                'number'     => $c['series_number'],
+                'label'      => 's' . str_pad((string)$c['series_number'], 2, '0', STR_PAD_LEFT)
+                              . ' — ' . $c['series_label'],
+                'sort'       => $c['series_sort'],
+                'occurrences'=> 0,
+                'chapters_count' => 0,
+                '_volumes'   => [],
+            ];
+        }
+        $svol = &$seriesMap[$sk]['_volumes'];
+        if (!isset($svol[$vk])) {
+            $svol[$vk] = [
+                'volume_key' => $vk,
+                'number'     => $c['volume_number'],
+                'label'      => 'v' . str_pad((string)$c['volume_number'], 2, '0', STR_PAD_LEFT)
+                              . ' — ' . $c['volume_label'],
+                'sort'       => $c['volume_sort'],
+                'occurrences'=> 0,
+                'chapters_count' => 0,
+                '_chapters'  => [],
+            ];
+        }
+        $statuses = $audioByChapter[$c['chapter_key']] ?? [];
+        $svol[$vk]['_chapters'][] = [
+            'chapter_key' => $c['chapter_key'],
+            'number'      => $c['chapter_number'],
+            'label'       => 'ch' . str_pad((string)$c['chapter_number'], 2, '0', STR_PAD_LEFT)
+                           . ($c['chapter_name'] !== '' ? ' — ' . $c['chapter_name'] : ''),
+            'sort'        => $c['chapter_sort'],
+            'occurrences' => $c['occurrences'],
+            'paragraphs'  => $c['paragraphs'],
+            'has_audio'   => !empty($statuses),
+            'audio_statuses' => array_values(array_unique($statuses)),
+        ];
+        $svol[$vk]['occurrences'] += $c['occurrences'];
+        $svol[$vk]['chapters_count']++;
+        $seriesMap[$sk]['occurrences'] += $c['occurrences'];
+        $seriesMap[$sk]['chapters_count']++;
+        unset($svol);
+    }
+
+    // Sort + flatten into ordered arrays (series_sort → number, etc.).
+    $cmp = function ($a, $b) { return ($a['sort'] <=> $b['sort']) ?: ($a['number'] <=> $b['number']); };
+    $seriesOut = [];
+    foreach ($seriesMap as $s) {
+        $vols = array_values($s['_volumes']);
+        foreach ($vols as &$v) {
+            usort($v['_chapters'], $cmp);
+            $v['chapters'] = $v['_chapters']; unset($v['_chapters']);
+        }
+        unset($v);
+        usort($vols, $cmp);
+        $s['volumes'] = $vols; unset($s['_volumes']);
+        $seriesOut[] = $s;
+    }
+    usort($seriesOut, $cmp);
+
+    return [
+        'print'             => (string)$tune['tts_tune_print'],
+        'series'            => $seriesOut,
+        'total_occurrences' => $totalOcc,
+        'total_chapters'    => $totalCh,
+        // Corpus-wide tally (the "#" column value). It can exceed the tree's
+        // total because the tree lists only ACTIVE volumes — occurrences in
+        // inactive volumes count toward the column but aren't shown/regenerated.
+        'stored_count'      => (int)($tune['tts_tune_book_count'] ?? 0),
+    ];
+}
+
+/**
+ * Re-queue one chapter's built audio so paragraphs matching $tune re-render.
+ * For every active audio row of the chapter (complete / paused / pending),
+ * delete the positional part files of the matching paragraphs; a 'complete'
+ * row is then flipped to 'pending' so the build watchdog rebuilds it (reusing
+ * every unaffected part). 'running' rows are left alone. With $apply=false the
+ * counts are computed without touching disk or the DB (dry run).
+ */
+function ttsQueueWordRegenForChapter(PDO $db, string $audioBase, int $ttsKey, int $chapterKey, array $tune, bool $apply): array {
+    $gated = ttsTuneIsFormatGated($tune);
+    $fonts = $gated ? ttsLoadFontRules($db, $ttsKey) : [];
+
+    $summary = [
+        'chapter_key'         => $chapterKey,
+        'audio_rows'          => 0,
+        'affected_paragraphs' => 0,   // matching paragraphs in the chapter (play-mapped)
+        // Split of the per-audio-row work over the matching paragraphs only —
+        // the rest of the chapter is never touched (cached parts are reused):
+        'requeued'            => 0,   // built part (old pronunciation) DELETED on a LIVE row → rebuilds now
+        'already_pending'     => 0,   // part absent on a LIVE row → the pending/running build will make it
+        'primed_paused'       => 0,   // matches on a PAUSED (held) row → render only when the hold is released
+        'parts_deleted'       => 0,
+        'reflagged'           => 0,   // complete/running row flipped to pending to (re)trigger a build
+    ];
+
+    // Include 'running': the operator may want to re-queue words in a chapter
+    // that is mid-build. Deleting a matching paragraph's part and flipping the
+    // row to 'pending' makes the worker exit at its next status check and the
+    // queue re-claim + resume it — regenerating only the deleted parts while
+    // skipping every part still on disk.
+    $ast = $db->prepare(
+        "SELECT tts_audio_key, volume_key, tts_audio_status, tts_audio_worker_pid
+           FROM yy_tts_audio
+          WHERE tts_audio_active_flag = TRUE AND tts_key = ? AND chapter_key = ?
+            AND tts_audio_status IN ('complete','paused','pending','running')
+          ORDER BY tts_audio_key");
+    $ast->execute([$ttsKey, $chapterKey]);
+    $arows = $ast->fetchAll(PDO::FETCH_ASSOC);
+    if (!$arows) return $summary;
+
+    $pst = $db->prepare(
+        "SELECT paragraph_number, paragraph_page, paragraph_text_plain, paragraph_text_html,
+                paragraph_is_table, paragraph_is_continuation
+           FROM yy_paragraph WHERE chapter_key = ? ORDER BY paragraph_number");
+    $pst->execute([$chapterKey]);
+    $prows = $pst->fetchAll(PDO::FETCH_ASSOC);
+
+    $skipRanges   = ttsVolumeSkipRanges($db, (int)$arows[0]['volume_key']);
+    $playIdxByNum = ttsChapterPlayIndexMap($prows, $skipRanges);
+
+    // Play indices of paragraphs this tune actually matches.
+    $affIdx = []; $affParaCount = 0;
+    foreach ($prows as $r) {
+        $plain = (string)$r['paragraph_text_plain'];
+        if ($plain === '') continue;
+        $hit = $gated
+            ? ttsCountTuneInHtml(preprocessFontFilter((string)$r['paragraph_text_html'], $fonts), $tune)
+            : ttsCountTuneInHtml($plain, $tune);
+        if ($hit > 0) {
+            $num = (int)$r['paragraph_number'];
+            if (isset($playIdxByNum[$num])) { $affIdx[$playIdxByNum[$num]] = true; $affParaCount++; }
+        }
+    }
+    $summary['affected_paragraphs'] = $affParaCount;
+    if (!$affIdx) return $summary;
+
+    $msg = 're-queued: pronunciation update for "' . (string)$tune['tts_tune_print'] . '"';
+    foreach ($arows as $a) {
+        $audioKey = (int)$a['tts_audio_key'];
+        $status   = (string)$a['tts_audio_status'];
+        $partsDir = $audioBase . '/u/tts-parts/' . $audioKey;
+        $summary['audio_rows']++;
+
+        // Partition the matching paragraphs by whether their part is on disk.
+        // present → built with the OLD pronunciation (delete to force a redo).
+        // absent  → not built yet.
+        $present = [];
+        foreach (array_keys($affIdx) as $idx) {
+            if (is_file($partsDir . sprintf('/p%05d.mp3', $idx))) $present[] = $idx;
+        }
+        $absent   = count($affIdx) - count($present);
+        $isPaused = ($status === 'paused');
+
+        if ($isPaused) {
+            // A paused row is a deliberate hold (see the s03–s06 / s07v05 holds).
+            // NEVER flip it to pending — just prime it: drop the stale parts so
+            // that whenever the hold is released the build renders them fresh.
+            $summary['primed_paused'] += count($affIdx);
+        } else {
+            $summary['requeued']        += count($present);
+            $summary['already_pending'] += $absent;
+        }
+        if (!$apply) { $summary['parts_deleted'] += count($present); continue; }
+
+        // A 'running' worker must be stopped BEFORE we delete its parts: the
+        // final concat silently skips any part missing on disk (it does not
+        // re-synth behind its own cursor), so a part we delete after the worker
+        // has passed it would ship a short 'complete'. SIGTERM with no pcntl
+        // handler terminates the worker immediately; every cached part stays on
+        // disk. The build watchdog (STALLED → spawn, ~5 min) / the promote-on-
+        // exit chain then respawns it, and its resume scan restarts from the
+        // first gap — reusing every present part and re-synthing the deleted
+        // (matching) ones with the current pronunciation.
+        if ($status === 'running' && count($present) > 0) {
+            $pid = (int)($a['tts_audio_worker_pid'] ?? 0);
+            if ($pid > 0 && function_exists('posix_kill')) {
+                @posix_kill($pid, defined('SIGTERM') ? SIGTERM : 15);
+            }
+        }
+
+        foreach ($present as $idx) {
+            if (@unlink($partsDir . sprintf('/p%05d.mp3', $idx))) $summary['parts_deleted']++;
+        }
+        // (Re)trigger a build ONLY when we invalidated built audio on a LIVE row.
+        // 'complete' has no worker → must be re-queued. 'running' was just killed
+        // → re-queue so the watchdog respawns it. 'pending' already has a build
+        // coming (its resume scan will pick up the deleted parts) → leave status.
+        // 'paused' stays held. Nothing deleted (all matches absent) → never
+        // disturb the row; the in-flight build already covers those paragraphs.
+        if (count($present) > 0 && ($status === 'complete' || $status === 'running')) {
+            $db->prepare(
+                "UPDATE yy_tts_audio
+                    SET tts_audio_status='pending', tts_audio_worker_pid=NULL, tts_audio_message=?
+                  WHERE tts_audio_key=? AND tts_audio_status IN ('complete','running')")
+               ->execute([$msg, $audioKey]);
+            $summary['reflagged']++;
+        }
+    }
+    return $summary;
+}
+
+// ── Re-anchor page-break CONTINUATION markers to the CORRECTED timeline ──
+// A page-break continuation marker (tts_audio_marker_byte_offset IS NULL) is
+// emitted during the synth loop as `paraStartMs + ratio*paragraphMs`, where
+// paraStartMs/paragraphMs come from the summed-chunk cumulative estimate. That
+// estimate is fine for most paragraphs, but for ones that carry inserted pauses
+// (citation edge pauses, multi-voice quote segments) the loop `paragraphMs`
+// (raw chunk ffprobe duration) UNDER-counts the assembled span, so the char-ratio
+// lands the crossing several seconds too EARLY — the flipbook then turns to the
+// next page while the audio is still reading the previous page. Meanwhile every
+// byte-anchored marker gets rewritten to true packet-PTS time at build end
+// (see the byte→time recompute), but the byte-NULL continuation markers are left
+// on the drifted estimate.
+//
+// This re-derives each existing byte-NULL marker as a char-ratio interpolation
+// between its two CORRECTED byte-anchored neighbours — the logical paragraph's
+// head marker and the next full paragraph's marker — so it rides the true audio
+// timeline. Values agree with the already-accurate markers (±a few hundred ms)
+// and only move the pathological ones. Touches ONLY byte-NULL markers; never a
+// byte-anchored one. Run tts-cont-onset-fix.php afterwards to STT-refine onsets
+// the char-ratio can only approximate. Idempotent. Returns per-marker deltas.
+//
+// See memory: reference_tts_audio_seekable_remux_and_markers.
+function ttsReanchorContinuationMarkers(PDO $db, int $audioKey, bool $apply): array
+{
+    $out = ['updated' => 0, 'skipped_no_bounds' => 0, 'examined' => 0, 'rows' => []];
+
+    $a = $db->prepare("SELECT volume_key, chapter_key FROM yy_tts_audio WHERE tts_audio_key = ?");
+    $a->execute([$audioKey]);
+    $ar = $a->fetch(PDO::FETCH_ASSOC);
+    if (!$ar) return $out;
+    $vk = (int)$ar['volume_key'];
+    $ck = (int)$ar['chapter_key'];
+
+    $ps = $db->prepare("SELECT paragraph_key, paragraph_number, paragraph_page,
+                               paragraph_is_continuation, paragraph_text_plain
+                          FROM yy_paragraph
+                         WHERE volume_key = ? AND chapter_key = ?
+                         ORDER BY paragraph_number");
+    $ps->execute([$vk, $ck]);
+    $paras = $ps->fetchAll(PDO::FETCH_ASSOC);
+    if (!$paras) return $out;
+
+    // Existing markers: byte-derived offset per paragraph_number (the corrected
+    // interpolation bounds), plus the set of byte-NULL crossings to re-anchor.
+    $ms = $db->prepare("SELECT paragraph_number, paragraph_page,
+                               tts_audio_marker_offset_ms AS off_ms,
+                               tts_audio_marker_byte_offset AS byte
+                          FROM yy_tts_audio_marker
+                         WHERE tts_audio_key = ?");
+    $ms->execute([$audioKey]);
+    $byteOffByNum = [];      // number => corrected (byte-derived) offset_ms
+    $nullMarkers  = [];      // "number_page" => current offset_ms (byte-NULL only)
+    foreach ($ms->fetchAll(PDO::FETCH_ASSOC) as $m) {
+        $n = (int)$m['paragraph_number'];
+        if ($m['byte'] !== null) {
+            $byteOffByNum[$n] = (int)$m['off_ms'];
+        } else {
+            $nullMarkers[$n . '_' . (int)$m['paragraph_page']] = (int)$m['off_ms'];
+        }
+    }
+    if (!$nullMarkers) return $out;
+
+    $upd = $db->prepare("UPDATE yy_tts_audio_marker
+                            SET tts_audio_marker_offset_ms = ?
+                          WHERE tts_audio_key = ?
+                            AND paragraph_number = ?
+                            AND paragraph_page = ?
+                            AND tts_audio_marker_byte_offset IS NULL");
+
+    $N = count($paras);
+    $i = 0;
+    while ($i < $N) {
+        $head = $paras[$i];
+        if (!empty($head['paragraph_is_continuation'])) { $i++; continue; }   // orphan tail
+        $headNum  = (int)$head['paragraph_number'];
+        $combined = rtrim((string)$head['paragraph_text_plain']);
+
+        // Collect this logical paragraph's crossings (first tail per page wins),
+        // recording the char offset where each begins in the combined text.
+        $crossings = [];
+        $j = $i + 1;
+        while ($j < $N && !empty($paras[$j]['paragraph_is_continuation'])) {
+            $tail   = $paras[$j];
+            $charAt = mb_strlen($combined . ' ');
+            $page   = $tail['paragraph_page'] !== null ? (int)$tail['paragraph_page'] : null;
+            if ($page !== null) {
+                $seen = false;
+                foreach ($crossings as $c) if ($c['page'] === $page) { $seen = true; break; }
+                if (!$seen) {
+                    $crossings[] = ['page' => $page,
+                                    'number' => (int)$tail['paragraph_number'],
+                                    'char_at' => $charAt];
+                }
+            }
+            $combined = rtrim($combined) . ' ' . ltrim((string)$tail['paragraph_text_plain']);
+            $j++;
+        }
+
+        if ($crossings) {
+            $totalLen    = max(1, mb_strlen($combined));
+            $paraStartMs = $byteOffByNum[$headNum] ?? null;   // corrected head bound
+            $nextMs      = null;
+            if ($j < $N) {
+                $nextNum = (int)$paras[$j]['paragraph_number'];
+                $nextMs  = $byteOffByNum[$nextNum] ?? null;   // corrected next bound
+            }
+            foreach ($crossings as $c) {
+                $key = $c['number'] . '_' . $c['page'];
+                if (!isset($nullMarkers[$key])) continue;      // no byte-NULL marker here
+                $out['examined']++;
+                // Both interpolation bounds must be corrected (byte-derived) and
+                // ordered, or we can't trust the re-anchor — leave the marker as-is.
+                if ($paraStartMs === null || $nextMs === null || $nextMs <= $paraStartMs) {
+                    $out['skipped_no_bounds']++;
+                    continue;
+                }
+                $ratio = min(0.999, max(0.0, $c['char_at'] / $totalLen));
+                $newMs = (int)round($paraStartMs + $ratio * ($nextMs - $paraStartMs));
+                $oldMs = $nullMarkers[$key];
+                if ($newMs === $oldMs) continue;
+                if ($apply) $upd->execute([$newMs, $audioKey, $c['number'], $c['page']]);
+                $out['updated']++;
+                $out['rows'][] = ['number' => $c['number'], 'page' => $c['page'],
+                                  'old' => $oldMs, 'new' => $newMs, 'delta' => $newMs - $oldMs];
+            }
+        }
+        $i = $j;
+    }
+
+    return $out;
 }

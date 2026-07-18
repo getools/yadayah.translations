@@ -1492,6 +1492,25 @@ if ($ffprobeForMarkers) {
     }
 }
 
+// ── Re-anchor page-break continuation markers to the corrected timeline ──
+// The synth loop emitted each byte-NULL continuation marker from the summed-
+// chunk cumulative estimate, whose `paragraphMs` under-counts any inserted
+// pauses (citation edge pauses, multi-voice quote segments) — landing the
+// crossing seconds too EARLY so the flipbook turns the page while the audio is
+// still on the previous page. The byte→time recompute above only fixed the
+// byte-anchored markers; re-interpolate the byte-NULL ones between their now-
+// corrected neighbours. The detached tts-cont-onset-fix.php spawned below then
+// STT-refines every crossing it can confidently match, leaving this char-ratio
+// value only where STT can't. See reference_tts_audio_seekable_remux_and_markers.
+try {
+    $reanchor = ttsReanchorContinuationMarkers($db, $audioKey, true);
+    if (($reanchor['updated'] ?? 0) > 0) {
+        fwrite(STDERR, "re-anchored {$reanchor['updated']} continuation marker(s) to corrected timeline\n");
+    }
+} catch (\Throwable $e) {
+    error_log("[tts-build $audioKey] continuation re-anchor failed (non-fatal): " . $e->getMessage());
+}
+
 // Re-mux the byte-concatenated MP3 so it's actually SEEKABLE in browsers.
 // A naive byte-concat of per-paragraph MP3s produces a stream with no
 // (or a wrong, first-segment-only) Xing/TOC header. Chrome can't seek

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784181607">
+    <meta name="page-version" content="1784296806">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -5196,6 +5196,228 @@ function closeTuneNotePopover() {
     pop.style.display = 'none';
 }
 
+// ── "# occurrences" click-through ───────────────────────────────────────
+// Opens a modal listing every Series / Volume / Chapter whose paragraphs
+// contain this tune's word (checkboxes, all pre-checked), inside a scrollable
+// sub-window so the panel can't outgrow the viewport. The operator then
+// confirms whether the paragraphs inside the checked chapters should be
+// re-queued so their audio re-renders with the current pronunciation.
+async function openWordLocations(tuneKey, print) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:10011;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;';
+    var panel = document.createElement('div');
+    panel.style.cssText = 'background:#fff;border-radius:8px;box-shadow:0 10px 40px rgba(0,0,0,0.3);padding:16px 18px;width:580px;max-width:100%;max-height:calc(100vh - 80px);display:flex;flex-direction:column;';
+    panel.innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex:0 0 auto;">'
+        +   '<h3 style="margin:0;font-size:1.02rem;">Occurrences of &ldquo;' + escapeHtml(print) + '&rdquo;</h3>'
+        +   '<button type="button" class="wl-x" title="Close" style="border:none;background:none;font-size:1.3rem;line-height:1;cursor:pointer;color:#888;">&times;</button>'
+        + '</div>'
+        + '<div class="wl-summary" style="flex:0 0 auto;color:#666;font-size:0.85rem;margin-bottom:8px;">Loading…</div>'
+        + '<div class="wl-toolbar" style="flex:0 0 auto;display:none;gap:14px;margin-bottom:6px;font-size:0.8rem;">'
+        +   '<a href="#" class="wl-all"  style="color:#31345A;">Check all</a>'
+        +   '<a href="#" class="wl-none" style="color:#31345A;">Uncheck all</a>'
+        + '</div>'
+        + '<div class="wl-tree" style="flex:1 1 auto;overflow-y:auto;border:1px solid #e2e2ea;border-radius:6px;padding:8px 10px;min-height:80px;"></div>'
+        + '<div class="wl-foot" style="flex:0 0 auto;margin-top:10px;display:none;">'
+        +   '<p class="wl-prompt" style="margin:0 0 8px;font-size:0.85rem;color:#333;line-height:1.35;"></p>'
+        +   '<div class="wl-status" style="font-size:0.82rem;min-height:1.2em;margin-bottom:6px;color:#666;"></div>'
+        +   '<div style="display:flex;justify-content:flex-end;gap:8px;">'
+        +     '<button type="button" class="wl-cancel btn-sm btn-sec">Cancel</button>'
+        +     '<button type="button" class="wl-go btn-sm" style="background:#31345A;color:#fff;border-color:#31345A;">Queue regeneration</button>'
+        +   '</div>'
+        + '</div>';
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    var close = function () { if (overlay.parentNode) document.body.removeChild(overlay); };
+    panel.querySelector('.wl-x').addEventListener('click', close);
+    panel.querySelector('.wl-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+
+    var summary = panel.querySelector('.wl-summary');
+    var toolbar = panel.querySelector('.wl-toolbar');
+    var tree    = panel.querySelector('.wl-tree');
+    var foot    = panel.querySelector('.wl-foot');
+    var promptEl = panel.querySelector('.wl-prompt');
+    var statusEl = panel.querySelector('.wl-status');
+    var goBtn    = panel.querySelector('.wl-go');
+
+    var data;
+    try {
+        data = await api('/admin-tts-config.php?action=word_locations&tts_key='
+            + encodeURIComponent(TTS_KEY) + '&tts_tune_key=' + encodeURIComponent(tuneKey));
+    } catch (e) {
+        summary.textContent = 'Failed to load: ' + e.message;
+        summary.style.color = '#c0392b';
+        return;
+    }
+    if (!data || !data.series || !data.series.length) {
+        summary.textContent = 'No occurrences found in the corpus.';
+        return;
+    }
+
+    summary.textContent = data.total_occurrences + ' occurrence'
+        + (data.total_occurrences === 1 ? '' : 's') + ' across ' + data.total_chapters
+        + ' chapter' + (data.total_chapters === 1 ? '' : 's') + ' in '
+        + data.series.length + ' series.';
+    // The "#" column counts the whole corpus; this tree lists only active
+    // volumes. Note the shortfall so the two numbers don't look inconsistent.
+    var hidden = (data.stored_count || 0) - data.total_occurrences;
+    if (hidden > 0) {
+        summary.textContent += ' (' + hidden + ' more in inactive volumes, not shown.)';
+    }
+
+    var serGroups = [];   // { cb, chaps:[chapterCheckbox…] }
+    var volGroups = [];
+
+    function setGroup(g) {
+        if (!g.chaps.length) return;
+        var all  = g.chaps.every(function (x) { return x.checked; });
+        var none = g.chaps.every(function (x) { return !x.checked; });
+        g.cb.checked = all;
+        g.cb.indeterminate = !all && !none;
+    }
+    function refreshParents() { volGroups.forEach(setGroup); serGroups.forEach(setGroup); }
+    function checkedChaps() { return Array.prototype.slice.call(panel.querySelectorAll('.wl-chap:checked')); }
+    function updatePrompt() {
+        var n = checkedChaps().length;
+        promptEl.textContent = n
+            ? 'Queue the paragraphs containing “' + print + '” inside ' + n
+              + ' checked chapter' + (n === 1 ? '' : 's')
+              + ' to be regenerated with the current pronunciation?'
+            : 'No chapters checked — nothing to regenerate.';
+        goBtn.disabled = !n;
+        goBtn.style.opacity = n ? '1' : '0.5';
+        goBtn.style.cursor  = n ? 'pointer' : 'default';
+    }
+
+    data.series.forEach(function (s) {
+        var sBlock = document.createElement('div');
+        sBlock.style.cssText = 'margin-bottom:6px;';
+        var sHead = document.createElement('label');
+        sHead.style.cssText = 'display:flex;align-items:center;gap:8px;font-weight:700;color:#31345A;padding:3px 0;cursor:pointer;';
+        var sCb = document.createElement('input'); sCb.type = 'checkbox'; sCb.checked = true; sCb.className = 'wl-ser';
+        var sTxt = document.createElement('span'); sTxt.textContent = s.label + '  (' + s.occurrences + ')';
+        sHead.appendChild(sCb); sHead.appendChild(sTxt); sBlock.appendChild(sHead);
+
+        var serChaps = [];
+        s.volumes.forEach(function (v) {
+            var vHead = document.createElement('label');
+            vHead.style.cssText = 'display:flex;align-items:center;gap:8px;padding:2px 0 2px 22px;color:#333;cursor:pointer;font-size:0.9rem;';
+            var vCb = document.createElement('input'); vCb.type = 'checkbox'; vCb.checked = true; vCb.className = 'wl-vol';
+            var vTxt = document.createElement('span'); vTxt.textContent = v.label + '  (' + v.occurrences + ')';
+            vHead.appendChild(vCb); vHead.appendChild(vTxt); sBlock.appendChild(vHead);
+
+            var volChaps = [];
+            v.chapters.forEach(function (c) {
+                var cRow = document.createElement('label');
+                cRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:1px 0 1px 46px;font-size:0.86rem;color:#444;cursor:pointer;';
+                var cCb = document.createElement('input'); cCb.type = 'checkbox'; cCb.checked = true; cCb.className = 'wl-chap';
+                cCb.dataset.chapterKey = c.chapter_key;
+                var cTxt = document.createElement('span');
+                cTxt.textContent = c.label + '  (' + c.occurrences + ')';
+                cRow.appendChild(cCb); cRow.appendChild(cTxt);
+
+                var badge = document.createElement('span');
+                badge.style.cssText = 'margin-left:auto;font-size:0.72rem;padding:1px 7px;border-radius:8px;white-space:nowrap;';
+                if (!c.has_audio) {
+                    // Nothing built yet → nothing to re-queue; it will pick up the
+                    // new pronunciation whenever it's first built. Leave unchecked.
+                    badge.textContent = 'not built';
+                    badge.style.background = '#f0f0f4'; badge.style.color = '#888';
+                    cCb.checked = false;
+                    cRow.title = 'No audio built for this chapter yet — it will use the current pronunciation when first built.';
+                } else {
+                    var st = (c.audio_statuses || []).join(', ');
+                    var done = st.indexOf('complete') >= 0;
+                    badge.textContent = st || 'built';
+                    badge.style.background = done ? '#e6f4ea' : '#fdf3e0';
+                    badge.style.color      = done ? '#1e7e34' : '#8a6d3b';
+                }
+                cRow.appendChild(badge);
+                sBlock.appendChild(cRow);
+                volChaps.push(cCb); serChaps.push(cCb);
+                cCb.addEventListener('change', function () { refreshParents(); updatePrompt(); });
+            });
+            volGroups.push({ cb: vCb, chaps: volChaps });
+            vCb.addEventListener('change', function () {
+                volChaps.forEach(function (x) { x.checked = vCb.checked; });
+                refreshParents(); updatePrompt();
+            });
+        });
+        serGroups.push({ cb: sCb, chaps: serChaps });
+        sCb.addEventListener('change', function () {
+            serChaps.forEach(function (x) { x.checked = sCb.checked; });
+            refreshParents(); updatePrompt();
+        });
+        tree.appendChild(sBlock);
+    });
+
+    toolbar.style.display = 'flex';
+    foot.style.display = 'block';
+    panel.querySelector('.wl-all').addEventListener('click', function (e) {
+        e.preventDefault();
+        panel.querySelectorAll('.wl-chap').forEach(function (x) { x.checked = true; });
+        refreshParents(); updatePrompt();
+    });
+    panel.querySelector('.wl-none').addEventListener('click', function (e) {
+        e.preventDefault();
+        panel.querySelectorAll('.wl-chap').forEach(function (x) { x.checked = false; });
+        refreshParents(); updatePrompt();
+    });
+
+    refreshParents();
+    updatePrompt();
+
+    goBtn.addEventListener('click', async function () {
+        // After a successful queue the button relabels to "Done" — a second
+        // click then just dismisses the popover.
+        if (goBtn.dataset.done) { close(); return; }
+        var keys = checkedChaps().map(function (x) { return parseInt(x.dataset.chapterKey, 10); })
+                                 .filter(function (k) { return k > 0; });
+        if (!keys.length) return;
+        goBtn.disabled = true;
+        var goLabel = goBtn.textContent; goBtn.textContent = '⏳ Queuing…';
+        statusEl.style.color = '#666';
+        statusEl.textContent = 'Queuing ' + keys.length + ' chapter' + (keys.length === 1 ? '' : 's') + '…';
+        try {
+            var res = await api('/admin-tts-config.php', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'queue_word_regen', tts_tune_key: tuneKey, chapter_keys: keys, apply: true })
+            });
+            var t = res.totals || {};
+            var requeued = t.requeued || 0, alreadyP = t.already_pending || 0, paused = t.primed_paused || 0;
+            var plur = function (n) { return n === 1 ? '' : 's'; };
+            var pieces = [];
+            if (requeued > 0) {
+                // Only the matching paragraphs are re-queued — the rest of each
+                // chapter is reused from cache, not rebuilt.
+                pieces.push(requeued + ' paragraph' + plur(requeued) + ' re-queued across '
+                    + (t.chapters_touched || 0) + ' chapter' + plur(t.chapters_touched || 0));
+            }
+            if (alreadyP > 0) pieces.push(alreadyP + ' already in the queue');
+            if (paused > 0)   pieces.push(paused + ' primed in paused chapter' + plur(paused) + ' (render when resumed)');
+            var msg;
+            if (!pieces.length) {
+                msg = 'No matching paragraphs to re-queue.';
+            } else {
+                msg = pieces.join('; ') + '.';
+                if (requeued > 0) msg += ' The build watchdog will regenerate them.';
+                else msg = 'Nothing to re-queue — ' + msg;
+            }
+            statusEl.style.color = '#1e7e34';
+            statusEl.textContent = msg;
+            goBtn.textContent = 'Done';
+            goBtn.dataset.done = '1';
+            goBtn.disabled = false;   // re-enable so "Done" can dismiss the popover
+        } catch (e) {
+            statusEl.style.color = '#c0392b';
+            statusEl.textContent = 'Failed: ' + e.message;
+            goBtn.disabled = false; goBtn.textContent = goLabel;
+        }
+    });
+}
+
 function buildTuneRow(t) {
     var tr = document.createElement('tr');
     if (!t.tts_tune_active_flag) tr.className = 'inactive';
@@ -5237,7 +5459,11 @@ function buildTuneRow(t) {
             + '<button type="button" class="f-bi-btn f-italic' + (italicOn ? ' on' : '') + '" title="Restrict match to italic text">I</button>'
             + '<button type="button" class="f-bi-btn f-case'   + (caseOn   ? ' on' : '') + '" title="Case-sensitive match (default is case-insensitive)">Aa</button>'
         + '</div></td>' +
-        '<td class="f-count" style="text-align:right;font-variant-numeric:tabular-nums;color:#555;">' + count + '</td>' +
+        '<td class="f-count" style="text-align:right;font-variant-numeric:tabular-nums;color:#555;">'
+            + (count > 0
+                ? '<button type="button" class="f-occ-btn" data-act="occ" title="Show the Series / Volumes / Chapters that contain this word — and re-queue them for a new pronunciation" style="background:none;border:none;padding:0;margin:0;font:inherit;font-variant-numeric:tabular-nums;color:#31345A;cursor:pointer;border-bottom:1px dotted #9aa;">' + count + '</button>'
+                : count)
+        + '</td>' +
         '<td class="col-sub"><label style="display:flex;align-items:center;gap:6px;">'
             + '<input type="radio" name="' + grp + '" class="f-type-radio" value="sub" title="Use SUB for this rule"' + subChecked + '>'
             + '<input type="text" class="f-sub" value="' + escapeHtml(t.tts_tune_phonetic_sub || '') + '" style="flex:1;">'
@@ -5584,6 +5810,11 @@ async function handleTuneAction(tr, act) {
     try {
         if (act === 'note') {
             openTuneNotePopover(tr);
+            return;
+        }
+        if (act === 'occ') {
+            if (!key) return;   // unsaved row has no corpus count to explore
+            openWordLocations(key, print);
             return;
         }
         if (act === 'del') {

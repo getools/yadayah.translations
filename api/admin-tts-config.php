@@ -318,6 +318,21 @@ if ($method === 'GET' && $action === 'list_providers') {
     jsonResponse(['providers' => $rows]);
 }
 
+// Series → Volumes → Chapters tree of everywhere ONE tune matches, with per
+// chapter occurrence counts + built-audio status. Powers the click-through on
+// the "# occurrences" column: the operator sees exactly where a word lives and
+// which chapters can be re-queued so their audio picks up a new pronunciation.
+if ($method === 'GET' && $action === 'word_locations') {
+    $tuneKey = (int)($_GET['tts_tune_key'] ?? 0);
+    if (!$tuneKey) errorResponse('tts_tune_key required');
+    $st = $db->prepare("SELECT * FROM yy_tts_tune WHERE tts_tune_key = ?");
+    $st->execute([$tuneKey]);
+    $tune = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$tune) errorResponse('tune not found', 404);
+    $ttsKey = (int)($_GET['tts_key'] ?? 0) ?: (int)$tune['tts_key'];
+    jsonResponse(ttsWordLocations($db, $ttsKey, $tune));
+}
+
 if ($method !== 'POST') errorResponse('Unknown action');
 
 if ($action === 'save_system') {
@@ -655,6 +670,51 @@ if ($action === 'delete_tune') {
     // any sibling's count.
     $db->prepare("DELETE FROM yy_tts_tune WHERE tts_tune_key = ?")->execute([$tuneKey]);
     jsonResponse(['ok' => true]);
+}
+
+// Re-queue the checked chapters so paragraphs matching ONE tune re-render with
+// the current pronunciation. Mirrors the _*_resweep.php scripts: delete only
+// the matching paragraphs' positional part files and flip a 'complete' chapter
+// to 'pending' so the build watchdog rebuilds it, reusing every unaffected
+// cached part. Send apply=false for a dry run (counts only, no disk/DB writes).
+if ($action === 'queue_word_regen') {
+    $tuneKey     = (int)($data['tts_tune_key'] ?? 0);
+    $chapterKeys = $data['chapter_keys'] ?? [];
+    $apply       = array_key_exists('apply', $data) ? !empty($data['apply']) : true;
+    if (!$tuneKey) errorResponse('tts_tune_key required');
+    if (!is_array($chapterKeys) || !$chapterKeys) errorResponse('chapter_keys required');
+
+    $st = $db->prepare("SELECT * FROM yy_tts_tune WHERE tts_tune_key = ?");
+    $st->execute([$tuneKey]);
+    $tune = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$tune) errorResponse('tune not found', 404);
+    $ttsKey = (int)$tune['tts_key'];
+
+    // Resolve the repo root that holds /u (mirrors the resweep scripts).
+    $audioBase = is_dir(dirname(__DIR__) . '/u') ? dirname(__DIR__)
+               : (is_dir('/var/www/html/u') ? '/var/www/html' : dirname(__DIR__));
+
+    $totals = ['chapters' => 0, 'chapters_touched' => 0, 'audio_rows' => 0,
+               'affected_paragraphs' => 0, 'requeued' => 0, 'already_pending' => 0,
+               'primed_paused' => 0, 'parts_deleted' => 0, 'reflagged' => 0];
+    $perChapter = [];
+    foreach ($chapterKeys as $ck) {
+        $ck = (int)$ck;
+        if ($ck <= 0) continue;
+        $r = ttsQueueWordRegenForChapter($db, $audioBase, $ttsKey, $ck, $tune, $apply);
+        $perChapter[] = $r;
+        $totals['chapters']            += 1;
+        if ($r['requeued'] > 0) $totals['chapters_touched'] += 1;
+        $totals['audio_rows']          += $r['audio_rows'];
+        $totals['affected_paragraphs'] += $r['affected_paragraphs'];
+        $totals['requeued']            += $r['requeued'];
+        $totals['already_pending']     += $r['already_pending'];
+        $totals['primed_paused']       += $r['primed_paused'];
+        $totals['parts_deleted']       += $r['parts_deleted'];
+        $totals['reflagged']           += $r['reflagged'];
+    }
+    jsonResponse(['ok' => true, 'applied' => $apply, 'print' => (string)$tune['tts_tune_print'],
+                  'totals' => $totals, 'chapters' => $perChapter]);
 }
 
 if ($action === 'save_pause') {
