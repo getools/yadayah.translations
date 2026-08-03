@@ -148,11 +148,16 @@ def reparse_volume(vol_key, dry_run=False, verbose=False):
         raise SystemExit(f"No yy_volume row for volume_key={vol_key}")
     _, series_key, pdf_name, vol_code, label, parse_flag = row
 
-    if not parse_flag:
-        logging.info(f"volume_parse_flag is FALSE for {label} (key {vol_key}); skipping")
-        if not dry_run:
-            update_status(conn, vol_key, "skipped", "volume_parse_flag is disabled")
-        return
+    # volume_parse_flag scopes TRANSLATION / glossary extraction only. Every
+    # book gets its paragraphs parsed unconditionally — the flipbook and the
+    # TTS narrator both read yy_paragraph, so skipping the parse would leave
+    # a book unreadable and un-narratable. (Before 2026-08-03 this flag short-
+    # circuited the whole parser with status='skipped', which is why opted-out
+    # books showed 0 paragraphs.)
+    want_translations = bool(parse_flag)
+    if not want_translations:
+        logging.info(f"volume_parse_flag is FALSE for {label} (key {vol_key}); "
+                     "parsing paragraphs only, no translations")
 
     if not pdf_name:
         msg = "No volume_pdf — generate the PDF (via the YY PDF Generator App) first"
@@ -178,12 +183,13 @@ def reparse_volume(vol_key, dry_run=False, verbose=False):
 
     if not dry_run:
         update_status(conn, vol_key, "running",
-                      f"Extracting paragraphs + translations from {pdf_name}")
+                      ("Extracting paragraphs + translations from " if want_translations
+                       else "Extracting paragraphs from ") + pdf_name)
     logging.info(f"Reparsing volume {vol_key} ({label}) from {pdf_path}")
 
     # ── Extract paragraphs + translations from the PDF ─────────────────
     paragraphs = bp.parse_pdf(str(pdf_path), str(bundle_dir) if bundle_dir else None)
-    translations = bt.extract_translations(paragraphs)
+    translations = bt.extract_translations(paragraphs) if want_translations else []
     logging.info(f"  Extracted {len(paragraphs)} paragraphs, {len(translations)} translations")
 
     # The PyMuPDF parse above runs for minutes on a large book; by the time
@@ -331,6 +337,10 @@ def reparse_volume(vol_key, dry_run=False, verbose=False):
         return
 
     # ── Live: delete + insert ──────────────────────────────────────────
+    # The yy_translation delete is unconditional on purpose: with
+    # volume_parse_flag off, trans_rows is empty, so any rows left from a
+    # period when the book WAS opted in are cleared. Nothing here is hand-
+    # authored — every row is re-derivable by re-running this parser.
     cur.execute("DELETE FROM yy_paragraph   WHERE volume_key = %s", (vol_key,))
     cur.execute("DELETE FROM yy_translation WHERE volume_key = %s", (vol_key,))
     conn.commit()
@@ -387,7 +397,8 @@ def reparse_volume(vol_key, dry_run=False, verbose=False):
 
     update_status(conn, vol_key, "success",
         f"{len(para_rows)} paragraphs ({deactivated} junk deactivated), "
-        f"{len(trans_rows)} translations ({skipped} cite-unresolvable)")
+        + (f"{len(trans_rows)} translations ({skipped} cite-unresolvable)"
+           if want_translations else "translations skipped (parse flag off)"))
     logging.info("done")
     cur.close()
     conn.close()

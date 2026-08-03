@@ -90,7 +90,7 @@
             .filters select { min-width: 140px; }
         }
     </style>
-<script src="/js/site-nav.js?v=55"></script>
+<script src="/js/site-nav.js?v=56"></script>
 </head>
 <body>
 
@@ -301,14 +301,19 @@ function renderCard(r) {
     var locationHtml = locationText
         ? (locHref ? '<a href="' + esc(locHref) + '" target="_blank">' + locationText + '</a>' : locationText)
         : '';
+    // Uploaded icon (admin → Books, derived from the 2D front) wins; fall
+    // back to the legacy sNNvNN convention under /images/covers.
     var coverHtml = '<div class="cover"></div>';
-    if (r.volume_code) {
+    var coverUrl = r.volume_img_icon || '';
+    if (!coverUrl && r.volume_code) {
         var m = String(r.volume_code).match(/s\d{2}v\d{2}/i);
         if (m) {
-            var coverUrl = '/images/covers/YY.book_.3d.6x9-vertical-softcover-spine.00490x00600.'
-                         + m[0].toLowerCase() + '-245x300.jpg';
-            coverHtml = '<div class="cover"><img src="' + esc(coverUrl) + '" alt="" loading="lazy" onerror="this.remove()"></div>';
+            coverUrl = '/images/covers/YY.book_.3d.6x9-vertical-softcover-spine.00490x00600.'
+                     + m[0].toLowerCase() + '-245x300.jpg';
         }
+    }
+    if (coverUrl) {
+        coverHtml = '<div class="cover"><img src="' + esc(coverUrl) + '" alt="" loading="lazy" onerror="this.remove()"></div>';
     }
     var snippetHtml = r.snippet || '';
     return '<div class="ss-result-card">'

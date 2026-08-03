@@ -113,68 +113,101 @@ function ttsLATailSurvivesExpected(string $path, string $expectedWord, string $t
 }
 
 /**
- * Does the clip's HEAD (first $cutS s) begin with the expected word's onset (a
- * shared 2-char prefix), rather than a filler? STT of a ~0.20 s fragment is
- * noisy, but for a clean word it lands on the real onset ("Bib" for bibliography)
- * while an artifact lands on the filler ("uh"/"a"). Empty head (leading silence)
- * counts as a match (no filler present). STT error → true (can't confirm a filler
- * → don't flag). Returns true when the head looks like the real word onset.
+ * First token (lowercased letters) of the clip's HEAD (first $cutS s), via STT.
+ * '' if empty/silent or STT unavailable. STT of a ~0.20 s fragment is noisy but
+ * for a clean word it lands on the real onset ("bib"/"in"/"is") while an artifact
+ * lands on a filler ("uh"/"a"/"i").
  */
-function ttsLAHeadMatchesOnset(string $path, string $expectedWord, string $tmpDir,
-                               float $cutS = 0.20, string $ffmpegBin = 'ffmpeg'): bool {
-    if ($expectedWord === '' || !function_exists('gpuTranscribe')) return true;
+function ttsLAHeadToken(string $path, string $tmpDir, float $cutS = 0.20, string $ffmpegBin = 'ffmpeg'): string {
+    if (!function_exists('gpuTranscribe')) return '';
     $wav = tempnam($tmpDir, 'la-head-') . '.wav';
     $cmd = escapeshellarg($ffmpegBin) . ' -hide_banner -loglevel error -y -t '
          . sprintf('%.3f', $cutS) . ' -i ' . escapeshellarg($path) . ' ' . escapeshellarg($wav) . ' 2>/dev/null';
     @shell_exec($cmd);
-    if (!is_file($wav) || filesize($wav) === 0) { @unlink($wav); return true; }
+    if (!is_file($wav) || filesize($wav) === 0) { @unlink($wav); return ''; }
     $r = gpuTranscribe($wav, ['vad_filter' => false, 'language' => 'en', 'word_timestamps' => false, 'timeout' => 60]);
     @unlink($wav);
     $txt = mb_strtolower(trim(preg_replace('/[^\p{L} ]/u', ' ', $r['data']['text'] ?? '')));
-    if (!preg_match('/[a-z]+/', $txt, $m)) return true;      // empty head (leading silence) = no filler
-    $hw = $m[0];
-    // Shared 2-char prefix ("bib"/"bibliography", "she"/"shepherd") = real onset.
-    if (mb_strlen($hw) >= 2) {
-        $ep = mb_substr($expectedWord, 0, 2);
-        $hp = mb_substr($hw, 0, 2);
-        if (strpos($expectedWord, $hp) === 0 || strpos($hw, $ep) === 0) return true;
-    }
-    // 1-char / no-2-prefix head (e.g. the bare "a"/"uh" filler): a match only if
-    // the expected word actually starts with it ("a" onset of "afterword"), so a
-    // bare filler on a non-matching word ("a" before "bibliography") stays false.
-    return strpos($expectedWord, $hw) === 0;
+    return preg_match('/[a-z]+/', $txt, $m) ? $m[0] : '';
+}
+
+/**
+ * First word (lowercased letters) of the WHOLE clip's STT. Unlike "uh" (which the
+ * full-clip STT swallows), a leading "i"/"eye"/"my" survives in the full
+ * transcript — so for the i-word ambiguous case this is what tells a clean
+ * "Introduction" (full first word "introduction") from an "I, Introduction"
+ * artifact (full first word "iintroduction"/"eye"/"my"). '' on error.
+ */
+function ttsLAFullText(string $path): string {
+    if (!function_exists('gpuTranscribe')) return '';
+    $r = gpuTranscribe($path, ['vad_filter' => false, 'language' => 'en', 'word_timestamps' => false, 'timeout' => 60]);
+    return trim(preg_replace('/\s+/u', ' ', mb_strtolower(preg_replace('/[^\p{L} ]/u', ' ', $r['data']['text'] ?? ''))));
 }
 
 /**
  * Detect a leading filler on raw mp3 $bytes given the expected first word.
  * Returns ['artifact'=>bool, 'dur'=>int ms, 'diag'=>string]. Never throws.
  *
- * DECISION = tail-survives-expected AND NOT head-matches-onset. Neither signal is
- * reliable alone: tail-survives false-positives on a clean LONG word (STT
- * reconstructs "bibliography" from the 0.20 s-trimmed onset), and a head STT is
- * noisy on fricative onsets. Together they are precise: an artifact has the full
- * word after the cut ($tail) AND a filler, not the onset, at the head; a clean
- * long word has the word after the cut but its real onset ("bib") at the head, so
- * head-matches vetoes it. The acoustic early-gap is diagnostic only (it misses
- * gaps past a fixed window — see git history — so it is NOT in the decision).
+ * Necessary condition = TAIL-SURVIVES: after cutting the first 0.20 s, STT still
+ * returns the full expected word (the lead was extra). tail alone false-positives
+ * on a clean LONG word (STT reconstructs "bibliography" from the trimmed onset),
+ * so when tail survives we look at the HEAD (first 0.20 s STT):
+ *   - shares a 2-char prefix with the word ("bib"/"in"/"is") → real onset → CLEAN.
+ *   - a 2+char head that does NOT match → a clear filler ("uh") → ARTIFACT.
+ *   - a 1-char head that is NOT the word's first letter ("a" before "bibliography")
+ *       → bare-vowel filler → ARTIFACT.
+ *   - a 1-char head that IS the word's first letter ("i" for BOTH the "I,
+ *       Introduction" filler AND a clean "Islamic" whose "Is-" onset clipped to
+ *       "i") → AMBIGUOUS → decided by the acoustic early-gap: a filler leaves a
+ *       leading blip + near-silence valley before the word; a clean onset is
+ *       continuous. (This is the ONLY place the gap is in the decision; it is
+ *       reliable for this narrow leading-vowel-vs-continuous-onset call.)
  */
 function ttsLADetect(string $bytes, string $expectedWord, string $tmpDir,
                      string $ffmpegBin = 'ffmpeg', string $ffprobeBin = 'ffprobe'): array {
     $mp3 = tempnam($tmpDir, 'la-det-') . '.mp3';
     @file_put_contents($mp3, $bytes);
     $dur = ttsLADurationMs($mp3, $ffprobeBin);
-    $tail = false; $headOk = true; $gap = false;
+    $tail = false; $art = false; $ff = '-'; $hw = '-'; $branch = '';
     try {
+        // Necessary: after cutting 0.20 s, STT still returns the full expected word.
         $tail = ttsLATailSurvivesExpected($mp3, $expectedWord, $tmpDir, 0.20, $ffmpegBin);
-        // Only pay for the head STT when the tail survived (the only case that
-        // could be an artifact); otherwise it's already clean.
-        $headOk = $tail ? ttsLAHeadMatchesOnset($mp3, $expectedWord, $tmpDir, 0.20, $ffmpegBin) : true;
-        $gap    = ttsLAHasEarlyGap($mp3, $ffmpegBin);
-    } catch (\Throwable $e) { /* fall through as not-artifact */ }
+        if ($tail && $expectedWord !== '') {
+            // PRIMARY signal = the FULL-clip STT's first word. A clean clip (incl.
+            // a long word whose 0.20 s-trimmed onset STT reconstructs) starts with
+            // the word itself → its first word shares the expected 4-char prefix.
+            // A leading "i"/"eye"/"my"/"a" filler SURVIVES in the full transcript
+            // ("iIntroduction"/"Eye Introduction"/"My introduction"/"a X") so the
+            // first word does NOT match → artifact. The head STT (first 0.20 s) is
+            // too noisy to route on (the SAME "I,Introduction" gives head "i" on
+            // one synth, "bye"/"on" on another) — it's used ONLY to recover the one
+            // case the full STT can't see: a leading "uh"/"ah" that the full STT
+            // SWALLOWS (full first word = the word, but head = a known filler).
+            $full = ttsLAFullText($mp3);
+            $ff   = preg_match('/[a-z]+/', $full, $m) ? $m[0] : '';
+            $p4   = mb_substr($expectedWord, 0, 4);
+            $onsetFull = ($ff !== '' && $p4 !== '' && strpos($ff, $p4) === 0);
+            // Is the expected word actually PRESENT in the full transcript? A real
+            // leading filler leaves it there ("i introduction"/"iintroduction");
+            // a full-clip garble of a hard word drops it ("Addendum" → "keep your
+            // dendem" has no "addendum") — that's a clean word STT mangled, not a
+            // filler, so it must NOT flag.
+            $hasWord = ($full !== '' && strpos($full, $expectedWord) !== false);
+            if ($onsetFull) {
+                $hw = ttsLAHeadToken($mp3, $tmpDir, 0.20, $ffmpegBin);
+                $FILLERS = ['uh','ah','eh','um','oh','er','huh','hmm','mm','umm','erm','uhh','ahh','ohh','hm','uhm'];
+                $art = in_array($hw, $FILLERS, true);
+                $branch = $art ? "filler-swallowed[$hw]" : "onset-full[$ff]";
+            } elseif ($hasWord) {
+                $art = true; $branch = "lead-extra[$ff]";
+            } else {
+                $art = false; $branch = "full-garble[$ff]";   // word absent from full STT = mangled clean word, not a filler
+            }
+        }
+    } catch (\Throwable $e) { $art = false; $branch = 'err'; }
     @unlink($mp3);
-    $art = $tail && !$headOk;
     return ['artifact' => $art, 'dur' => $dur,
-            'diag' => 'tail=' . ($tail ? 1 : 0) . ' headOk=' . ($headOk ? 1 : 0) . ' gap=' . ($gap ? 1 : 0) . ' dur=' . $dur];
+            'diag' => 'tail=' . ($tail ? 1 : 0) . " ff=[$ff] head=[$hw] $branch dur=$dur"];
 }
 
 /**

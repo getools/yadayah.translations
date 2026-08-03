@@ -607,8 +607,10 @@ process_job() {
     # ── Phase 4: paragraph + translation extraction ──────────────────
     # Runs the dedicated per-volume parser which deletes ONLY this volume's
     # rows in yy_paragraph + yy_translation and re-inserts from the new docx.
-    # Honors yy_volume.volume_parse_flag (if FALSE, parser exits early with
-    # status='skipped'). Failures here log a monitor event but do NOT mark
+    # Paragraphs are extracted for EVERY volume — the flipbook and the TTS
+    # narrator both read yy_paragraph. yy_volume.volume_parse_flag scopes only
+    # the translation/glossary half (if FALSE, the parser writes paragraphs and
+    # no translations). Failures here log a monitor event but do NOT mark
     # the docx→pdf→flip pipeline as failed — the artifacts are still good.
     if [ -x /opt/yada-www/parsers/parse_volume_from_bundle.py ]; then
         log "Running paragraph + translation extraction (capped at $PARSER_MEM_MAX)"
@@ -919,7 +921,11 @@ fi
 
 # ── Phase 5: parse-only sweep ─────────────────────────────────────
 # Pick up volumes that already have a docx but no parse output (or status
-# 'queued'/'error'/'stale'). These appear as 'stale' in the admin UI because
+# 'queued'/'error'/'stale'/'skipped'). 'skipped' is the legacy marker the
+# parser wrote when volume_parse_flag was FALSE, back when that flag short-
+# circuited the whole parse; paragraphs are now parsed for every book (the
+# flag only scopes translations), so those volumes are eligible again and
+# drain one per tick. These appear as 'stale' in the admin UI because
 # their parse work was never triggered (e.g. docx was uploaded before the
 # parser pipeline existed, or a previous parse errored). Process at most 1
 # per tick to avoid hogging the host. The next 2-min tick picks up the next.
@@ -940,7 +946,7 @@ fi
 # the freshly-rendered case in-band. Mirrors the same guard the stale-sweep
 # uses at Phase 6.
 if [ -x /opt/yada-www/parsers/parse_volume_from_bundle.py ]; then
-    parse_target=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -At -c "SELECT volume_key FROM yy_volume WHERE volume_docx IS NOT NULL AND (volume_parse_status IS NULL OR volume_parse_status IN ('queued','stale')) AND COALESCE(volume_pipeline_status,'') NOT IN ('queued','running','waiting-docx','error','warning','flipbook-running') ORDER BY CASE WHEN volume_parse_status='queued' THEN 0 ELSE 1 END, volume_key LIMIT 1")
+    parse_target=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -At -c "SELECT volume_key FROM yy_volume WHERE volume_docx IS NOT NULL AND (volume_parse_status IS NULL OR volume_parse_status IN ('queued','stale','skipped')) AND COALESCE(volume_pipeline_status,'') NOT IN ('queued','running','waiting-docx','error','warning','flipbook-running') ORDER BY CASE WHEN volume_parse_status='queued' THEN 0 ELSE 1 END, volume_key LIMIT 1")
     if [ -n "$parse_target" ]; then
         log "Parse-sweep: picking up volume $parse_target"
         DID_WORK=1

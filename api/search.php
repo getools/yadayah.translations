@@ -341,6 +341,7 @@ try {
     $stmt = $pdo->prepare("
         SELECT v.volume_label AS volume_label,
                v.volume_code AS volume_code,
+               v.volume_img_icon AS volume_img_icon,
                v.volume_flip_code AS flip_code,
                v.volume_pdf AS volume_pdf,
                s.series_label AS series_label,
@@ -501,6 +502,7 @@ if ($total > 0) {
         $stmt = $pdo->prepare("
             SELECT v.volume_label AS volume_label,
                    v.volume_code AS volume_code,
+                   v.volume_img_icon AS volume_img_icon,
                    v.volume_flip_code AS flip_code,
                    v.volume_pdf AS volume_pdf,
                    s.series_label AS series_label,
@@ -558,6 +560,7 @@ if ($total > 0) {
         $stmt = $pdo->prepare("
             SELECT v.volume_label AS volume_label,
                    v.volume_code AS volume_code,
+                   v.volume_img_icon AS volume_img_icon,
                    v.volume_flip_code AS flip_code,
                    v.volume_pdf AS volume_pdf,
                    s.series_label AS series_label,
@@ -628,6 +631,7 @@ if ($total > 0) {
             $stmt = $pdo->prepare("
                 SELECT v.volume_label AS volume_label,
                        v.volume_code AS volume_code,
+                       v.volume_img_icon AS volume_img_icon,
                        v.volume_flip_code AS flip_code,
                        v.volume_pdf AS volume_pdf,
                        s.series_label AS series_label,

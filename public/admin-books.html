@@ -73,6 +73,40 @@
         .tts-popover-body { flex: 1 1 auto; min-height: 0; }
         .tts-popover-body iframe { width: 100%; height: 100%; border: 0; display: block; }
 
+        /* Art column: the volume's icon (derived from its 2D front cover),
+           clickable to open the cover-art manager. */
+        .cover-cell-btn { background: transparent; border: 1px solid #d5d5d5; border-radius: 5px; cursor: pointer; padding: 2px; width: 34px; height: 42px; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; }
+        .cover-cell-btn:hover { background: #eef1ff; border-color: #b9c2f0; }
+        .cover-cell-btn img { max-width: 100%; max-height: 100%; display: block; }
+        .cover-cell-btn .cover-empty { font-size: 0.95rem; opacity: 0.45; }
+
+        /* Cover-art popover: six artwork slots (front/spine/back × 2D/3D)
+           plus the derived icon that search results and other thumbnails use. */
+        #cover-popover-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 3000; justify-content: center; align-items: center; padding: 24px; }
+        #cover-popover-overlay.open { display: flex; }
+        .cover-popover-panel { background: #fff; border-radius: 10px; box-shadow: 0 12px 48px rgba(0,0,0,0.35); width: 96vw; max-width: 980px; max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
+        .cover-popover-body { padding: 16px 20px 20px; overflow-y: auto; }
+        .cover-icon-strip { display: flex; align-items: center; gap: 16px; padding: 12px 14px; background: #f7f8fc; border: 1px solid #e2e5f2; border-radius: 8px; margin-bottom: 18px; }
+        .cover-icon-box { flex: 0 0 60px; width: 60px; height: 73px; background: #f0f0f0; border-radius: 3px; overflow: hidden; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 3px rgba(0,0,0,0.18); }
+        .cover-icon-box img { width: 100%; height: 100%; object-fit: contain; display: block; }
+        .cover-icon-note { flex: 1 1 auto; font-size: 0.8rem; color: #555; line-height: 1.5; }
+        .cover-icon-note strong { color: #31345A; }
+        .cover-slot-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+        .cover-slot { border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+        .cover-slot h4 { margin: 0; font-size: 0.82rem; color: #31345A; }
+        .cover-slot .cover-preview { height: 150px; background: #fafafa; border: 1px dashed #ddd; border-radius: 5px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        /* The preview may be wrapped in a link; size the anchor too or the
+           image's max-height has no box to resolve against and gets cropped. */
+        .cover-slot .cover-preview a { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; }
+        .cover-slot .cover-preview img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+        .cover-slot .cover-preview .cover-empty { font-size: 0.75rem; color: #aaa; }
+        .cover-slot .cover-acts { display: flex; gap: 6px; }
+        .cover-slot .cover-acts button { flex: 1 1 auto; padding: 4px 8px; font-size: 0.75rem; border: 1px solid #c9c9c9; background: #fff; border-radius: 4px; cursor: pointer; }
+        .cover-slot .cover-acts button:hover:not(:disabled) { background: #eef1ff; border-color: #b9c2f0; }
+        .cover-slot .cover-acts button.del { color: #b3261e; border-color: #e6bdb9; }
+        .cover-slot .cover-acts button:disabled { opacity: 0.5; cursor: default; }
+        .cover-slot.busy { opacity: 0.55; pointer-events: none; }
+
         .form-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); z-index: 1000; justify-content: center; align-items: flex-start; padding: 60px 20px; overflow-y: auto; }
         .form-overlay.open { display: flex; }
         .form-panel { background: #fff; border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.25); width: 100%; max-width: 650px; }
@@ -280,6 +314,24 @@
         </div>
         <div class="tts-popover-body">
             <iframe id="tts-pop-frame" title="TTS narration" src="about:blank"></iframe>
+        </div>
+    </div>
+</div>
+
+<!-- Cover-art popover — six artwork slots per book (front / spine / back, in
+     2D and 3D). The icon used by search results and other thumbnails is
+     derived automatically from the 2D front, never uploaded directly. -->
+<div id="cover-popover-overlay" onclick="if(event.target===this)closeCoverPopover()">
+    <div class="cover-popover-panel">
+        <div class="tts-popover-head">
+            <h3>🖼 <span id="cover-pop-title">Cover Art</span></h3>
+            <div class="tts-pop-actions">
+                <button type="button" onclick="closeCoverPopover()" title="Close">&times;</button>
+            </div>
+        </div>
+        <div class="cover-popover-body">
+            <div id="cover-icon-strip" class="cover-icon-strip"></div>
+            <div id="cover-slot-grid" class="cover-slot-grid"></div>
         </div>
     </div>
 </div>
@@ -499,16 +551,12 @@ function fullDt(iso) {
 // i.e. the in-database paragraphs/translations are out of sync with the
 // current source. Tooltip shows the last-parse timestamp + status message.
 function dataCell(v) {
-    // When the volume has been explicitly opted out of parsing
-    // (volume_parse_flag = false), the in-DB paragraph/translation
-    // counts will always be zero and the "stale" / "error" states are
-    // meaningless. Render just a plain empty circle with an explanatory
-    // tooltip and skip the T/P count + stale-vs-source logic entirely.
+    // volume_parse_flag = false no longer means "not parsed" — paragraphs are
+    // extracted for EVERY book (the flipbook and the TTS narrator both read
+    // yy_paragraph); the flag only opts the book out of translation/glossary
+    // extraction. So render the same count + staleness cell as any other book
+    // and just say so in the tooltip.
     var parseFlagOff = (v.volume_parse_flag === false || v.volume_parse_flag === 'f');
-    if (parseFlagOff) {
-        return '<div class="status-cell" title="Parse disabled — this book is excluded from translation/glossary/paragraph extraction">'
-             + '<span class="status-icon status-miss">○</span></div>';
-    }
     var pc = v.paragraph_count_live || 0;
     var tc = v.translation_count_live || 0;
     var parseStatus = (v.volume_parse_status || '').toLowerCase();
@@ -540,6 +588,10 @@ function dataCell(v) {
     } else {
         icon = '○'; cls = 'status-miss'; sub = '';
         tipPrefix = 'No paragraphs or translations extracted yet';
+    }
+    if (parseFlagOff) {
+        tipPrefix += (/[.!?]$/.test(tipPrefix) ? ' ' : '. ')
+                   + 'Paragraphs only — this book is opted out of translation / glossary extraction.';
     }
     // Stack the cell vertically — icon on top, T/P count below, then the
     // YYMMDD / HH:MM stack — to match the visual pattern of DOCX/PDF/FLIP.
@@ -743,6 +795,167 @@ function openTtsPopover(volumeKey) {
     document.body.style.overflow = 'hidden';
 }
 
+// ── Cover art ──
+// Six artwork slots per volume; the icon consumed by search results (and any
+// other thumbnail surface) is derived from the 2D front on upload, so it is
+// never uploaded on its own. Books with no uploaded art fall back to the
+// legacy /images/covers/<sNNvNN> convention, same rule the site uses.
+var COVER_SLOTS = [
+    { slot: 'front_2d', label: 'Front · 2D' },
+    { slot: 'spine_2d', label: 'Spine · 2D' },
+    { slot: 'back_2d',  label: 'Back · 2D'  },
+    { slot: 'front_3d', label: 'Front · 3D' },
+    { slot: 'spine_3d', label: 'Spine · 3D' },
+    { slot: 'back_3d',  label: 'Back · 3D'  }
+];
+var coverPopKey = null;
+
+// Mirror of the site's fallback so the admin shows what visitors actually see.
+function legacyCoverUrl(v) {
+    var m = v.volume_code ? String(v.volume_code).match(/s\d{2}v\d{2}/i) : null;
+    return m ? '/images/covers/YY.book_.3d.6x9-vertical-softcover-spine.00490x00600.' + m[0].toLowerCase() + '-245x300.jpg' : '';
+}
+
+function coverCell(v) {
+    var url = v.volume_img_icon || legacyCoverUrl(v);
+    var inner = url
+        ? '<img src="' + esc(url) + '" alt="" loading="lazy" onerror="this.remove()">'
+        : '<span class="cover-empty">🖼</span>';
+    return '<button class="cover-cell-btn" title="Cover art for “' + esc(v.volume_label) + '”" '
+         + 'onclick="openCoverPopover(' + v.volume_key + ')">' + inner + '</button>';
+}
+
+function openCoverPopover(volumeKey) {
+    var v = allVolumes.find(function(r){ return r.volume_key == volumeKey; });
+    if (!v) return;
+    coverPopKey = volumeKey;
+    document.getElementById('cover-pop-title').textContent = v.volume_label || ('Volume ' + volumeKey);
+    renderCoverPopover(v);
+    document.getElementById('cover-popover-overlay').classList.add('open');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeCoverPopover() {
+    document.getElementById('cover-popover-overlay').classList.remove('open');
+    document.getElementById('cover-pop-title').textContent = 'Cover Art';
+    coverPopKey = null;
+    document.body.style.overflow = '';
+}
+
+function renderCoverPopover(v) {
+    var legacy = legacyCoverUrl(v);
+    var icon = v.volume_img_icon || '';
+    var iconImg = icon || legacy;
+    var note;
+    if (icon) {
+        note = '<strong>Icon</strong> — 245×300 max, rebuilt from the 2D front on every upload. '
+             + 'This is what search results and other thumbnails use.';
+    } else if (legacy) {
+        note = '<strong>Icon</strong> — none uploaded; falling back to the legacy '
+             + '<code>/images/covers</code> file. Upload a 2D front to replace it.';
+    } else {
+        note = '<strong>Icon</strong> — none. Upload a 2D front cover and the icon is generated from it; '
+             + 'until then this book shows a blank thumbnail in search results.';
+    }
+    document.getElementById('cover-icon-strip').innerHTML =
+        '<div class="cover-icon-box">'
+      + (iconImg ? '<img src="' + esc(iconImg) + '" alt="" onerror="this.remove()">' : '<span class="cover-empty">—</span>')
+      + '</div>'
+      + '<div class="cover-icon-note">' + note + '</div>'
+      + '<button type="button" class="btn btn-secondary btn-sm" ' + (v.volume_img_front_2d ? '' : 'disabled ')
+      + 'title="Regenerate the icon from the stored 2D front image" onclick="regenCoverIcon()">Rebuild icon</button>';
+
+    var html = '';
+    for (var i = 0; i < COVER_SLOTS.length; i++) {
+        var s = COVER_SLOTS[i];
+        var cur = v['volume_img_' + s.slot] || '';
+        html += '<div class="cover-slot" id="cover-slot-' + s.slot + '">'
+              + '<h4>' + s.label + '</h4>'
+              + '<div class="cover-preview">'
+              + (cur ? '<a href="' + esc(cur) + '" target="_blank" rel="noopener"><img src="' + esc(cur) + '" alt=""></a>'
+                     : '<span class="cover-empty">no image</span>')
+              + '</div>'
+              + '<input type="file" accept="image/jpeg,image/png,image/gif,image/webp" style="display:none" '
+              +   'id="cover-file-' + s.slot + '" onchange="uploadCoverSlot(\'' + s.slot + '\', this)">'
+              + '<div class="cover-acts">'
+              + '<button type="button" onclick="document.getElementById(\'cover-file-' + s.slot + '\').click()">'
+              + (cur ? 'Replace' : 'Upload') + '</button>'
+              + '<button type="button" class="del" ' + (cur ? '' : 'disabled ')
+              +   'onclick="deleteCoverSlot(\'' + s.slot + '\')">Remove</button>'
+              + '</div>'
+              + '</div>';
+    }
+    document.getElementById('cover-slot-grid').innerHTML = html;
+}
+
+function coverSlotBusy(slot, busy) {
+    var el = document.getElementById('cover-slot-' + slot);
+    if (el) el.classList.toggle('busy', !!busy);
+}
+
+// Re-pull the books list so the row thumbnail and the popover both reflect
+// the new artwork, then re-render the popover in place.
+function refreshCoverPopover() {
+    return loadBooks().then(function() {
+        var v = allVolumes.find(function(r){ return r.volume_key == coverPopKey; });
+        if (v) renderCoverPopover(v);
+    });
+}
+
+function uploadCoverSlot(slot, input) {
+    var file = input.files && input.files[0];
+    if (!file || !coverPopKey) return;
+    var fd = new FormData();
+    fd.append('volume_key', coverPopKey);
+    fd.append('slot', slot);
+    fd.append('image_file', file);
+    coverSlotBusy(slot, true);
+    fetch(API + '/admin-books-cover-upload.php', { method: 'POST', credentials: 'include', body: fd })
+        .then(function(r){ return safeJson(r); })
+        .then(function(d) {
+            input.value = '';
+            if (d && d.error) { alert(d.error); coverSlotBusy(slot, false); return; }
+            return refreshCoverPopover();
+        })
+        .catch(function(err) {
+            alert('Upload failed: ' + (err && err.message ? err.message : 'network'));
+            coverSlotBusy(slot, false);
+        });
+}
+
+function deleteCoverSlot(slot) {
+    if (!coverPopKey) return;
+    yesNoConfirm('Remove this image?', function(yes) {
+        if (!yes) return;
+        coverSlotBusy(slot, true);
+        fetch(API + '/admin-books-cover-upload.php', {
+            method: 'POST', credentials: 'include',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ action: 'delete', volume_key: coverPopKey, slot: slot })
+        }).then(function(r){ return safeJson(r); }).then(function(d) {
+            if (d && d.error) { alert(d.error); coverSlotBusy(slot, false); return; }
+            return refreshCoverPopover();
+        }).catch(function(err) {
+            alert('Remove failed: ' + (err && err.message ? err.message : 'network'));
+            coverSlotBusy(slot, false);
+        });
+    });
+}
+
+function regenCoverIcon() {
+    if (!coverPopKey) return;
+    fetch(API + '/admin-books-cover-upload.php', {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ action: 'regen_icon', volume_key: coverPopKey })
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        if (d && d.error) { alert(d.error); return; }
+        return refreshCoverPopover();
+    }).catch(function(err) {
+        alert('Icon rebuild failed: ' + (err && err.message ? err.message : 'network'));
+    });
+}
+
 function closeTtsPopover() {
     document.getElementById('tts-popover-overlay').classList.remove('open');
     // Clear the src so the embedded page's SSE stream and any playing audio
@@ -790,6 +1003,7 @@ function renderBooks() {
         + '<col style="width:74px;">'         // PDF
         + '<col style="width:77px;">'         // FLIP
         + '<col style="width:110px;">'        // Data (paragraphs + translations)
+        + '<col style="width:52px;">'         // Art (cover-art popover)
         + '<col style="width:52px;">'         // TTS (narration popover)
         + '<col style="width:74px;">'         // Active
         + '<col style="width:92px;">'         // Lock (checkout)
@@ -803,7 +1017,8 @@ function renderBooks() {
         + '<th class="status-cell" style="text-align:center;" title="Source .docx file uploaded">DOCX</th>'
         + '<th class="status-cell" style="text-align:center;" title="PDF generated from the .docx">PDF</th>'
         + '<th class="status-cell" style="text-align:center;" title="Self-hosted flipbook built at /&lt;volume_code&gt;/">FLIP</th>'
-        + '<th class="status-cell" style="text-align:center;" title="Number of Translations (T) and Paragraphs (P) pulled from the document">YY Parse</th>'
+        + '<th class="status-cell" style="text-align:center;" title="Number of Translations (T) and Paragraphs (P) pulled from the document. Paragraphs are parsed for every book; translations only when the book is opted in.">Parsing</th>'
+        + '<th class="status-cell" style="text-align:center;" title="Cover art — front, spine and back in 2D and 3D. The icon shown here (and in search results) is derived from the 2D front.">Art</th>'
         + '<th class="status-cell" style="text-align:center;" title="Open the chapter-level TTS narration studio for this book">TTS</th>'
         + '<th>Active</th>'
         + '<th title="Check a book out to stop another admin uploading a new version">Lock</th>'
@@ -815,7 +1030,7 @@ function renderBooks() {
         var vols = allVolumes.filter(function(v) { return v.series_key == s.series_key; });
 
         html += '<tr class="series-row" onclick="editSeries(' + s.series_key + ')">'
-            + '<td colspan="12">'
+            + '<td colspan="13">'
             + '<div style="display:flex;justify-content:space-between;align-items:center;">'
             + '<span>' + esc(s.series_label) + ' <span class="series-meta">(' + vols.length + ' volume' + (vols.length !== 1 ? 's' : '') + ')</span></span>'
             + '<span class="series-actions" onclick="event.stopPropagation()">'
@@ -840,6 +1055,7 @@ function renderBooks() {
                 + '<td>' + artifactCell(!!v.volume_pdf,       v.volume_pdf_mtime,  v.volume_docx_mtime,   ps, 'PDF',       v.volume_pdf  ? '/pdf/' + encodeURIComponent(v.volume_pdf)         : null) + '</td>'
                 + '<td>' + flipCell(v) + '</td>'
                 + '<td>' + dataCell(v) + '</td>'
+                + '<td class="status-cell" onclick="event.stopPropagation()">' + coverCell(v) + '</td>'
                 + '<td class="status-cell" onclick="event.stopPropagation()">' + ttsCell(v) + '</td>'
                 + '<td>' + (v.volume_active_flag ? '<span class="badge-active">Active</span>' : '<span class="badge-inactive">Inactive</span>') + '</td>'
                 + '<td onclick="event.stopPropagation()">' + lockCell(v) + '</td>'

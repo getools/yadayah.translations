@@ -881,16 +881,21 @@
                     ? '<a href="' + esc(locHref) + '" target="_blank">' + locationText + '</a>'
                     : locationText)
                 : '';
-            // Cover thumb: derive sNNvNN from volume_code; broken images
-            // are removed so the layout doesn't show a placeholder.
+            // Cover thumb: the volume's uploaded icon (derived from its 2D
+            // front in admin → Books) wins; otherwise fall back to the legacy
+            // sNNvNN convention under /images/covers. Broken images are
+            // removed so the layout doesn't show a placeholder.
             var coverHtml = '<div class="cover"></div>';
-            if (r.volume_code) {
+            var coverUrl = r.volume_img_icon || '';
+            if (!coverUrl && r.volume_code) {
                 var m = String(r.volume_code).match(/s\d{2}v\d{2}/i);
                 if (m) {
-                    var coverUrl = '/images/covers/YY.book_.3d.6x9-vertical-softcover-spine.00490x00600.'
-                                 + m[0].toLowerCase() + '-245x300.jpg';
-                    coverHtml = '<div class="cover"><img src="' + esc(coverUrl) + '" alt="" loading="lazy" onerror="this.remove()"></div>';
+                    coverUrl = '/images/covers/YY.book_.3d.6x9-vertical-softcover-spine.00490x00600.'
+                             + m[0].toLowerCase() + '-245x300.jpg';
                 }
+            }
+            if (coverUrl) {
+                coverHtml = '<div class="cover"><img src="' + esc(coverUrl) + '" alt="" loading="lazy" onerror="this.remove()"></div>';
             }
             html += '<div class="ss-result-card">'
                   + '<div class="ss-result-book">'

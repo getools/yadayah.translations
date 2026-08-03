@@ -282,10 +282,14 @@ def reparse_volume(vol_key, verbose=False):
     if not row:
         raise SystemExit(f"No yy_volume row for volume_key={vol_key}")
     _, series_key, docx_name, label, parse_flag = row
-    if not parse_flag:
-        logging.info(f"volume_parse_flag is FALSE for {label} (key {vol_key}); skipping")
-        update_status(conn, vol_key, 'skipped', 'volume_parse_flag is disabled')
-        return
+    # volume_parse_flag scopes TRANSLATION / glossary extraction only —
+    # paragraphs are parsed for every book (flipbook + TTS both read
+    # yy_paragraph). Mirrors parse_volume_from_bundle.py, which is what the
+    # live pipeline actually runs.
+    want_translations = bool(parse_flag)
+    if not want_translations:
+        logging.info(f"volume_parse_flag is FALSE for {label} (key {vol_key}); "
+                     "parsing paragraphs only, no translations")
     if not docx_name:
         update_status(conn, vol_key, 'error', 'No volume_docx — upload a .docx first')
         raise SystemExit("No volume_docx")
@@ -454,10 +458,14 @@ def reparse_volume(vol_key, verbose=False):
             conn.commit()
         return verse_map[key]
 
-    results = extract_translations_from_doc(docx_path, detect_chapters=True)
-    chapter_meta = results[-1] if results and isinstance(results[-1], dict) and '_chapters' in results[-1] else None
-    translations = results[:-1] if chapter_meta else results
-    logging.info(f"  Extracted {len(translations)} translations")
+    if want_translations:
+        results = extract_translations_from_doc(docx_path, detect_chapters=True)
+        chapter_meta = results[-1] if results and isinstance(results[-1], dict) and '_chapters' in results[-1] else None
+        translations = results[:-1] if chapter_meta else results
+        logging.info(f"  Extracted {len(translations)} translations")
+    else:
+        translations = []
+        logging.info("  Translation extraction skipped (volume_parse_flag off)")
 
     trans_rows = []
     skipped = 0
@@ -498,7 +506,9 @@ def reparse_volume(vol_key, verbose=False):
                 (len(para_rows), vol_key))
     conn.commit()
     update_status(conn, vol_key, 'success',
-        f'{len(para_rows)} paragraphs, {len(trans_rows)} translations ({skipped} cite-unresolvable)')
+        f'{len(para_rows)} paragraphs, '
+        + (f'{len(trans_rows)} translations ({skipped} cite-unresolvable)'
+           if want_translations else 'translations skipped (parse flag off)'))
     cur.close()
     conn.close()
 
