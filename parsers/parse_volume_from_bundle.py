@@ -64,6 +64,15 @@ def normalize_quotes(s):
     return s.replace("‘", "'").replace("’", "'").replace("“", '"').replace("”", '"')
 
 
+def _norm_chapter_name(s):
+    """Case/whitespace-insensitive key for matching a TOC section banner to
+    its yy_chapter row. The toc.json carries back-matter titles in all-caps
+    ('TOPICAL APPENDIX') while yy_chapter stores curated title case
+    ('Topical Appendix'); casefold + whitespace-collapse makes them equal.
+    Mirrors _norm_chapter_name() in parse_paragraphs.py."""
+    return _WS_RE.sub(" ", (s or "")).strip().casefold()
+
+
 # ── DB connection (mirrors parse_volume.db_connect) ────────────────────────
 
 def db_connect():
@@ -177,10 +186,31 @@ def reparse_volume(vol_key, dry_run=False, verbose=False):
     translations = bt.extract_translations(paragraphs)
     logging.info(f"  Extracted {len(paragraphs)} paragraphs, {len(translations)} translations")
 
+    # The PyMuPDF parse above runs for minutes on a large book; by the time
+    # it returns, the DB connection opened at the top has usually been reaped
+    # as idle by the server (psycopg2 "server closed the connection
+    # unexpectedly" on the next query). Re-establish it before the DB work.
+    try:
+        cur.execute("SELECT 1")
+        cur.fetchone()
+    except Exception:
+        logging.info("  DB connection went idle during parse — reconnecting")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        conn = db_connect()
+        cur = conn.cursor()
+
     # ── yy_chapter mapping (chapter_number → chapter_key) ──────────────
-    cur.execute("SELECT chapter_key, chapter_number FROM yy_chapter WHERE volume_key = %s",
+    cur.execute("SELECT chapter_key, chapter_number, chapter_name FROM yy_chapter WHERE volume_key = %s",
                 (vol_key,))
-    yy_chapter_map = {cn: ck for ck, cn in cur.fetchall()}
+    _chapter_rows = cur.fetchall()
+    yy_chapter_map = {cn: ck for ck, cn, _nm in _chapter_rows}
+    # Named (unnumbered) back-matter sections carry chapter_number None in the
+    # TOC, so they resolve by name instead — see the paragraph loop below.
+    yy_chapter_by_name = {_norm_chapter_name(nm): ck
+                          for ck, _cn, nm in _chapter_rows if nm}
 
     # ── Cite resolution lookups ────────────────────────────────────────
     cur.execute("""
@@ -233,7 +263,17 @@ def reparse_volume(vol_key, dry_run=False, verbose=False):
     para_rows = []
     for p in paragraphs:
         ch_num = p.get("chapter_number")
-        chapter_key = yy_chapter_map.get(ch_num) if ch_num else None
+        # Numbered chapters resolve by number; named back-matter sections
+        # (Afterword / Topical Appendix / Bibliography / Resources), which
+        # carry chapter_number None, resolve by normalized name. An
+        # unmatched name (e.g. a front-matter banner with no yy_chapter row)
+        # leaves chapter_key NULL so the paragraphs orphan (un-narrated)
+        # instead of being swallowed into the previous chapter.
+        if ch_num is not None:
+            chapter_key = yy_chapter_map.get(ch_num)
+        else:
+            ch_name = p.get("chapter_name")
+            chapter_key = yy_chapter_by_name.get(_norm_chapter_name(ch_name)) if ch_name else None
         text_html = p.get("text_html", "")
         text_plain = p.get("text_plain") or html_to_plain(text_html)
         # text_raw: a compact JSON of run breakdown so a future re-render

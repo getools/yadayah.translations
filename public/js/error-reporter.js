@@ -37,9 +37,12 @@
     /contentWindow\.postMessage/i,
     // Android WebView Java bridge errors from YouTube's embedded player —
     // the backing Java object is garbage-collected while YouTube's JS still
-    // holds a reference. Nothing in yadayah.com code uses Java bridge APIs;
-    // all such errors originate from third-party embed scripts.
+    // holds a reference, or a Java exception is raised during method invocation
+    // via the postMessage bridge. Nothing in yadayah.com code uses Java bridge
+    // APIs; all such errors originate from third-party embed scripts.
     /Java object is gone/i,
+    /Java exception was raised during method invocation/i,
+    /Error invoking postMessage/i,
     // Firefox-specific error fired when a JS reference points to a DOM node
     // that has been garbage-collected (removed from the DOM). The stack always
     // originates in connectedCallback inside YouTube's injected web-component

@@ -311,6 +311,18 @@ def validate_pdf(pdf_path: Path) -> list[str]:
             problems.append("PDF has zero pages")
             return problems
 
+        # Blank PDF check: Word Online rendering an empty DOCX produces a
+        # 1-page blank PDF that passes the creator check but has no text.
+        # Sample the first 5 pages; real books have many characters per page.
+        first_pages = min(5, len(doc))
+        sampled_text = "".join(doc[p].get_text("text", sort=True) for p in range(first_pages))
+        if len(sampled_text.strip()) < 100:
+            problems.append(
+                f"PDF appears blank: {len(doc)} pages with only "
+                f"{len(sampled_text.strip())} chars across first {first_pages} pages "
+                f"— likely rendered from an empty/truncated DOCX"
+            )
+
         n = min(SAMPLE_PAGE_COUNT, len(doc))
         sample = random.sample(range(len(doc)), n)
         runon_re = re.compile(r"[a-z][.,][A-Z][a-z]")

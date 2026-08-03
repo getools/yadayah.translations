@@ -75,7 +75,7 @@ if ($docxStem !== $pdfStem) {
 
 // ── Resolve volume ────────────────────────────────────────────────
 $lookup = $db->prepare("
-    SELECT volume_key, volume_code
+    SELECT volume_key, volume_code, volume_locked_flag, volume_locked_by_name
     FROM yy_volume
     WHERE volume_active_flag = TRUE
       AND (volume_docx = ? OR volume_code = ?)
@@ -85,6 +85,15 @@ $lookup->execute([$docxName, $docxStem]);
 $vol = $lookup->fetch();
 if (!$vol) {
     errorResponse("No active yy_volume found for $docxStem", 404);
+}
+
+// Source-control lockout. This endpoint authenticates by shared token, not a
+// user session, so we can't tell whether the uploader is the person holding
+// the checkout — any active lock blocks the pair upload. Release the checkout
+// on the Admin → Books page first. 423 Locked.
+if ($vol['volume_locked_flag']) {
+    $holder = $vol['volume_locked_by_name'] ?: 'an admin';
+    errorResponse("$docxStem is checked out by $holder — release the lock in Admin → Books before uploading.", 423);
 }
 $volKey  = (int)$vol['volume_key'];
 $volCode = $vol['volume_code'] ?: $docxStem;

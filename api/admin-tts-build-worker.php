@@ -16,6 +16,8 @@
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/admin-tts-helpers.php';
 require_once __DIR__ . '/spawn-helpers.php';
+require_once __DIR__ . '/gpu-client.php';       // gpuTranscribe() for the lead-artifact guard
+require_once __DIR__ . '/tts-lead-artifact.php'; // leading-filler heading guard
 
 $audioKey = (int)($argv[1] ?? 0);
 if (!$audioKey) {
@@ -888,6 +890,38 @@ $partPath = function (int $i) use ($partsDir): string {
     return $partsDir . '/' . sprintf('p%05d.mp3', $i);
 };
 
+// ── Parts-cache corpus validation ──────────────────────────────────
+// p<i>.mp3 is the clip for $paragraphs[$i]. The reuse-by-index paths
+// (resume / retry / per-paragraph redo do NOT wipe the dir — only start /
+// start_all / restart call ttsWipePartsDir) are safe ONLY while the
+// paragraph sitting at each index is unchanged. A re-parse can add, drop,
+// re-flag (table/continuation) or re-word paragraphs, which SHIFTS every
+// later index — reusing p<i>.mp3 then serves a DIFFERENT paragraph's audio
+// (silent; it also poisons the assembled chapter MP3 and its markers, since
+// both are built from these parts). Guard: fingerprint the current survivor
+// corpus and stash it beside the parts. Wipe the cache (forcing a clean
+// re-synth from idx 0) when a prior fingerprint exists and differs, OR — for
+// a legacy dir written before this guard, which has no fingerprint — when
+// there are more parts on disk than current survivors (the tell-tale of a
+// shrinking re-parse). An unchanged corpus (a genuine resume / gap-fill
+// redo) matches and reuses cached parts exactly as before.
+$corpusSig = md5(implode("\x1e", array_map(
+    fn($p) => $p['paragraph_number'] . '|' . (string)($p['paragraph_text_html'] ?? ''),
+    $paragraphs
+)));
+$sigPath   = $partsDir . '/.corpus-sig';
+$priorSig  = is_file($sigPath) ? trim((string)@file_get_contents($sigPath)) : '';
+$onDisk    = count(glob($partsDir . '/p*.mp3') ?: []);
+$staleCache = ($priorSig !== '' && $priorSig !== $corpusSig)
+           || ($priorSig === '' && $onDisk > $nPara);
+if ($staleCache && $onDisk > 0) {
+    foreach (glob($partsDir . '/p*.mp3') ?: [] as $f) @unlink($f);
+    fwrite(STDERR, "corpus changed since parts were built (prior=" . ($priorSig ?: 'none')
+        . " now=$corpusSig, on-disk=$onDisk, survivors=$nPara) — wiped stale parts cache\n");
+}
+@file_put_contents($sigPath, $corpusSig);
+@chgrp($sigPath, 'www-data');
+
 // Pre-loop resume scan — COUNT ONLY. Find the length of the contiguous run
 // of already-cached parts so we can show a meaningful "Resuming at N" message
 // and progress %. Do NOT accumulate cumulative offsets or insert markers here:
@@ -1372,6 +1406,37 @@ foreach ($paragraphs as $idx => $p) {
         }
     }
     if ($paraBytes === '') continue;
+
+
+    // Leading-artifact guard (see tts-lead-artifact.php). A short single-segment
+    // local (gpu-tailnet) heading -- e.g. a lone "BIBLIOGRAPHY" -- is where the
+    // autoregressive engine stochastically prepends a filler "uh"/"ah". Detect it
+    // and re-synth-and-verify. Exception-safe inside the guard: any failure returns
+    // the original $paraBytes, so this can only ever cost a wasted synth.
+    if (!$allSsml && count($segs) === 1 && function_exists('ttsLAGuardHeading')) {
+        $laSeg = $segs[0];
+        // Gate on the ENGINE text (what buildLocalSegment actually speaks):
+        // the raw seg text still carries the structural-pause markers
+        // (\x01PAUSE_0_NNNN\x01, digits) that make a short heading look long
+        // and mis-pick the expected word. buildLocalSegment strips them to
+        // e.g. "Bibliography.".
+        $laBuilt = buildLocalSegment($laSeg['text'], $cfg, $laSeg['category']);
+        $laEngineText = is_array($laBuilt) ? (string)($laBuilt['text'] ?? '') : '';
+        if (ttsProviderTransport($cfg, ttsResolveProviderKey($cfg, $laSeg['category'])) === 'gpu-tailnet'
+            && ttsLAIsShort($laEngineText)) {
+            $laWord = ttsLAExpectedWord($laEngineText);
+            if (mb_strlen($laWord) >= 5) {
+                $laResynth = function () use ($cfg, $laSeg) {
+                    $e = '';
+                    return localTtsSynthesizeChunked($cfg, buildLocalSegment($laSeg['text'], $cfg, $laSeg['category']), $cfg['system']['tts_output_format'], $e, 240);
+                };
+                $laDiag = '';
+                $laFixed = ttsLAGuardHeading($paraBytes, $laWord, $laResynth, $tmpDir, 5, $laDiag, 'ffmpeg', $ffprobeBin ?: 'ffprobe');
+                if (is_string($laFixed) && $laFixed !== '') $paraBytes = $laFixed;
+                error_log("[tts-build $audioKey] leadguard para {$p['paragraph_number']} ($laWord): $laDiag");
+            }
+        }
+    }
 
     // Write this paragraph's marker BEFORE appending its bytes to the
     // output file, so the offset captures the position at which the

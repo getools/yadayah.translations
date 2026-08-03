@@ -22,6 +22,9 @@ function runFeedFreshnessCheck(PDO $db, array $config): array {
     $feed->execute([$feedKey]);
     $feed = $feed->fetch();
     if (!$feed) return ['status' => 'fail', 'message' => "Feed {$feedKey} not found"];
+    if (!$feed['feed_active_flag']) {
+        return ['status' => 'skip', 'message' => "Feed {$feed['feed_name']} is inactive — skipping freshness check"];
+    }
 
     // Get our latest imported item. Column was renamed
     // feed_item_publish_dtime -> feed_item_publish_import_dtime; the override
@@ -58,7 +61,10 @@ function runFeedFreshnessCheck(PDO $db, array $config): array {
             break;
 
         case 'facebook':
-            $result = checkFacebookFeed($publicUrl, $accountId);
+            $result = checkFacebookFeed($publicUrl, $accountId, $feedKey);
+            if (isset($result['status'])) {
+                return $result;
+            }
             $externalLatest = $result['latest'];
             $externalTitle = $result['title'] ?? '';
             $checkDetail = $result['detail'] ?? '';
@@ -165,7 +171,7 @@ function checkRumbleFeed(string $publicUrl): array {
     ];
 }
 
-function checkFacebookFeed(string $publicUrl, string $accountId): array {
+function checkFacebookFeed(string $publicUrl, string $accountId, int $knownFeedKey = 0): array {
     // Facebook has no public RSS; verify health via sync log.
     // When sync is recent and successful, we can't distinguish "no new posts" from
     // "sync missed something", so return our own latest item time as the baseline
@@ -173,9 +179,13 @@ function checkFacebookFeed(string $publicUrl, string $accountId): array {
     try {
         $db = function_exists('getDb') ? getDb() : null;
         if ($db) {
-            $feedStmt = $db->prepare("SELECT feed_key FROM yy_feed WHERE feed_account_id = ? LIMIT 1");
-            $feedStmt->execute([$accountId]);
-            $feedKey = $feedStmt->fetchColumn();
+            // Use the caller-supplied feed key directly; fall back to account_id lookup only when needed.
+            $feedKey = $knownFeedKey ?: null;
+            if (!$feedKey && $accountId) {
+                $feedStmt = $db->prepare("SELECT feed_key FROM yy_feed WHERE feed_account_id = ? LIMIT 1");
+                $feedStmt->execute([$accountId]);
+                $feedKey = $feedStmt->fetchColumn() ?: null;
+            }
 
             if ($feedKey) {
                 $syncStmt = $db->prepare("
@@ -190,22 +200,39 @@ function checkFacebookFeed(string $publicUrl, string $accountId): array {
                 $sync = $syncStmt->fetch();
                 if ($sync) {
                     $age = round((time() - strtotime($sync['feed_sync_end_dtime'])) / 3600, 1);
+
+                    $latestStmt = $db->prepare("
+                        SELECT MAX(COALESCE(feed_item_publish_override_dtime, feed_item_publish_import_dtime))
+                        FROM yy_feed_item WHERE feed_key = ?
+                    ");
+                    $latestStmt->execute([$feedKey]);
+                    $latestImported = $latestStmt->fetchColumn() ?: null;
+
                     if ($age < 48) {
-                        // Sync is healthy — use our latest imported item time as the baseline
-                        // so the freshness diff reflects content age, not sync run time
-                        $latestStmt = $db->prepare("
-                            SELECT MAX(COALESCE(feed_item_publish_override_dtime, feed_item_publish_import_dtime))
-                            FROM yy_feed_item WHERE feed_key = ?
-                        ");
-                        $latestStmt->execute([$feedKey]);
-                        $latestImported = $latestStmt->fetchColumn();
+                        if (!$latestImported) {
+                            // Sync is healthy but feed has no items yet (new or empty page) — not a freshness failure.
+                            return [
+                                'status' => 'pass',
+                                'message' => "Facebook sync healthy, no items yet (sync ran {$age}h ago)",
+                                'detail' => "Sync ran {$age}h ago (status: {$sync['feed_sync_status']}, items in last run: {$sync['feed_sync_items_found']}) — feed may be new or empty",
+                            ];
+                        }
                         return [
-                            'latest' => $latestImported ?: $sync['feed_sync_end_dtime'],
+                            'latest' => $latestImported,
                             'title' => "Last sync: {$sync['feed_sync_items_found']} items found",
                             'detail' => "Sync status: {$sync['feed_sync_status']}, age: {$age}h",
                         ];
                     }
-                    // Sync is stale — fall through and return sync end time so age is detected
+
+                    // Sync is stale (≥ 48h)
+                    if (!$latestImported) {
+                        // No items + stale sync — fail directly to avoid "56 years behind" diff from epoch 0.
+                        return [
+                            'status' => 'fail',
+                            'message' => "Facebook sync stale ({$age}h ago) and no items in DB",
+                            'detail' => "Last sync {$age}h ago — feed may be misconfigured (no account ID or inactive)",
+                        ];
+                    }
                     return [
                         'latest' => $sync['feed_sync_end_dtime'],
                         'title' => "Sync {$sync['feed_sync_status']}",

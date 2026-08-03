@@ -93,6 +93,61 @@ def load_yy_chapter_mapping(conn):
     return mapping
 
 
+def _norm_chapter_name(s):
+    """Normalize a chapter name for case/whitespace-insensitive matching.
+    Mirrors _norm_chapter_name() in parse_volume.py so both parsers resolve a
+    heading to the same chapter row."""
+    return re.sub(r'\s+', ' ', (s or '')).strip().lower()
+
+
+def load_yy_chapter_by_name(conn):
+    """Load (yy_volume_key, normalized_name) -> yy_chapter_key.
+
+    Unnumbered front/back-matter sections (Prelude, Composition and
+    Methodology, Prophecy…) all carry chapter_number 0, so they cannot be told
+    apart by number — they are matched by name instead, exactly as the live
+    per-volume parser (parse_volume.py) does."""
+    cur = conn.cursor()
+    cur.execute("SELECT chapter_key, volume_key, chapter_name FROM yy_chapter WHERE chapter_name IS NOT NULL")
+    mapping = {}
+    for ch_key, vol_key, name in cur.fetchall():
+        mapping[(vol_key, _norm_chapter_name(name))] = ch_key
+    cur.close()
+    return mapping
+
+
+def resolve_boundary_keys(vol_key, chapter_boundaries, by_number, by_name):
+    """Turn (para_idx, number, name) heading boundaries into ordered
+    (para_idx, chapter_key) pairs by matching each heading to its existing
+    yy_chapter row — by number when numbered, else by normalized name. This is
+    what lets UNNUMBERED sections (number 0/None) be treated as real chapters
+    instead of being dropped, the bug that orphaned s02v01's Prelude. A heading
+    with no matching chapter row is skipped, so its paragraphs carry the
+    previous chapter forward rather than becoming orphaned."""
+    boundary_keys = []
+    for idx, number, name in chapter_boundaries:
+        ck = None
+        if number is not None and number > 0:
+            ck = by_number.get((vol_key, number))
+        if ck is None and name:
+            ck = by_name.get((vol_key, _norm_chapter_name(name)))
+        if ck is not None:
+            boundary_keys.append((idx, ck))
+    return boundary_keys
+
+
+def chapter_key_for_paragraph(para_num, boundary_keys):
+    """Return chapter_key for a paragraph given ordered (idx, key) boundaries.
+    Mirrors chapter_key_for_paragraph() in parse_volume.py."""
+    ck = None
+    for bidx, key in boundary_keys:
+        if para_num >= bidx:
+            ck = key
+        else:
+            break
+    return ck
+
+
 # ── Formatting helpers ───────────────────────────────────────────────
 
 def emu_to_pt(emu_value):
@@ -581,7 +636,8 @@ def main():
     volume_map = load_volume_mapping(conn)
     logging.info(f"  Volume mappings: {len(volume_map)}")
     yy_chapter_map = load_yy_chapter_mapping(conn)
-    logging.info(f"  YY chapter mappings: {len(yy_chapter_map)}")
+    yy_chapter_by_name = load_yy_chapter_by_name(conn)
+    logging.info(f"  YY chapter mappings: {len(yy_chapter_map)} by number, {len(yy_chapter_by_name)} by name")
 
     # ── Phase 2: Discover documents ──
     logging.info("\n=== Phase 2: Discovering documents ===")
@@ -693,12 +749,16 @@ def main():
 
         rows = []
         for doc_path, vol_key, series_key, paragraphs, chapter_boundaries in all_data:
+            # Resolve heading boundaries to chapter_keys ONCE per volume, matching
+            # unnumbered sections by name so Prelude/Composition/Prophecy et al. are
+            # assigned rather than orphaned (the old number-only lookup dropped every
+            # unnumbered section — see s02v01). Mirrors parse_volume.py.
+            boundary_keys = resolve_boundary_keys(vol_key, chapter_boundaries, yy_chapter_map, yy_chapter_by_name)
             for p in paragraphs:
                 para_num = p['paragraph_number']
 
-                # Chapter assignment
-                ch_num = get_chapter_for_paragraph(para_num, chapter_boundaries)
-                chapter_key = yy_chapter_map.get((vol_key, ch_num)) if ch_num else None
+                # Chapter assignment (position-based, unnumbered-safe)
+                chapter_key = chapter_key_for_paragraph(para_num, boundary_keys)
                 if chapter_key:
                     stats['chapters_assigned'] += 1
                 else:
@@ -735,10 +795,10 @@ def main():
     else:
         logging.info("\n=== Phase 4: Dry run - no DB writes ===")
         for doc_path, vol_key, series_key, paragraphs, chapter_boundaries in all_data:
+            boundary_keys = resolve_boundary_keys(vol_key, chapter_boundaries, yy_chapter_map, yy_chapter_by_name)
             for p in paragraphs:
                 para_num = p['paragraph_number']
-                ch_num = get_chapter_for_paragraph(para_num, chapter_boundaries)
-                chapter_key = yy_chapter_map.get((vol_key, ch_num)) if ch_num else None
+                chapter_key = chapter_key_for_paragraph(para_num, boundary_keys)
                 if chapter_key:
                     stats['chapters_assigned'] += 1
                 else:

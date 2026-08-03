@@ -82,9 +82,12 @@ if (typeof HTMLCollection !== 'undefined' && HTMLCollection.prototype && !HTMLCo
                     : data.title_prefix.replace(/[\s\-–]+$/, '').trim();
             }
 
-            // Main header nav — split into two rows at midpoint
+            // Main header nav — split into two rows at midpoint.
+            // data-static (same guard as the sub-toolbar below) lets a page own
+            // its header nav server-side — e.g. Pages-New pages driven by the
+            // Menus tab — so we don't overwrite it with the global page-nav.
             var mainEl = document.querySelector('header nav');
-            if (mainEl && data.main && data.main.length) {
+            if (mainEl && !mainEl.hasAttribute('data-static') && data.main && data.main.length) {
                 var items = data.main;
                 var mid = Math.ceil(items.length / 2);
                 var html = '<div class="nav-row">' + renderLinks(items.slice(0, mid)) + '</div>';
@@ -181,7 +184,7 @@ if (typeof HTMLCollection !== 'undefined' && HTMLCollection.prototype && !HTMLCo
     // the 31 pages that already include site-nav.js. Cache-busting via
     // ?v= matches the convention used elsewhere on the site.
     var s = document.createElement('script');
-    s.src = '/js/site-search.js?v=51';
+    s.src = '/js/site-search.js?v=52';
     s.async = false;
     document.head.appendChild(s);
 })();

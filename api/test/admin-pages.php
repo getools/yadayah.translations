@@ -169,10 +169,11 @@ case 'POST':
     $code = trim($input['page_test_code'] ?? '');
     if (!$code) errorResponse('page_test_code is required');
 
-    $stmt = $db->prepare("INSERT INTO yy_page_test (page_test_code, page_test_title, page_test_meta_description, page_test_url, page_test_heading, page_test_subheading, page_test_description, page_test_heading_color, page_test_heading_size, page_test_subheading_color, page_test_subheading_size, page_test_description_color, page_test_description_size, page_test_description_class, page_test_description_style, page_test_background_color, page_test_text_color, page_test_heading_font, page_test_subheading_font, page_test_body_font, page_test_active_flag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING page_test_key");
+    $stmt = $db->prepare("INSERT INTO yy_page_test (page_test_code, page_test_title, page_test_label, page_test_meta_description, page_test_url, page_test_heading, page_test_subheading, page_test_description, page_test_heading_color, page_test_heading_size, page_test_subheading_color, page_test_subheading_size, page_test_description_color, page_test_description_size, page_test_description_class, page_test_description_style, page_test_background_color, page_test_text_color, page_test_heading_font, page_test_subheading_font, page_test_body_font, page_test_subnav_color, page_test_subnav_font, page_test_subnav_size, page_test_subnav_gap, page_test_subnav_width, page_test_active_flag, page_test_revision_dtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now()) RETURNING page_test_key, page_test_revision_dtime");
     $stmt->execute([
         $code,
         trim($input['page_test_title'] ?? '') ?: null,
+        trim($input['page_test_label'] ?? '') ?: null,
         trim($input['page_test_meta_description'] ?? '') ?: null,
         trim($input['page_test_url'] ?? '') ?: null,
         trim($input['page_test_heading'] ?? '') ?: null,
@@ -191,9 +192,18 @@ case 'POST':
         trim($input['page_test_heading_font'] ?? '') ?: null,
         trim($input['page_test_subheading_font'] ?? '') ?: null,
         trim($input['page_test_body_font'] ?? '') ?: null,
+        // Subheader-menu (sub-toolbar) style overrides — mirror the Category
+        // list style set on Items sections. Blank = fall back to the built-in
+        // gold .page-tabs treatment.
+        trim($input['page_test_subnav_color'] ?? '') ?: null,
+        trim($input['page_test_subnav_font'] ?? '') ?: null,
+        trim($input['page_test_subnav_size'] ?? '') ?: null,
+        trim($input['page_test_subnav_gap'] ?? '') ?: null,
+        trim($input['page_test_subnav_width'] ?? '') ?: null,
         ($input['page_test_active_flag'] ?? true) ? 't' : 'f',
     ]);
-    jsonResponse(['page_test_key' => (int)$stmt->fetchColumn()], 201);
+    $created = $stmt->fetch();
+    jsonResponse(['page_test_key' => (int)$created['page_test_key'], 'saved_at' => $created['page_test_revision_dtime']], 201);
 
 case 'PUT':
     $key = (int)($_GET['key'] ?? 0);
@@ -208,10 +218,15 @@ case 'PUT':
     $code = trim($input['page_test_code'] ?? '');
     if (!$code) errorResponse('page_test_code is required');
 
-    $stmt = $db->prepare("UPDATE yy_page_test SET page_test_code = ?, page_test_title = ?, page_test_meta_description = ?, page_test_url = ?, page_test_heading = ?, page_test_subheading = ?, page_test_description = ?, page_test_heading_color = ?, page_test_heading_size = ?, page_test_subheading_color = ?, page_test_subheading_size = ?, page_test_description_color = ?, page_test_description_size = ?, page_test_description_class = ?, page_test_description_style = ?, page_test_background_color = ?, page_test_text_color = ?, page_test_heading_font = ?, page_test_subheading_font = ?, page_test_body_font = ?, page_test_active_flag = ? WHERE page_test_key = ?");
+    // NOTE: the per-page font columns (page_test_*_font) are no longer edited
+    // from the page form — default fonts now live globally in yy_page_test_style
+    // (Styles tab). COALESCE keeps any legacy per-page override in place when the
+    // payload omits the key, so saving a page never wipes an existing override.
+    $stmt = $db->prepare("UPDATE yy_page_test SET page_test_code = ?, page_test_title = ?, page_test_label = ?, page_test_meta_description = ?, page_test_url = ?, page_test_heading = ?, page_test_subheading = ?, page_test_description = ?, page_test_heading_color = ?, page_test_heading_size = ?, page_test_subheading_color = ?, page_test_subheading_size = ?, page_test_description_color = ?, page_test_description_size = ?, page_test_description_class = ?, page_test_description_style = ?, page_test_background_color = ?, page_test_text_color = ?, page_test_heading_font = COALESCE(?, page_test_heading_font), page_test_subheading_font = COALESCE(?, page_test_subheading_font), page_test_body_font = COALESCE(?, page_test_body_font), page_test_subnav_color = ?, page_test_subnav_font = ?, page_test_subnav_size = ?, page_test_subnav_gap = ?, page_test_subnav_width = ?, page_test_active_flag = ?, page_test_revision_dtime = now() WHERE page_test_key = ? RETURNING page_test_revision_dtime");
     $stmt->execute([
         $code,
         trim($input['page_test_title'] ?? '') ?: null,
+        trim($input['page_test_label'] ?? '') ?: null,
         trim($input['page_test_meta_description'] ?? '') ?: null,
         trim($input['page_test_url'] ?? '') ?: null,
         trim($input['page_test_heading'] ?? '') ?: null,
@@ -230,10 +245,15 @@ case 'PUT':
         trim($input['page_test_heading_font'] ?? '') ?: null,
         trim($input['page_test_subheading_font'] ?? '') ?: null,
         trim($input['page_test_body_font'] ?? '') ?: null,
+        trim($input['page_test_subnav_color'] ?? '') ?: null,
+        trim($input['page_test_subnav_font'] ?? '') ?: null,
+        trim($input['page_test_subnav_size'] ?? '') ?: null,
+        trim($input['page_test_subnav_gap'] ?? '') ?: null,
+        trim($input['page_test_subnav_width'] ?? '') ?: null,
         ($input['page_test_active_flag'] ?? true) ? 't' : 'f',
         $key,
     ]);
-    jsonResponse(['ok' => true]);
+    jsonResponse(['ok' => true, 'saved_at' => $stmt->fetchColumn()]);
 
 case 'DELETE':
     $key = (int)($_GET['key'] ?? 0);

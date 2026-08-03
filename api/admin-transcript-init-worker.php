@@ -241,8 +241,23 @@ try {
         if (!$spine) $spine = $baselines[0];
         // Operator-chosen Primary overrides the preference-list pick: it becomes
         // the spine (text + word-timing guidance) when it's among the baselines.
+        // BUT only when it actually carries word-level timing (a '-word' model).
+        // A segment-level Primary (e.g. gpu-whisperx-diarize) has a single start
+        // per ~1-6s segment; making it the spine collapses every cue carved from a
+        // segment onto that one start time, producing runs of duplicate/integer-
+        // second timestamps (the 2026-06/07 diarize-spine builds). Speaker labels
+        // are sourced from the diarize timeline independently below, so a
+        // segment-level Primary loses nothing by not being the timing spine. Only
+        // override when we have no word-level spine to protect in the first place.
         $primary = trim((string)($jp['primary'] ?? ''));
-        if ($primary !== '' && in_array($primary, $baselines, true)) $spine = $primary;
+        if ($primary !== '' && in_array($primary, $baselines, true)) {
+            if (str_ends_with($primary, '-word') || strpos((string)$spine, '-word') === false) {
+                $spine = $primary;
+            } else {
+                error_log("consensus: Primary '$primary' is segment-level; keeping word-level spine '$spine' for timing (speakers still sourced from diarize) item=$itemKey");
+                $notify('spine-note:kept-word-spine');
+            }
+        }
         $refs = array_values(array_diff($baselines, [$spine]));
         // Edit-weighted consensus: per-engine weights learned from how closely
         // each baseline tracks past HUMAN-EDITED finals (transcript-engine-grade.php

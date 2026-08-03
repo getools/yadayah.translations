@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784296805">
+    <meta name="page-version" content="1785736804">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
@@ -1774,9 +1774,15 @@ function openTranscript(itemKey) {
             + '<option value="Approved">Approved</option>'
             + '<option value="Errors">Errors</option>'
             + '</select>'
+            + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
             + '<div id="t-val-toggle" role="radiogroup" aria-label="Validation Status" style="display:inline-flex;border:1px solid #ccc;border-radius:4px;overflow:hidden;align-self:flex-start;">'
             + '<button type="button" data-status="Pending"  onclick="setValidationStatus(\'Pending\')"  style="padding:6px 14px;border:0;background:#fff;color:#333;font-size:0.85rem;font-weight:600;cursor:pointer;border-right:1px solid #ccc;">Pending</button>'
             + '<button type="button" data-status="Approved" onclick="setValidationStatus(\'Approved\')" style="padding:6px 14px;border:0;background:#fff;color:#333;font-size:0.85rem;font-weight:600;cursor:pointer;">Approved</button>'
+            + '</div>'
+            // Reset — clears the reviewer resume bookmark back to 0:00:00 and
+            // drops the status to Pending, so the Feeds list shows a plain
+            // "Pending" badge with no left-off timestamp.
+            + '<button type="button" id="t-val-reset" onclick="resetTranscriptProgress()" title="Reset review progress: clear the resume position (back to 0:00:00) and set the status to Pending. The Feeds list will show a plain \'Pending\' badge with no timestamp." style="padding:6px 12px;border:1px solid #ccc;background:#fff;color:#666;font-size:0.82rem;font-weight:600;cursor:pointer;border-radius:4px;">&#8635; Reset</button>'
             + '</div>'
             + '</div>'
             + '<div style="display:flex;flex-direction:column;gap:4px;">'
@@ -5468,6 +5474,43 @@ function clearBookmark() {
     }).then(function(r){return safeJson(r);}).then(function() {
         _lastSavedBookmarkSec = 0;
         renderBookmarkResume(0);
+    });
+}
+
+// Reset review progress from the validation panel. Clears the resume
+// bookmark to 0:00:00 AND sets the validation status back to Pending, so
+// the item reads as a plain "Pending" (no left-off timestamp) in the Feeds
+// list. Persists both changes, then repaints the in-page Feeds button.
+function resetTranscriptProgress() {
+    if (!_transcriptItemKey) return;
+    if (!confirm('Reset review progress?\n\nThis clears the resume position (back to 0:00:00) and sets the status to Pending.')) return;
+    var itemKey = _transcriptItemKey;
+    // Flip the visible toggle + hidden <select> back to Pending so
+    // saveValidation() writes Pending and doneTranscript() stays consistent.
+    setValidationStatus('Pending');
+    Promise.all([
+        saveValidation(),
+        fetch(API + '/admin-transcript.php', {
+            method: 'POST', credentials: 'include',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({action:'save_bookmark', item_key: itemKey, seconds: 0})
+        }).then(function(r){return safeJson(r);})
+    ]).then(function() {
+        _lastSavedBookmarkSec = 0;
+        renderBookmarkResume(0);
+        // Zero the cached bookmark so the Feeds button repaints as plain
+        // "Pending" — updateTranscribeButton() reads transcript_bookmark_seconds
+        // off the cached _allItems row.
+        if (_allItems) {
+            var it = _allItems.find(function(x) { return x.feed_item_key == itemKey; });
+            if (it) it.transcript_bookmark_seconds = 0;
+        }
+        updateTranscribeButton(itemKey, 'Pending');
+        var st = document.getElementById('t-status');
+        if (st) {
+            st.textContent = 'Progress reset';
+            setTimeout(function() { if (st.textContent === 'Progress reset') st.textContent = ''; }, 2500);
+        }
     });
 }
 
@@ -10670,6 +10713,6 @@ function deleteYoutubeCookies() {
 checkAuth();
 </script>
 <script src="/js/session-state.js?v=1"></script>
-<script src="/js/error-reporter.js?v=12"></script>
+<script src="/js/error-reporter.js?v=13"></script>
 </body>
 </html>

@@ -194,6 +194,19 @@ if [ -d "$LIVE" ]; then
 fi
 mv "$STAGING" "$LIVE"
 
+# -- Retention: each rebuild leaves the previously-live install behind in
+# _archive_fliphtml5 as a full (~200MB) copy. Keep the base slot ($URL_SLUG,
+# the original FlipHTML5 import) plus the most recent timestamped snapshot;
+# delete older timestamped snapshots for THIS slug so the archive cannot grow
+# unbounded. Matches only "$URL_SLUG.<8digits>-<6digits>" so sibling slugs
+# that share a prefix are never touched.
+KEEP_SNAPSHOTS=1
+mapfile -t _OLD_SNAPS < <(ls -1dt "$ARCHIVE/$URL_SLUG".[0-9]*-[0-9]* 2>/dev/null | tail -n +$((KEEP_SNAPSHOTS+1)))
+if [ "${#_OLD_SNAPS[@]}" -gt 0 ]; then
+    log "retention: pruning ${#_OLD_SNAPS[@]} old flipbook snapshot(s) for $URL_SLUG"
+    rm -rf "${_OLD_SNAPS[@]}"
+fi
+
 log "✓ swapped: $TOTAL pages live at /$URL_SLUG/"
 
 # ── Refresh yy_volume tracking columns so the admin Books page reflects

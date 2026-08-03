@@ -940,7 +940,7 @@ fi
 # the freshly-rendered case in-band. Mirrors the same guard the stale-sweep
 # uses at Phase 6.
 if [ -x /opt/yada-www/parsers/parse_volume_from_bundle.py ]; then
-    parse_target=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -At -c "SELECT volume_key FROM yy_volume WHERE volume_docx IS NOT NULL AND (volume_parse_status IS NULL OR volume_parse_status IN ('queued','stale')) AND COALESCE(volume_pipeline_status,'') NOT IN ('queued','running','waiting-docx','error') ORDER BY CASE WHEN volume_parse_status='queued' THEN 0 ELSE 1 END, volume_key LIMIT 1")
+    parse_target=$(docker exec "$PG_CONTAINER" psql -U postgres -d yada -At -c "SELECT volume_key FROM yy_volume WHERE volume_docx IS NOT NULL AND (volume_parse_status IS NULL OR volume_parse_status IN ('queued','stale')) AND COALESCE(volume_pipeline_status,'') NOT IN ('queued','running','waiting-docx','error','warning','flipbook-running') ORDER BY CASE WHEN volume_parse_status='queued' THEN 0 ELSE 1 END, volume_key LIMIT 1")
     if [ -n "$parse_target" ]; then
         log "Parse-sweep: picking up volume $parse_target"
         DID_WORK=1

@@ -92,6 +92,8 @@ function sse_load_chapters(PDO $db, int $ttsKey, int $volumeKey): array {
     if (!$volume) return ['volume' => null, 'chapters' => []];
     $cStmt = $db->prepare("
         SELECT c.chapter_key, c.chapter_number, c.chapter_name AS chapter_label, c.chapter_page,
+               (SELECT MIN(p.paragraph_page) FROM yy_paragraph p
+                 WHERE p.chapter_key = c.chapter_key) AS chapter_pdf_page,
                a.tts_audio_status, a.tts_audio_progress, a.tts_audio_message,
                a.tts_audio_path, a.tts_audio_duration_secs, a.tts_audio_size_bytes,
                a.tts_audio_completed_dtime, a.tts_audio_started_dtime,

@@ -133,10 +133,18 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
     $chapterStatus  = (string)($a['tts_audio_status'] ?? '');
     $chapterRunning = ($chapterStatus === 'running');
     $chapterDone    = ($chapterStatus === 'complete');
-    // For a RUNNING build, a clip counts as produced-this-run only if it was
-    // written at/after this build started — so reused-but-stale old clips
-    // from a prior build read as "processing", not a premature "complete".
-    $startedEpoch = !empty($a['tts_audio_started_dtime']) ? strtotime((string)$a['tts_audio_started_dtime']) : 0;
+    // For a RUNNING build, a paragraph is "processing" iff its part file is
+    // absent on disk — the SAME reuse-vs-synth test the worker itself makes
+    // per iteration (is_file && filesize>0 → reuse, else synth). A present
+    // part is valid current audio: the only actions that could leave a STALE
+    // part behind (start / start_all / restart) wipe the parts dir first
+    // (ttsWipePartsDir), so a stale-but-present clip can't survive a rebuild.
+    // Every action that KEEPS the parts dir (resume, retry_failed, per-para
+    // redo) reuses those parts unchanged, so they're genuinely done — mark
+    // them complete. (This replaced an mtime>=started_dtime guard that, on
+    // resume/retry, flagged every REUSED paragraph "processing" because those
+    // paths reset started_dtime=NOW() while their parts kept the prior build's
+    // older mtime — so a single-paragraph redo lit up the whole chapter.)
     $failedSet = array_flip(array_map('intval',
         preg_split('/[,{}]/', (string)($a['tts_audio_failed_paragraphs'] ?? ''), -1, PREG_SPLIT_NO_EMPTY)));
     $settings = json_decode((string)($a['tts_audio_settings'] ?? '{}'), true) ?: [];
@@ -260,6 +268,30 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
         $widx++;
     }
 
+    // ── Stale parts-cache guard ────────────────────────────────────
+    // p<i>.mp3 is index-addressed — it maps to the right paragraph only while
+    // the on-disk clip set matches the current $widx survivors. A re-parse
+    // (or a non-wiping rebuild that reused clips across one) leaves MORE parts
+    // on disk than there are survivors — the tell-tale that indices SHIFTED,
+    // so a per-paragraph clip we'd serve could be a neighbour's audio. In that
+    // case withhold ALL per-paragraph players; the build worker's corpus-sig
+    // guard re-synthesises the chapter cleanly on its next build. We test
+    // strictly `> $widx` (never `!=`): a normal build caps at exactly $widx
+    // and grows from 0, so a mid-build or purged-clip chapter (fewer on disk)
+    // is NOT flagged — only genuine orphan surplus is. Row status is
+    // unaffected; only playback is gated, with a flag the panel can surface.
+    $onDiskParts = count(glob($partsDir . '/p*.mp3') ?: []);
+    $partsStale  = ($onDiskParts > $widx);
+    // A GAP-FILL rebuild (single-paragraph Redo, resume, retry_failed)
+    // deletes only the target part(s) and re-queues the CHAPTER to
+    // pending — every OTHER clip stays valid on disk. A from-scratch
+    // queue (start / start_all / restart) wipes the parts dir first, so
+    // 0 non-stale parts on disk == genuinely nothing done yet. This flag
+    // lets the per-paragraph classifier tell the two apart while the
+    // chapter sits in pending: siblings with a live clip stay complete
+    // instead of the whole chapter flashing pending on one redo.
+    $hasCachedParts = ($onDiskParts > 0 && !$partsStale);
+
     $out = [];
     $counts = ['complete'=>0,'processing'=>0,'pending'=>0,'merged'=>0,'skip_table'=>0,'skip_page'=>0,'skip_admin'=>0,'empty'=>0,'missing'=>0];
     $idx = 0;
@@ -318,13 +350,25 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
         elseif ($isSkipPage)             $status = 'skip_page';
         elseif (isset($emptyNums[$num])) $status = 'empty';
         elseif ($chapterDone)            $status = $wasVoiced ? 'complete' : 'missing';
-        elseif ($chapterRunning)         $status = ($hasPart && $partMtime >= $startedEpoch) ? 'complete' : 'processing';
-        else                             $status = 'pending';   // queued for generation
+        // A present, non-stale clip is current audio in a running build AND
+        // during a gap-fill redo's brief pending window (siblings keep their
+        // clips) - mark it complete either way so redoing ONE paragraph no
+        // longer flips the whole chapter to pending.
+        elseif ($hasPart && !$partsStale) $status = 'complete';
+        // No clip yet. If the chapter is actively running, or it is a
+        // gap-fill (queued but its siblings still have cached clips), this
+        // paragraph is the one being (re)synthesised -> processing. Only a
+        // from-scratch queue (parts dir wiped, no cached clips) is pending.
+        elseif ($chapterRunning || $hasCachedParts) $status = 'processing';
+        else                             $status = 'pending';   // from-scratch queue - nothing cached yet
 
         // Only offer a per-paragraph player when the clip is genuinely
-        // current — never for a stale clip left over on a pending rebuild.
-        $showPlayer = ($status === 'complete' && $hasPart
-                        && ($chapterDone || ($chapterRunning && $partMtime >= $startedEpoch)));
+        // current. A part on disk is current in both a complete and a running
+        // chapter (rebuilds wipe the dir, so nothing stale survives); a pending
+        // rebuild's leftover part isn't offered because $status isn't 'complete'
+        // there. The ?v=<mtime> cache-buster on $partUrl still defeats any
+        // same-path overwrite from a redo.
+        $showPlayer = ($status === 'complete' && $hasPart && !$partsStale);
         if (!$showPlayer) { $partUrl = null; }
 
         $counts[$status] = ($counts[$status] ?? 0) + 1;
@@ -351,7 +395,7 @@ if ($method === 'GET' && $action === 'list_paragraphs') {
         ];
         $idx++;
     }
-    jsonResponse(['audio_key' => $audioKey, 'paragraphs' => $out, 'counts' => $counts, 'config_error' => $cfgErr]);
+    jsonResponse(['audio_key' => $audioKey, 'paragraphs' => $out, 'counts' => $counts, 'config_error' => $cfgErr, 'parts_stale' => $partsStale]);
 }
 
 if ($method !== 'POST') errorResponse('POST required');

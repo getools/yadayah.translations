@@ -436,7 +436,23 @@ def consolidate_font_spans(html: str) -> str:
 
 
 def load_toc(bundle_dir):
-    """Return [(page, chapter_number, chapter_name)] sorted by page."""
+    """Return [(page, chapter_number_or_None, chapter_name)] sorted by page.
+
+    Two entry shapes appear in a YY book's toc.json:
+      • numbered chapters — title is "<n>  <Name>" (e.g. "6  A Voice");
+      • named sections    — a bare banner with no leading number: front
+        matter ("ABOUT THE AUTHOR") and back matter ("AFTERWORD",
+        "TOPICAL APPENDIX", "BIBLIOGRAPHY", "RESOURCES").
+
+    BOTH must become boundaries. The old regex accepted only the numbered
+    shape and silently dropped every named section, so each back-matter
+    page inherited the last numbered chapter — Afterword/Topical Appendix/
+    Bibliography/Resources were all swallowed into the final chapter
+    ("A Voice"), losing them as chapters and (because the appendix is
+    citation-dense) hiding ~1800 narratable paragraphs. Numbered entries
+    carry an int chapter_number; named entries carry None and are matched
+    to their yy_chapter row by name downstream (chapter_by_name in
+    parse_volume_from_bundle.py)."""
     if not bundle_dir:
         return []
     p = Path(bundle_dir) / "toc.json"
@@ -446,10 +462,49 @@ def load_toc(bundle_dir):
         data = json.load(f)
     out = []
     for entry in data.get("toc", []):
-        m = re.match(r"^\s*(\d+)\s+(.+?)\s*$", entry.get("title", ""))
-        if m and entry.get("page"):
-            out.append((int(entry["page"]), int(m.group(1)), m.group(2)))
-    out.sort()
+        title = (entry.get("title") or "").strip()
+        page = entry.get("page")
+        if not title or not page:
+            continue
+        m = re.match(r"^\s*(\d+)\s+(.+?)\s*$", title)
+        if m:
+            out.append((int(page), int(m.group(1)), m.group(2)))
+        else:
+            out.append((int(page), None, title))
+    out.sort(key=lambda e: e[0])
+    return out
+
+
+def toc_from_doc(doc):
+    """Chapter boundaries read straight from the PDF's OWN embedded bookmarks
+    — the single source of truth for the document actually being parsed.
+
+    Why not just load_toc(bundle_dir)? Because the bundle's toc.json is
+    (re)generated in a LATER pipeline phase (Phase 6 flipbook regen) than the
+    Phase 4 parse. On a re-upload that changes pagination, parse would consume
+    the PREVIOUS upload's toc.json and bucket every paragraph past the first
+    shifted chapter into the wrong chapter. That is exactly what corrupted
+    s06v05: a 950-page earlier draft's toc.json placed chapter 6 at page 738,
+    past the new 721-page PDF's last page, so no paragraph ever reached ch6/7/8
+    and chapter 5 swallowed all three. extract_toc.py builds toc.json from
+    precisely this doc.get_toc(), so reading it here is equivalent to a
+    freshly-regenerated toc.json and makes stale-toc corruption impossible.
+
+    Returns the same (page, chapter_number_or_None, chapter_name) shape as
+    load_toc() using the same title regex, so downstream chapter matching is
+    unchanged. Only top-level (level 1) bookmarks are chapter boundaries."""
+    out = []
+    for entry in (doc.get_toc() or []):
+        level, title, page = entry[0], entry[1], entry[2]
+        title = (title or "").strip()
+        if level != 1 or not title or not page:
+            continue
+        m = re.match(r"^\s*(\d+)\s+(.+?)\s*$", title)
+        if m:
+            out.append((int(page), int(m.group(1)), m.group(2)))
+        else:
+            out.append((int(page), None, title))
+    out.sort(key=lambda e: e[0])
     return out
 
 
@@ -495,11 +550,69 @@ def running_header_texts(doc, aliases=None):
     return {t for t, c in counts.items() if c >= threshold}
 
 
+# ── Table vs prose discrimination ────────────────────────────────────────
+# PyMuPDF's default (text-strategy) find_tables() reads an indented column
+# of quotations — an entire page of citation prose — as a multi-row
+# "table". In the citation-dense back matter (e.g. the s07v05 Topical
+# Appendix) that silently flagged ~1800 narratable paragraphs is_table, so
+# the TTS worker dropped them and the audiobook skipped the scripture it was
+# quoting. These predicates keep genuine data tables flagged while letting
+# prose through.
+_INDEX_PAIR_RE = re.compile(r'[A-Za-z][A-Za-z&/.ʾʿ \-]*?\s\d{1,4}(?=\s|$)')
+
+
+def _looks_tabular(text):
+    """True for a short, digit-dominated block — a genuine data-table cell
+    or row (dates, counts, visibility percentages). Long or letter-dominated
+    blocks are never tabular; this is what stops the borderless text-strategy
+    detector from swallowing citation prose."""
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    letters = sum(c.isalpha() for c in t)
+    digits  = sum(c.isdigit() for c in t)
+    return digits >= 2 and digits >= letters
+
+
+def _looks_like_index(text):
+    """True for an in-text table-of-contents / topic-index paragraph — a run
+    of 'Topic <page-number>' pairs, e.g. the first page of the s07v05 Topical
+    Appendix ('Fighting 519 Terrorism 527 War 537 …'). That page is
+    navigation, not narration, so it is skipped like a table even though
+    PyMuPDF (which keys on ruled/aligned cells) does not detect it. Requires
+    several pairs covering most of the paragraph, so an ordinary sentence
+    that merely cites one 'Book 12' reference never matches."""
+    t = (text or "").strip()
+    if len(t) < 40:
+        return False
+    matches = _INDEX_PAIR_RE.findall(t)
+    if len(matches) < 6:
+        return False
+    covered = sum(len(m) for m in matches)
+    return covered >= 0.6 * len(t)
+
+
 def parse_pdf(pdf_path, bundle_dir=None):
-    toc = load_toc(bundle_dir)
     out = []
     paragraph_idx = 0
+    # Per-page body text-box margins (from non-table body blocks), used by the
+    # geometric page-break-continuation test: page_right = the justified right
+    # edge, page_left = the un-indented left edge.
+    page_left = {}
+    page_right = {}
     with fitz.open(pdf_path) as doc:
+        # Chapter boundaries come from the PDF's own bookmarks (single source
+        # of truth for THIS document). The bundle's toc.json is only a fallback
+        # for PDFs that carry no embedded TOC — see toc_from_doc() for why the
+        # bundle copy can be stale relative to the PDF being parsed.
+        toc = toc_from_doc(doc)
+        if not toc:
+            toc = load_toc(bundle_dir)
+            if toc and max(p for p, _, _ in toc) > doc.page_count:
+                print("WARNING: fallback toc.json max page %d exceeds PDF "
+                      "page_count %d — bundle toc is stale, chapters may be "
+                      "mis-assigned" % (max(p for p, _, _ in toc), doc.page_count),
+                      file=sys.stderr)
         aliases = embedded_font_aliases(doc)
         if aliases:
             print("embedded fonts resolved: %s" % sorted(set(aliases.values())), file=sys.stderr)
@@ -520,9 +633,14 @@ def parse_pdf(pdf_path, bundle_dir=None):
             # find_tables() is best-effort — narrative columns can
             # occasionally false-positive. The admin's per-volume
             # volume_skip_pages list is the manual override.
+            # find_tables() is a weak signal here: on citation-dense prose it
+            # reads an indented quotation column as a multi-row "table". It is
+            # kept only to locate a plausible table REGION; whether a block in
+            # that region is actually tabular is decided per-block by content
+            # in the loop below.
             try:
-                tbls = page.find_tables()
-                table_rects = [fitz.Rect(t.bbox) for t in tbls.tables] if tbls else []
+                _tbls = page.find_tables()
+                table_rects = [fitz.Rect(t.bbox) for t in _tbls.tables] if _tbls else []
             except Exception:
                 table_rects = []
 
@@ -547,10 +665,35 @@ def parse_pdf(pdf_path, bundle_dir=None):
                 warning = None
                 if len(text_plain) <= 3 and not re.search(r"</?[bi]>", text_html):
                     warning = "very short paragraph (possible artifact)"
-                # Block lives inside a detected table region if its bbox
-                # intersects any table rect on this page.
+                # A block is tabular only when it sits in a detected table
+                # region AND its own content is genuinely tabular (a short,
+                # digit-dominated data cell) — never when it is prose. This
+                # is what stops the citation columns of the Topical Appendix
+                # (~1800 quotations) from being dropped as a "table".
+                # Separately, an in-text index/contents paragraph is skipped
+                # like a table even when PyMuPDF's region detector misses it.
                 blk_rect = fitz.Rect(block["bbox"])
-                is_table = any(blk_rect.intersects(tr) for tr in table_rects)
+                in_region = any(blk_rect.intersects(tr) for tr in table_rects)
+                is_table = ((in_region and _looks_tabular(text_plain))
+                            or _looks_like_index(text_plain))
+                # Geometry for page-break-continuation detection: first line's
+                # left edge (indentation) and last line's right edge (whether
+                # the line is justified / full-width). Track the page's text-box
+                # margins from non-table blocks only.
+                _lines = block.get("lines") or []
+                if _lines:
+                    first_x0 = _lines[0]["bbox"][0]
+                    last_x1 = _lines[-1]["bbox"][2]
+                    if not is_table:
+                        blk_min = min(ln["bbox"][0] for ln in _lines)
+                        blk_max = max(ln["bbox"][2] for ln in _lines)
+                        if blk_min < page_left.get(page_num, 1e9):
+                            page_left[page_num] = blk_min
+                        if blk_max > page_right.get(page_num, -1e9):
+                            page_right[page_num] = blk_max
+                else:
+                    first_x0 = block["bbox"][0]
+                    last_x1 = block["bbox"][2]
                 out.append({
                     "page": page_num,
                     "paragraph_number": paragraph_idx,
@@ -559,11 +702,13 @@ def parse_pdf(pdf_path, bundle_dir=None):
                     "text_plain": text_plain,
                     "text_html": text_html,
                     "_runs": runs,
+                    "_first_x0": first_x0,
+                    "_last_x1": last_x1,
                     "warning": warning,
                     "is_table": is_table,
                     "is_continuation": False,
                 })
-    mark_page_break_continuations(out)
+    mark_page_break_continuations(out, page_left, page_right)
     return out
 
 
@@ -580,44 +725,69 @@ def parse_pdf(pdf_path, bundle_dir=None):
 # flagged tails into their preceding head before synthesis, so a logical
 # paragraph reads as one block. Display / search / translations see the
 # rows individually — only TTS opts into the coalesce.
+#
+# PRIMARY signal is TYPOGRAPHIC (reliable across capitalization): a paragraph
+# continues onto the next page iff the head's last line on page N is JUSTIFIED
+# (full-width — a paragraph's true final line is short/ragged) AND the tail's
+# first line on page N+1 is NOT first-line-indented (a genuinely new paragraph
+# is indented). The old text-only rule (tail starts lowercase / citation
+# fragment) missed every continuation whose tail began with a capital — a
+# proper noun or a new sentence within the same paragraph — which is extremely
+# common (Yahowah, Dowd, Beryth, …). The text rules are KEPT as a fallback for
+# PDFs that are not justified (ragged-right), where the geometry signal is mute.
 _CONT_CITATION_FRAG_RE = re.compile(
     r'^\([A-Za-zʿʾ][A-Za-zʿʾ\s/]+\s+\d+:\d+(?:-\d+)?\)|'   # (Book ch:v) or (Book ch:v-end)
     r'^\d+:\d+(?:-\d+)?\)|'                                                    # bare 'ch:v)' tail
     r'^\)'                                                                      # orphan close paren
 )
+_CONT_GAP_MAX = 12.0      # head last-line right gap <= this => justified/full line
+_CONT_INDENT_MAX = 10.0   # tail first-line indent <= this => not a new (indented) paragraph
 
 
-def _is_page_continuation(prev, cur):
+def _is_page_continuation(prev, cur, page_left=None, page_right=None):
     """True iff `cur` looks like a page-wrap continuation of `prev`.
-    Heuristics intentionally conservative — we'd rather miss a continuation
-    than incorrectly merge two real paragraphs."""
+    Geometry (justified head + un-indented tail) is primary; conservative text
+    signals are the fallback for non-justified layouts."""
     if cur["page"] - prev["page"] != 1:
         return False
     prev_text = (prev.get("text_plain") or "").rstrip()
     cur_text  = (cur.get("text_plain")  or "").lstrip()
     if not prev_text or not cur_text:
         return False
+    # Never coalesce a table row into prose (or vice-versa).
+    if cur.get("is_table") or prev.get("is_table"):
+        return False
     # Lone-digit chapter-heading "5" paragraphs are NOT continuations.
     if cur_text.strip().isdigit():
         return False
+
+    # PRIMARY: typographic layout. Head's last line justified (reaches the page
+    # right margin) AND tail's first line un-indented (at the page left margin).
+    if page_left is not None and page_right is not None:
+        R = page_right.get(prev["page"])
+        L = page_left.get(cur["page"])
+        lx = prev.get("_last_x1")
+        fx = cur.get("_first_x0")
+        if None not in (R, L, lx, fx):
+            if (R - lx) <= _CONT_GAP_MAX and (fx - L) <= _CONT_INDENT_MAX:
+                return True
+
+    # FALLBACK (non-justified PDFs / robustness): conservative text signals.
     cur_first = cur_text[0]
-    # Mid-sentence wrap (current paragraph starts mid-clause).
-    if cur_first.islower():
+    if cur_first.islower():                     # mid-sentence wrap
         return True
-    # Citation fragment patterns.
-    if _CONT_CITATION_FRAG_RE.match(cur_text):
+    if _CONT_CITATION_FRAG_RE.match(cur_text):  # citation fragment tail
         return True
-    # Orphan close paren as first character.
-    if cur_first == ')':
+    if cur_first == ')':                        # orphan close paren
         return True
     return False
 
 
-def mark_page_break_continuations(out):
+def mark_page_break_continuations(out, page_left=None, page_right=None):
     """Walks `out` and sets is_continuation=True on detected page-wrap
     continuations. The head paragraph's flag stays False. Mutates in place."""
     for i in range(1, len(out)):
-        if _is_page_continuation(out[i-1], out[i]):
+        if _is_page_continuation(out[i-1], out[i], page_left, page_right):
             out[i]["is_continuation"] = True
     return out
 

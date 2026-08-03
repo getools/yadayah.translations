@@ -770,6 +770,38 @@ function cfBuildMessages(array $ctx, array $lines): array {
     ];
 }
 
+/**
+ * Merge-guard for the LLM reconcile pass. Returns true when the model's reply
+ * for line i ($new) has swallowed the NEXT line's wording ($next) that the
+ * original line i ($old) did not already contain — the tell-tale of a forbidden
+ * merge that leaves i ballooned while i+1 stays put (duplicated text in the
+ * editor). Word-level, punctuation-insensitive contiguous-run match; ignores
+ * trivially short next lines to avoid rejecting legitimate small repairs.
+ */
+function cfMergeNorm(string $s): array {
+    $s = mb_strtolower(preg_replace('/[^\p{L}\p{N}]+/u', ' ', $s));
+    $s = trim(preg_replace('/\s+/u', ' ', $s));
+    return $s === '' ? [] : explode(' ', $s);
+}
+function cfContiguousContains(array $hay, array $needle): bool {
+    $n = count($needle); $h = count($hay);
+    if ($n === 0 || $n > $h) return false;
+    for ($i = 0; $i + $n <= $h; $i++) {
+        $ok = true;
+        for ($j = 0; $j < $n; $j++) { if ($hay[$i + $j] !== $needle[$j]) { $ok = false; break; } }
+        if ($ok) return true;
+    }
+    return false;
+}
+function cfReplySwallowsNext(string $new, string $old, string $next): bool {
+    $nextTok = cfMergeNorm($next);
+    if (count($nextTok) < 3) return false;                 // too short to be sure
+    $newTok = cfMergeNorm($new);
+    $oldTok = cfMergeNorm($old);
+    if (cfContiguousContains($oldTok, $nextTok)) return false; // i already had it
+    return cfContiguousContains($newTok, $nextTok);            // i now swallows i+1
+}
+
 // ── Auto multi-baseline LLM reconciliation (Layer 3) ─────────────────────────
 //   Runs the SAME baseline-aware consensus-decode that Smart Captions' ai_chunk
 //   does, but server-side over a freshly-built transcript so the *starting*
@@ -849,9 +881,19 @@ function llmReconcileTranscript(PDO $db, int $itemKey, array $baselineCodes,
                 if (isset($l['i']) && array_key_exists('text', $l)) $byIdx[(int)$l['i']] = (string)$l['text'];
             }
         }
-        foreach ($lines as $l) {
+        $nLines = count($lines);
+        foreach ($lines as $pos => $l) {
             $new = array_key_exists($l['i'], $byIdx) ? trim($byIdx[$l['i']]) : $l['old'];
             if ($new === '') $new = $l['old'];               // never blank a line
+            // Merge-guard: the prompt forbids merging lines, but the model will
+            // occasionally return line i as the CONCATENATION of i (+i+1[+i+2]…)
+            // while i+1/i+2 stay put — line i then balloons and its text repeats
+            // in the following rows (visible duplication). Reject any reply that
+            // swallows the next input line's wording and keep the original.
+            if ($new !== $l['old'] && $pos + 1 < $nLines
+                && cfReplySwallowsNext($new, $l['old'], (string)$lines[$pos + 1]['old'])) {
+                $new = $l['old'];
+            }
             if ($new !== $l['old']) { $upd->execute([$new, $l['key'], $itemKey]); $changed++; }
         }
         $chunks++;

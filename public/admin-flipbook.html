@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784296805">
+    <meta name="page-version" content="1785736804">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Flipbook Admin - Yada Yah</title>
@@ -27,6 +27,17 @@
         .fb-col > .h { font-size: 0.78rem; font-weight: 600; color: #444; }
         .fb-inline { display: inline-flex; align-items: center; gap: 6px; }
         .fb-suffix { font-size: 0.82rem; color: #666; }
+        /* Background colors carry an opacity slider alongside the hue picker so
+           a surface can be made translucent (or fully clear). The swatch sits on
+           a checkerboard so partial alpha is visible at a glance. */
+        .fb-alpha { display: inline-flex; align-items: center; gap: 8px; }
+        .fb-alpha .fb-swatch { width: 32px; height: 32px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; position: relative; overflow: hidden; flex-shrink: 0;
+            background-image: linear-gradient(45deg, #ccc 25%, transparent 25%), linear-gradient(-45deg, #ccc 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ccc 75%), linear-gradient(-45deg, transparent 75%, #ccc 75%);
+            background-size: 10px 10px; background-position: 0 0, 0 5px, 5px -5px, -5px 0; }
+        .fb-alpha .fb-swatch .fb-tint { position: absolute; inset: 0; }
+        .fb-alpha .fb-swatch input[type=color] { position: absolute; top: -4px; left: -4px; width: 44px; height: 44px; border: none; padding: 0; cursor: pointer; opacity: 0; }
+        .fb-alpha input[type=range] { width: 90px; }
+        .fb-alpha .fb-alpha-val { font-size: 0.75rem; color: #666; width: 30px; text-align: center; }
 </style>
 </head>
 <body>
@@ -129,7 +140,7 @@ var SECTIONS = [
         fields: [
             { code: 'icon-width',  label: 'Width (px)',  type: 'number', default: '24' },
             { code: 'icon-height', label: 'Height (px)', type: 'number', default: '28' },
-            { code: 'icon-bg',     label: 'Background',  type: 'color',  default: '#ffffff' }
+            { code: 'icon-bg',     label: 'Background',  type: 'color',  default: '#ffffff', alpha: true }
         ]
     },
     {
@@ -138,17 +149,17 @@ var SECTIONS = [
         fields: [
             { type: 'row', label: 'Buttons', cols: [
                 { header: 'Diameter',   field: { code: 'player-btn-size',         type: 'number', default: '43', min: 20, max: 120, suffix: 'px', width: '54px' } },
-                { header: 'Background',  field: { code: 'player-btn-bg',          type: 'color',  default: '#1f3550' } },
-                { header: 'Hover',       field: { code: 'player-btn-bg-hover',     type: 'color',  default: '#28456a' } },
+                { header: 'Background',  field: { code: 'player-btn-bg',          type: 'color',  default: '#1f3550', alpha: true } },
+                { header: 'Hover',       field: { code: 'player-btn-bg-hover',     type: 'color',  default: '#28456a', alpha: true } },
                 { header: 'Border',      field: { code: 'player-btn-border',       type: 'color',  default: '#2a4d70' } },
                 { header: 'Size',        field: { code: 'player-btn-border-width', type: 'number', default: '1',  min: 0, max: 20, suffix: 'px', width: '54px' } }
             ] },
             { code: 'player-icon-color',     label: 'Icon color (speaker/play)',type: 'color', default: '#cfe1ff' },
-            { code: 'player-track-bg',       label: 'Progress & volume track',  type: 'color', default: '#c8c8c8' },
-            { code: 'player-fill-bg',        label: 'Progress indicator (fill)',type: 'color', default: '#1f3550' },
-            { code: 'player-thumb-bg',       label: 'Volume slider knob',       type: 'color', default: '#cfe1ff' },
+            { code: 'player-track-bg',       label: 'Progress & volume track',  type: 'color', default: '#c8c8c8', alpha: true },
+            { code: 'player-fill-bg',        label: 'Progress indicator (fill)',type: 'color', default: '#1f3550', alpha: true },
+            { code: 'player-thumb-bg',       label: 'Volume slider knob',       type: 'color', default: '#cfe1ff', alpha: true },
             { code: 'player-time-color',     label: 'Time readout text',        type: 'color', default: '#cfe1ff' },
-            { code: 'player-pausing-bg',     label: 'Between-chapters pause bg',    type: 'color', default: '#4d3a1f' },
+            { code: 'player-pausing-bg',     label: 'Between-chapters pause bg',    type: 'color', default: '#4d3a1f', alpha: true },
             { code: 'player-pausing-border', label: 'Between-chapters pause border',type: 'color', default: '#6d5a3a' },
             { code: 'player-pausing-color',  label: 'Between-chapters pause icon',  type: 'color', default: '#f7d77a' },
             { code: 'player-highlight',      label: 'Read-along highlight',     type: 'color', default: '#ffe696' },
@@ -157,13 +168,63 @@ var SECTIONS = [
     }
 ];
 
+// ── Background colors with an alpha channel ──────────────────────────
+// Fields flagged `alpha: true` render a hue picker plus an opacity slider and
+// persist as rgba(r,g,b,a). The stored string is carried by a hidden input so
+// saveAll()'s [data-code] sweep picks it up unchanged. Existing plain-hex
+// values load as fully opaque; `transparent` loads as alpha 0.
+function parseColorParts(v, fallbackHex) {
+    var s = String(v == null ? '' : v).trim();
+    var m = s.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/);
+    if (m) {
+        var toHex2 = function(n) { return ('0' + Math.max(0, Math.min(255, parseInt(n, 10))).toString(16)).slice(-2); };
+        return { hex: '#' + toHex2(m[1]) + toHex2(m[2]) + toHex2(m[3]),
+                 a: m[4] !== undefined ? Math.max(0, Math.min(1, parseFloat(m[4]))) : 1 };
+    }
+    if (/^#[0-9a-f]{6}$/i.test(s)) return { hex: s.toLowerCase(), a: 1 };
+    if (/^#[0-9a-f]{3}$/i.test(s)) return { hex: '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3], a: 1 };
+    if (s.toLowerCase() === 'transparent') return { hex: fallbackHex, a: 0 };
+    return { hex: fallbackHex, a: 1 };
+}
+
+function rgbaString(hex, a) {
+    var r = parseInt(hex.substr(1, 2), 16), g = parseInt(hex.substr(3, 2), 16), b = parseInt(hex.substr(5, 2), 16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + a.toFixed(2) + ')';
+}
+
+function alphaColorInput(f, v) {
+    var p = parseColorParts(v, /^#[0-9a-f]{6}$/i.test(f.default) ? f.default : '#ffffff');
+    var rgba = rgbaString(p.hex, p.a);
+    return '<span class="fb-alpha">'
+         +   '<span class="fb-swatch"><span class="fb-tint" style="background:' + esc(rgba) + '"></span>'
+         +     '<input type="color" value="' + esc(p.hex) + '" oninput="alphaSync(this)" title="Pick color">'
+         +   '</span>'
+         +   '<input type="range" min="0" max="100" step="1" value="' + Math.round(p.a * 100) + '" oninput="alphaSync(this)" title="Opacity">'
+         +   '<span class="fb-alpha-val">' + p.a.toFixed(2) + '</span>'
+         +   '<input type="hidden" data-code="' + esc(f.code) + '" value="' + esc(rgba) + '">'
+         + '</span>';
+}
+
+// Recompute the stored rgba from whichever control the user moved.
+function alphaSync(el) {
+    var wrap  = el.closest('.fb-alpha');
+    var hex   = wrap.querySelector('input[type=color]').value;
+    var a     = parseInt(wrap.querySelector('input[type=range]').value, 10) / 100;
+    var rgba  = rgbaString(hex, a);
+    wrap.querySelector('.fb-tint').style.background = rgba;
+    wrap.querySelector('.fb-alpha-val').textContent = a.toFixed(2);
+    wrap.querySelector('input[type=hidden]').value  = rgba;
+}
+
 // Build the input control for one field def. Shared by the standard
 // label/field rows and the multi-column "row" layout. Supports an optional
 // `suffix` (e.g. "px" printed to the right of the field) and `width`.
 function fieldInput(f, values) {
     var v = (values[f.code] != null) ? values[f.code] : f.default;
     var input;
-    if (f.type === 'color') {
+    if (f.type === 'color' && f.alpha) {
+        input = alphaColorInput(f, v);
+    } else if (f.type === 'color') {
         var col = /^#[0-9a-f]{6}$/i.test(v) ? v : f.default;
         input = '<input type="color" data-code="' + esc(f.code) + '" value="' + esc(col) + '">';
     } else if (f.type === 'textarea') {

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784296806">
+    <meta name="page-version" content="1785736805">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pages Admin - Yada Yah</title>
@@ -703,7 +703,7 @@ function renderSections(sections) {
             + '<span class="drag-handle" title="Drag to reorder">&#9776;</span>'
             + '<input type="text" class="s-code" value="' + escAttr(s.section_code) + '" placeholder="Section code">'
             + '<label style="white-space:nowrap;margin:0"><input type="checkbox" class="s-active"' + (s.section_active_flag ? ' checked' : '') + '> Active</label>'
-            + '<input type="number" class="s-sort" value="' + (s.section_sort || 0) + '" title="Sort order" style="width:60px">'
+            + '<input type="text" class="s-sort" value="' + (s.section_sort == null ? '' : s.section_sort) + '" title="Sort order" style="width:120px">'
             + '<button class="btn btn-danger btn-sm" onclick="removeSection(this)">Remove</button>'
             + '</div>'
             + '<div class="section-value-wrap">'
@@ -726,7 +726,7 @@ function addSection() {
         + '<span class="drag-handle" title="Drag to reorder">&#9776;</span>'
         + '<input type="text" class="s-code" value="" placeholder="Section code">'
         + '<label style="white-space:nowrap;margin:0"><input type="checkbox" class="s-active" checked> Active</label>'
-        + '<input type="number" class="s-sort" value="0" title="Sort order" style="width:60px">'
+        + '<input type="text" class="s-sort" value="" title="Sort order" style="width:120px">'
         + '<button class="btn btn-danger btn-sm" onclick="removeSection(this)">Remove</button>'
         + '</div>'
         + '<div class="section-value-wrap">'
@@ -751,12 +751,13 @@ function saveSections() {
     for (var i = 0; i < items.length; i++) {
         var item = items[i];
         var key = item.getAttribute('data-key');
+        var sortRaw = item.querySelector('.s-sort').value.trim();
         sections.push({
             section_key: key ? parseInt(key) : null,
             section_code: item.querySelector('.s-code').value.trim(),
             section_value: item.querySelector('.s-value').value,
             section_active_flag: item.querySelector('.s-active').checked,
-            section_sort: parseInt(item.querySelector('.s-sort').value) || 0,
+            section_sort: sortRaw === '' ? null : (parseInt(sortRaw, 10) || 0),
         });
     }
 
@@ -818,6 +819,6 @@ checkAuth();
 </script>
 <script src="/js/admin-login.js?v=8"></script>
 <script src="/js/session-state.js?v=1"></script>
-<script src="/js/error-reporter.js?v=12"></script>
+<script src="/js/error-reporter.js?v=13"></script>
 </body>
 </html>

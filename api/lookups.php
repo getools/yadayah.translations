@@ -77,12 +77,12 @@ $TABLES = [
         ],
     ],
     'yy_cite' => [
-        'pk' => 'id',
-        'order' => 'sort ASC, id ASC',
+        'pk' => 'cite_key',
+        'order' => 'sort ASC, cite_key ASC',
         'columns' => [
-            ['name' => 'id',    'label' => 'ID',    'type' => 'pk'],
-            ['name' => 'label', 'label' => 'Label', 'type' => 'text'],
-            ['name' => 'sort',  'label' => 'Sort',  'type' => 'int'],
+            ['name' => 'cite_key', 'label' => 'ID',    'type' => 'pk'],
+            ['name' => 'label',    'label' => 'Label', 'type' => 'text'],
+            ['name' => 'sort',     'label' => 'Sort',  'type' => 'int'],
         ],
         'display' => 'label',
     ],

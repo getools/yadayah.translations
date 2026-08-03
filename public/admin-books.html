@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784296804">
+    <meta name="page-version" content="1785736804">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Books Admin - Yada Yah</title>
@@ -43,6 +43,35 @@
 
         .badge-active { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: 600; background: #d4edda; color: #155724; }
         .badge-inactive { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: 600; background: #f8d7da; color: #721c24; }
+
+        /* Source-control checkout ("lock") controls. A locked book shows the
+           holder; an unlocked book shows a subtle "check out" button. */
+        .lock-btn { display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px; border-radius: 12px; font-size: 0.72rem; font-weight: 600; cursor: pointer; border: 1px solid transparent; max-width: 100%; }
+        .lock-btn .lock-who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 64px; }
+        .lock-open { background: transparent; border-color: #d5d5d5; color: #999; }
+        .lock-open:hover { background: #f0f0f0; color: #555; }
+        .lock-held { background: #fdecea; border-color: #f5c6cb; color: #a4322b; }
+        .lock-held.lock-mine { background: #fff4d6; border-color: #f0d089; color: #8a6100; }
+        .lock-held:hover { filter: brightness(0.97); }
+
+        /* TTS column: a voice icon that opens the narration popover. */
+        .tts-icon-btn { background: transparent; border: 1px solid #d5d5d5; border-radius: 6px; cursor: pointer; font-size: 1.05rem; line-height: 1; padding: 4px 8px; color: #31345A; }
+        .tts-icon-btn:hover { background: #eef1ff; border-color: #b9c2f0; }
+
+        /* TTS narration popover — a large modal framing the admin-tts Books
+           pane (embed mode) so the full chapter build UI is available without
+           leaving the Books admin. */
+        #tts-popover-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 3000; justify-content: center; align-items: center; padding: 24px; }
+        #tts-popover-overlay.open { display: flex; }
+        .tts-popover-panel { background: #fff; border-radius: 10px; box-shadow: 0 12px 48px rgba(0,0,0,0.35); width: 96vw; max-width: 1600px; height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
+        .tts-popover-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: #31345A; color: #fff; }
+        .tts-popover-head h3 { margin: 0; font-size: 0.98rem; display: flex; align-items: center; gap: 8px; }
+        .tts-popover-head .tts-pop-actions { display: flex; align-items: center; gap: 10px; }
+        .tts-popover-head a.tts-pop-open { color: #E5C86C; font-size: 0.8rem; text-decoration: none; }
+        .tts-popover-head a.tts-pop-open:hover { text-decoration: underline; }
+        .tts-popover-head button { background: none; border: none; color: #fff; font-size: 1.5rem; line-height: 1; cursor: pointer; }
+        .tts-popover-body { flex: 1 1 auto; min-height: 0; }
+        .tts-popover-body iframe { width: 100%; height: 100%; border: 0; display: block; }
 
         .form-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); z-index: 1000; justify-content: center; align-items: flex-start; padding: 60px 20px; overflow-y: auto; }
         .form-overlay.open { display: flex; }
@@ -176,9 +205,17 @@
                 <div id="f-tts-status" style="font-size:0.78rem;color:#888;margin-top:4px;"></div>
             </div>
             <div class="field">
+                <label style="margin:0;">Checkout / Lock</label>
+                <div style="display:flex;align-items:center;gap:10px;margin-top:4px;">
+                    <span id="f-lock-state" style="font-size:0.85rem;color:#666;flex:1;">—</span>
+                    <button type="button" class="btn btn-secondary btn-sm" id="f-lock-btn" onclick="toggleLockFromForm(this)" style="white-space:nowrap;flex-shrink:0;">🔓 Check out</button>
+                </div>
+                <div style="font-size:0.74rem;color:#888;margin-top:4px;">While checked out, other admins can't upload a new DOCX for this book.</div>
+            </div>
+            <div class="field">
                 <label style="display:block;margin-bottom:6px;"><input type="checkbox" id="f-active" checked> Active</label>
                 <label style="display:block;margin-bottom:4px;"><input type="checkbox" id="f-search-flag" checked> Include in <strong>Book Search</strong></label>
-                <label style="display:block;margin-bottom:4px;"><input type="checkbox" id="f-parse-flag" checked> Parse for <strong>translations / glossary / paragraphs</strong></label>
+                <label style="display:block;margin-bottom:4px;"><input type="checkbox" id="f-parse-flag" checked> Parse for <strong>Translations / Glossary</strong></label>
                 <label style="display:block;"><input type="checkbox" id="f-ask-yada-flag" checked> Include in <strong>Ask Yada</strong> context</label>
             </div>
             <div class="field">
@@ -228,11 +265,34 @@
     </div>
 </div>
 
+<!-- TTS narration popover — frames the admin-tts Books pane (embed mode) with
+     the book pre-selected, so all chapter-level TTS build controls are usable
+     inline. The iframe src is only set when opened and cleared on close so its
+     SSE stream and any playing audio stop. -->
+<div id="tts-popover-overlay" onclick="if(event.target===this)closeTtsPopover()">
+    <div class="tts-popover-panel">
+        <div class="tts-popover-head">
+            <h3>🎙 <span id="tts-pop-title">Narration</span></h3>
+            <div class="tts-pop-actions">
+                <a id="tts-pop-open" class="tts-pop-open" href="#" target="_blank" rel="noopener" title="Open the full TTS studio in a new tab">Open full studio ↗</a>
+                <button type="button" onclick="closeTtsPopover()" title="Close">&times;</button>
+            </div>
+        </div>
+        <div class="tts-popover-body">
+            <iframe id="tts-pop-frame" title="TTS narration" src="about:blank"></iframe>
+        </div>
+    </div>
+</div>
+
 <script src="js/admin-links.js?v=4"></script>
 <script>
 var API = '/api';
 var allSeries = [];
 var allVolumes = [];
+// Identity of the logged-in admin — used to tell "I have this checked out"
+// (upload freely, prompt to release afterward) from "someone else holds it"
+// (upload blocked). Set from auth.php in checkAuth()/doLogin().
+var CURRENT_USER_KEY = null;
 
 function esc(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
 
@@ -241,6 +301,7 @@ function checkAuth() {
         if (d.authenticated) {
             document.getElementById('app').style.display = '';
             document.getElementById('user-display').textContent = d.user_name;
+            CURRENT_USER_KEY = d.user_key;
             applyPagePermissions(d.pages);
             loadBooks();
             loadUploaderSetup();
@@ -274,7 +335,7 @@ function doLogin() {
     var errEl = document.getElementById('login-error'); errEl.style.display = 'none';
     fetch(API + '/auth.php', {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify({login:user, password:pass})})
     .then(function(r){return safeJson(r);}).then(function(d) {
-        if (d.authenticated) { document.getElementById('login-screen').classList.remove('visible'); document.getElementById('app').style.display = ''; document.getElementById('user-display').textContent = d.user_name; applyPagePermissions(d.pages); loadBooks(); }
+        if (d.authenticated) { document.getElementById('login-screen').classList.remove('visible'); document.getElementById('app').style.display = ''; document.getElementById('user-display').textContent = d.user_name; CURRENT_USER_KEY = d.user_key; applyPagePermissions(d.pages); loadBooks(); }
         else { errEl.textContent = d.error || 'Login failed'; errEl.style.display = ''; }
     });
 }
@@ -612,6 +673,85 @@ function artifactCell(field, mtime, sourceMtime, pipelineStatus, label, download
          + '</div>';
 }
 
+// Booleans arrive from PDO-pgsql as real JSON booleans, but tolerate the
+// legacy 't'/'f' string form other endpoints have historically emitted.
+function volIsLocked(v) { return v.volume_locked_flag === true || v.volume_locked_flag === 't'; }
+function lockedByMe(v)  { return volIsLocked(v) && CURRENT_USER_KEY != null && v.volume_locked_by_key == CURRENT_USER_KEY; }
+
+// Lock cell for the books table. Unlocked → a subtle "Check out" pill; locked
+// → a pill naming the holder (gold when it's you, red when someone else). A
+// click toggles the checkout.
+function lockCell(v) {
+    if (!volIsLocked(v)) {
+        return '<button class="lock-btn lock-open" title="Available — click to check this book out so others can\'t upload a new version" '
+             + 'onclick="toggleLock(' + v.volume_key + ',true,this)">🔓 Check out</button>';
+    }
+    var who = v.volume_locked_by_name || 'admin';
+    var mine = lockedByMe(v);
+    var when = v.volume_locked_dtime ? fullDt(v.volume_locked_dtime) : '';
+    var title = 'Checked out by ' + who + (when ? ' on ' + when : '') + ' — click to release the lock';
+    return '<button class="lock-btn lock-held' + (mine ? ' lock-mine' : '') + '" title="' + esc(title) + '" '
+         + 'onclick="toggleLock(' + v.volume_key + ',false,this)">🔒 <span class="lock-who">' + esc(mine ? 'You' : who) + '</span></button>';
+}
+
+// Lock/unlock a volume. Releasing (or re-locking) a book someone else holds
+// asks for a force confirm first; the server also enforces this.
+function toggleLock(volumeKey, wantLock, btn, force) {
+    var v = allVolumes.find(function(r){ return r.volume_key == volumeKey; });
+    // Guard: releasing another admin's checkout needs an explicit confirm.
+    if (v && !force && !wantLock && volIsLocked(v) && !lockedByMe(v)) {
+        yesNoConfirm('This book is checked out by ' + (v.volume_locked_by_name || 'another admin')
+                   + '.\n\nForce-release their lock?', function(yes) {
+            if (yes) toggleLock(volumeKey, false, btn, true);
+        });
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    return fetch(API + '/admin-books.php?action=toggle_lock&key=' + volumeKey, {
+        method: 'POST', credentials: 'include',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({action:'toggle_lock', volume_key: volumeKey, locked: !!wantLock, force: !!force})
+    }).then(function(r){ return safeJson(r); }).then(function(d) {
+        if (d && d.error) { alert(d.error); if (btn) { btn.disabled = false; btn.style.opacity = ''; } return; }
+        return loadBooks();
+    }).catch(function(err) {
+        alert('Lock update failed: ' + (err && err.message ? err.message : 'network'));
+        if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+    });
+}
+
+// TTS cell: a voice icon that opens the narration popover (the admin-tts
+// Books pane, framed, with this volume pre-selected). Only meaningful once
+// the volume is saved (needs a volume_key), which every listed row has.
+function ttsCell(v) {
+    return '<button class="tts-icon-btn" title="Open TTS narration for “' + esc(v.volume_label) + '”" '
+         + 'onclick="openTtsPopover(' + v.volume_key + ')">🔊</button>';
+}
+
+// Open the TTS narration popover for a volume. Frames admin-tts in embed
+// mode (?embed=books) with the volume pre-selected, so the full chapter-level
+// build UI — Profile picker, per-chapter Rebuild/Delete/Hide, Pause/Build all —
+// is available without leaving the Books admin.
+function openTtsPopover(volumeKey) {
+    var v = allVolumes.find(function(r){ return r.volume_key == volumeKey; });
+    if (!v) return;
+    document.getElementById('tts-pop-title').textContent = v.volume_label || ('Volume ' + volumeKey);
+    var studioHref = '/admin-tts?volume=' + encodeURIComponent(volumeKey);
+    document.getElementById('tts-pop-open').href = studioHref;
+    document.getElementById('tts-pop-frame').src = studioHref + '&embed=books';
+    document.getElementById('tts-popover-overlay').classList.add('open');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeTtsPopover() {
+    document.getElementById('tts-popover-overlay').classList.remove('open');
+    // Clear the src so the embedded page's SSE stream and any playing audio
+    // stop when the popover is dismissed.
+    document.getElementById('tts-pop-frame').src = 'about:blank';
+    document.getElementById('tts-pop-title').textContent = 'Narration';
+    document.body.style.overflow = '';
+}
+
 function renderBooks() {
     var container = document.getElementById('table-container');
     if (!allSeries.length) { container.innerHTML = '<div style="text-align:center;padding:30px;color:#888">No series found.</div>'; return; }
@@ -650,7 +790,9 @@ function renderBooks() {
         + '<col style="width:74px;">'         // PDF
         + '<col style="width:77px;">'         // FLIP
         + '<col style="width:110px;">'        // Data (paragraphs + translations)
+        + '<col style="width:52px;">'         // TTS (narration popover)
         + '<col style="width:74px;">'         // Active
+        + '<col style="width:92px;">'         // Lock (checkout)
         + '<col style="width:120px;">'        // Actions
         + '</colgroup>'
         + '<thead><tr>'
@@ -662,7 +804,9 @@ function renderBooks() {
         + '<th class="status-cell" style="text-align:center;" title="PDF generated from the .docx">PDF</th>'
         + '<th class="status-cell" style="text-align:center;" title="Self-hosted flipbook built at /&lt;volume_code&gt;/">FLIP</th>'
         + '<th class="status-cell" style="text-align:center;" title="Number of Translations (T) and Paragraphs (P) pulled from the document">YY Parse</th>'
+        + '<th class="status-cell" style="text-align:center;" title="Open the chapter-level TTS narration studio for this book">TTS</th>'
         + '<th>Active</th>'
+        + '<th title="Check a book out to stop another admin uploading a new version">Lock</th>'
         + '<th>Actions</th>'
         + '</tr></thead><tbody>';
 
@@ -671,7 +815,7 @@ function renderBooks() {
         var vols = allVolumes.filter(function(v) { return v.series_key == s.series_key; });
 
         html += '<tr class="series-row" onclick="editSeries(' + s.series_key + ')">'
-            + '<td colspan="10">'
+            + '<td colspan="12">'
             + '<div style="display:flex;justify-content:space-between;align-items:center;">'
             + '<span>' + esc(s.series_label) + ' <span class="series-meta">(' + vols.length + ' volume' + (vols.length !== 1 ? 's' : '') + ')</span></span>'
             + '<span class="series-actions" onclick="event.stopPropagation()">'
@@ -696,7 +840,9 @@ function renderBooks() {
                 + '<td>' + artifactCell(!!v.volume_pdf,       v.volume_pdf_mtime,  v.volume_docx_mtime,   ps, 'PDF',       v.volume_pdf  ? '/pdf/' + encodeURIComponent(v.volume_pdf)         : null) + '</td>'
                 + '<td>' + flipCell(v) + '</td>'
                 + '<td>' + dataCell(v) + '</td>'
+                + '<td class="status-cell" onclick="event.stopPropagation()">' + ttsCell(v) + '</td>'
                 + '<td>' + (v.volume_active_flag ? '<span class="badge-active">Active</span>' : '<span class="badge-inactive">Inactive</span>') + '</td>'
+                + '<td onclick="event.stopPropagation()">' + lockCell(v) + '</td>'
                 + '<td class="actions" onclick="event.stopPropagation()">'
                 + '<button onclick="editVolume(' + v.volume_key + ')">Edit</button>'
                 + '<button class="del" onclick="deleteVolume(' + v.volume_key + ',\'' + esc(v.volume_label).replace(/'/g,"\\'") + '\')">Del</button>'
@@ -800,6 +946,9 @@ function showVolumeForm(record) {
         ttsBtn.disabled = true;
     }
 
+    // Checkout / lock state. Only meaningful once the volume is saved.
+    renderFormLock(r);
+
     document.getElementById('f-pdf-status').textContent = '';
     document.getElementById('f-flip-status').textContent = '';
     document.getElementById('f-tts-status').textContent = '';
@@ -817,6 +966,51 @@ function showVolumeForm(record) {
 }
 
 function closeForm() { document.getElementById('form-overlay').classList.remove('open'); }
+
+// Render the Checkout/Lock row inside the edit form from a volume record.
+function renderFormLock(r) {
+    var stateEl = document.getElementById('f-lock-state');
+    var btn = document.getElementById('f-lock-btn');
+    if (!r || !r.volume_key) {
+        stateEl.textContent = 'Save the volume first';
+        stateEl.style.color = '#888';
+        btn.disabled = true;
+        btn.textContent = '🔓 Check out';
+        btn.dataset.volumeKey = '';
+        return;
+    }
+    btn.disabled = false;
+    btn.dataset.volumeKey = r.volume_key;
+    if (volIsLocked(r)) {
+        var who = r.volume_locked_by_name || 'admin';
+        var when = r.volume_locked_dtime ? fullDt(r.volume_locked_dtime) : '';
+        var mine = lockedByMe(r);
+        stateEl.innerHTML = '🔒 Checked out by <strong>' + esc(mine ? 'you' : who) + '</strong>' + (when ? ' <span style="color:#999;">on ' + esc(when) + '</span>' : '');
+        stateEl.style.color = mine ? '#8a6100' : '#a4322b';
+        btn.textContent = '🔓 Release lock';
+        btn.dataset.wantLock = '0';
+    } else {
+        stateEl.textContent = 'Available (not checked out)';
+        stateEl.style.color = '#155724';
+        btn.textContent = '🔒 Check out';
+        btn.dataset.wantLock = '1';
+    }
+}
+
+// Edit-form Checkout/Lock button → toggleLock, then refresh the form row from
+// the freshly-loaded volume so the button flips without closing the panel.
+function toggleLockFromForm(btn) {
+    var volumeKey = parseInt(btn.dataset.volumeKey, 10);
+    if (!volumeKey) return;
+    var wantLock = btn.dataset.wantLock === '1';
+    var p = toggleLock(volumeKey, wantLock, btn);
+    if (p && p.then) {
+        p.then(function() {
+            var v = allVolumes.find(function(r){ return r.volume_key == volumeKey; });
+            if (v) renderFormLock(v);
+        });
+    }
+}
 
 function saveVolume() {
     var key = document.getElementById('f-key').value;
@@ -1104,9 +1298,26 @@ function uploadDocx() {
             return;
         }
         statusEl.innerHTML = '<span style="color:#2980b9">Queued. Conversion + flipbook build runs on the host (typically 1–3 minutes).</span>';
-        // Refresh books list so the new docx + status show up; reload the form too
+        // Refresh books list so the new docx + status show up; reload the form too.
         loadBooks().then(function() {
             var v = allVolumes.find(function(r){return r.volume_key==key;});
+            // If the uploader had this book checked out, offer to release the
+            // lock now that a new version is in — default Yes (yesNoConfirm
+            // focuses Yes). Only prompt when it's the current user's own lock.
+            if (v && lockedByMe(v)) {
+                yesNoConfirm('New DOCX uploaded. This book is checked out to you — release the lock so others can work on it?',
+                    function(yes) {
+                        if (yes) {
+                            toggleLock(v.volume_key, false, null).then(function() {
+                                var nv = allVolumes.find(function(r){return r.volume_key==key;});
+                                if (nv) showVolumeForm(nv);
+                            });
+                        } else if (v) {
+                            showVolumeForm(v);
+                        }
+                    });
+                return;
+            }
             if (v) showVolumeForm(v);
         });
     }).catch(function() {
@@ -1148,6 +1359,10 @@ function saveSeries() {
 }
 
 document.getElementById('login-pass').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin(); });
+// Escape closes the TTS narration popover when it's open.
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('tts-popover-overlay').classList.contains('open')) closeTtsPopover();
+});
 checkAuth();
 
 

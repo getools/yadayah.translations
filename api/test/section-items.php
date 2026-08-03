@@ -101,9 +101,10 @@ function rebuildSectionItems(PDO $db, int $sectionKey): int {
                            SET category_key       = EXCLUDED.category_key,
                                section_item_sort  = EXCLUDED.section_item_sort,
                                section_item_dtime = NOW()");
-    // `idx` is the fallback sort for NEW items (their position in the resolved
-    // pool). Surviving items keep their stored section_item_sort; ties are
-    // broken by the render's secondary sort.
+    // NEW items default to sort 0 — "unordered". They then fall wherever the
+    // section's own Sort rule (the render's secondary sort) puts them, instead
+    // of freezing the pool position they happened to land on at rebuild time.
+    // Surviving items keep their stored section_item_sort.
     $idx  = 0;
     $seen = [];
     foreach ($items as $it) {
@@ -116,7 +117,7 @@ function rebuildSectionItems(PDO $db, int $sectionKey): int {
                 : sectionItemCategory($db, $sectionKey, $fik, $pageKeys);
         $sortVal = (array_key_exists($fik, $prevSort) && $prevSort[$fik] !== null)
                  ? $prevSort[$fik]
-                 : $idx;
+                 : 0;
         $ins->execute([$sectionKey, $fik, $catKey, $sortVal]);
         $idx++;
     }

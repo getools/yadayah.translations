@@ -104,10 +104,12 @@ if ($action === 'category' && $method === 'DELETE') {
 }
 
 // ── Section categories (NEW system — yy_category, scoped by section_key) ──
-// The editor's Categories panel reads/writes these. Item counts are bridged
-// from the page's yy_feed_page_category (matched by page_key + slug, which is
-// unique within a page) so the column stays meaningful without re-pointing the
-// live yy_feed_item_category FK.
+// The editor's Categories panel reads/writes these. Item counts come from
+// yy_section_item.category_key — the SAME place ?action=section_item writes
+// when you pick a category in the Matching-items list. (They used to be
+// bridged from the legacy yy_feed_page_category by page_key+slug, so the
+// column never moved when you assigned a category here, and slugs shared
+// across pages counted each other's items.)
 if ($action === 'section_categories' && $method === 'GET') {
     $sectionKey = (int)($_GET['section_key'] ?? 0);
     if (!$sectionKey) errorResponse('section_key required');
@@ -115,17 +117,17 @@ if ($action === 'section_categories' && $method === 'GET') {
         SELECT yc.category_key, yc.category_title, yc.category_subtitle, yc.category_slug,
                yc.category_description, yc.category_sort,
                COALESCE((
-                   SELECT COUNT(*) FROM yy_feed_item_category fic
-                     JOIN yy_feed_item fi ON fi.feed_item_key = fic.feed_item_key
-                     JOIN yy_feed_page_category pc ON pc.category_key = fic.category_key
-                    WHERE pc.page_key = ? AND pc.category_slug = yc.category_slug
+                   SELECT COUNT(*) FROM yy_section_item si
+                     JOIN yy_feed_item fi ON fi.feed_item_key = si.feed_item_key
+                    WHERE si.section_key = yc.section_key
+                      AND si.category_key = yc.category_key
                       AND fi.feed_item_active_flag = TRUE
                ), 0) AS item_count
           FROM yy_category yc
          WHERE yc.section_key = ? AND yc.category_active_flag = TRUE
          ORDER BY yc.category_sort, yc.category_title
     ");
-    $st->execute([$pageKey, $sectionKey]);
+    $st->execute([$sectionKey]);
     jsonResponse(['categories' => $st->fetchAll()]);
 }
 
@@ -186,25 +188,72 @@ if ($action === 'section_category' && $method === 'DELETE') {
     jsonResponse(['deleted' => true]);
 }
 
+// Build the secondary ORDER BY from a section's own Sort settings
+// (section_config.sorts / legacy sort+sort_dir), so the Matching-items list
+// breaks ties by the SAME rule the rendered page uses. Mirrors the field→SQL
+// map in page-render.php resolveItemsSection(), but with the `fi.` alias.
+// The per-section manual order (si.section_item_sort) applies only when the
+// section lists "Sort #" (section_sort) among its sorts — never implicitly.
+function sectionItemsOrderBy(PDO $db, int $sectionKey): string {
+    $st = $db->prepare("SELECT section_config FROM yy_section WHERE section_key = ?");
+    $st->execute([$sectionKey]);
+    $cfg = $st->fetchColumn();
+    $cfg = is_string($cfg) ? (json_decode($cfg, true) ?: []) : ($cfg ?: []);
+
+    $sorts = [];
+    if (!empty($cfg['sorts']) && is_array($cfg['sorts'])) {
+        foreach ($cfg['sorts'] as $e) {
+            if (!empty($e['field'])) $sorts[] = ['field' => $e['field'], 'dir' => $e['dir'] ?? 'desc'];
+        }
+    } elseif (!empty($cfg['sort'])) {
+        $sorts[] = ['field' => $cfg['sort'], 'dir' => $cfg['sort_dir'] ?? 'desc'];
+    }
+    if (!$sorts) $sorts[] = ['field' => 'posted', 'dir' => 'desc'];
+
+    // ONLY the section's configured sorts govern — the manual order
+    // (section_item_sort) applies only when "Sort #" is one of them. Mirrors
+    // buildItemsOrderBy() in page-render.php.
+    $parts = [];
+    foreach ($sorts as $srt) {
+        $dir = strtolower($srt['dir']) === 'asc' ? 'ASC' : 'DESC';
+        switch ($srt['field']) {
+            case 'section_sort': $parts[] = "si.section_item_sort $dir NULLS LAST"; break;
+            case 'title':       $parts[] = "COALESCE(fi.feed_item_title_override, fi.feed_item_title_import) $dir"; break;
+            case 'orientation': $parts[] = "fi.feed_item_orientation $dir NULLS LAST"; break;
+            case 'page':        $parts[] = "(SELECT MIN(page_key) FROM yy_feed_item_page WHERE feed_item_key = fi.feed_item_key) $dir NULLS LAST"; break;
+            case 'category':    $parts[] = "(SELECT MIN(category_key) FROM yy_feed_item_category WHERE feed_item_key = fi.feed_item_key) $dir NULLS LAST"; break;
+            case 'duration':    $parts[] = "fi.feed_item_duration_seconds $dir NULLS LAST"; break;
+            case 'sort':        $parts[] = "fi.feed_item_sort $dir NULLS LAST"; break;
+            case 'random':      $parts[] = "RANDOM()"; break;
+            case 'posted':
+            default:            $parts[] = "COALESCE(fi.feed_item_publish_override_dtime, fi.feed_item_publish_import_dtime) $dir"; break;
+        }
+    }
+    $parts[] = 'si.feed_item_key';   // final deterministic tiebreak
+    return implode(', ', $parts);
+}
+
 // ── Section items (NEW system — yy_section_item: the materialized matching pool) ──
 if ($action === 'section_items' && $method === 'GET') {
     $sectionKey = (int)($_GET['section_key'] ?? 0);
     if (!$sectionKey) errorResponse('section_key required');
+    $orderBy = sectionItemsOrderBy($db, $sectionKey);
     $st = $db->prepare("
         SELECT si.feed_item_key,
                COALESCE(fi.feed_item_title_override, fi.feed_item_title_import) AS title,
                fi.feed_item_thumbnail AS thumbnail,
                fi.feed_item_duration  AS duration,
                COALESCE(fi.feed_item_publish_override_dtime, fi.feed_item_publish_import_dtime) AS posted,
-               fi.feed_item_sort      AS sort,
+               si.section_item_sort   AS sort,
                fi.feed_item_episode   AS episode,
                si.category_key,
-               c.category_title       AS category
+               c.category_title       AS category,
+               c.category_slug        AS category_slug
           FROM yy_section_item si
           JOIN yy_feed_item fi ON fi.feed_item_key = si.feed_item_key
           LEFT JOIN yy_category c ON c.category_key = si.category_key
          WHERE si.section_key = ?
-         ORDER BY si.section_item_sort, si.feed_item_key
+         ORDER BY $orderBy
     ");
     $st->execute([$sectionKey]);
     $items = $st->fetchAll();
@@ -255,7 +304,27 @@ if ($action === 'section_item' && $method === 'PUT') {
     $vals[] = $key;
     $upd = $db->prepare("UPDATE yy_section_item SET " . implode(', ', $sets) . " WHERE section_key = ? AND feed_item_key = ?");
     $upd->execute($vals);
+    // Manual category pick wins over hashtag parsing (most-recent-edit-wins):
+    // stamp provenance so applyParsedItemFields' section-category reconcile
+    // won't steamroll it on the next sync. Mirrors the page-scoped 'item' PUT.
+    if (array_key_exists('category_key', $d)) {
+        stampManualField($db, (int)$key, 'section_category:' . $sectionKey);
+    }
     jsonResponse(['saved' => true, 'updated' => $upd->rowCount()]);
+}
+
+// Reset EVERY item's manual Sort # in this section back to 0 — the "0" button
+// at the top of the Matching-items list. Clears a stale manual ordering in one
+// go (e.g. the legacy pool-index values) so the section's own sort rule governs
+// again. Section-scoped: touches only yy_section_item rows for this section,
+// never the global feed_item_sort.
+if ($action === 'section_items_reset_sort' && $method === 'POST') {
+    $sectionKey = (int)($_GET['section_key'] ?? 0);
+    if (!$sectionKey) errorResponse('section_key required');
+    $upd = $db->prepare("UPDATE yy_section_item SET section_item_sort = 0, section_item_dtime = NOW()
+                          WHERE section_key = ? AND section_item_sort <> 0");
+    $upd->execute([$sectionKey]);
+    jsonResponse(['reset' => true, 'updated' => $upd->rowCount()]);
 }
 
 // ── Item (sort / episode / category) ─────────────────────────────────────

@@ -62,6 +62,9 @@ case 'POST':
         $db->beginTransaction();
         try {
             foreach ($input['sections'] as $s) {
+                // Blank/absent sort saves as NULL, not 0
+                $sort = (!isset($s['section_sort']) || $s['section_sort'] === '' || $s['section_sort'] === null)
+                    ? null : (int)$s['section_sort'];
                 if (!empty($s['section_key'])) {
                     // Update existing
                     $stmt = $db->prepare("UPDATE yy_section SET section_code = ?, section_value = ?, section_active_flag = ?, section_sort = ? WHERE section_key = ? AND page_key = ?");
@@ -69,7 +72,7 @@ case 'POST':
                         $s['section_code'] ?? '',
                         $s['section_value'] ?? '',
                         ($s['section_active_flag'] ?? true) ? 't' : 'f',
-                        (int)($s['section_sort'] ?? 0),
+                        $sort,
                         (int)$s['section_key'],
                         $pageKey,
                     ]);
@@ -81,7 +84,7 @@ case 'POST':
                         $s['section_code'] ?? '',
                         $s['section_value'] ?? '',
                         ($s['section_active_flag'] ?? true) ? 't' : 'f',
-                        (int)($s['section_sort'] ?? 0),
+                        $sort,
                     ]);
                 }
             }

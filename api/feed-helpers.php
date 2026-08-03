@@ -288,27 +288,57 @@ function templateFilterTerm(string $term): string {
 /**
  * Compile a template into a case-insensitive PCRE plus the ordered list of
  * captured field names. Returns null if the template has no [placeholders].
- *   '#vlog|[category]|[episode]'
- *     → ['regex' => '/#vlog\|([^|\s#]+)\|([^|\s#]+)/iu',
+ *
+ * Two kinds of bracketed token are recognized:
+ *   • [name]  (name starts with a letter) — a *capturing* placeholder that
+ *     matches one pipe/whitespace-bounded segment and writes it to that field.
+ *   • [sep]   (bracket wrapping only separator/punctuation chars, e.g. '[|]')
+ *     — an *optional marker*: it emits its literal contents AND makes the
+ *     remainder of the template optional. Markers nest, so trailing segments
+ *     become progressively optional. This lets ONE template match a hashtag
+ *     with or without its trailing pieces.
+ *
+ *   '#vlog|[category]|[episode]'        (strict — both segments required)
+ *     → ['regex' => '/\#vlog\|([^|\s#]+)\|([^|\s#]+)/iu',
  *        'fields' => ['category','episode']]
+ *   '#vlog[|][category][|][episode]'    (optional — category/episode optional)
+ *     → ['regex' => '/\#vlog(?:\|([^|\s#]+)(?:\|([^|\s#]+))?)?(?=$|[\s#|])/iu',
+ *        'fields' => ['category','episode']]
+ *   matches '#vlog', '#vlog|qatsyr', '#vlog|muhammad|004'.
  */
 function compileHashtagTemplate(string $tpl): ?array {
-    $parts = preg_split('/(\[[a-zA-Z][a-zA-Z0-9_:-]*\])/', $tpl, -1, PREG_SPLIT_DELIM_CAPTURE);
+    // Split on any bracketed token; classify each part below.
+    $parts = preg_split('/(\[[^\]]*\])/', $tpl, -1, PREG_SPLIT_DELIM_CAPTURE);
     if (count($parts) < 2) return null;
     $fields = [];
     $rx = '';
+    $openOptional = 0;                              // nested (?:…)? groups still open
+    $litToRx = function ($lit) {                    // '*' → non-capturing wildcard
+        $esc = array_map(function ($c) { return preg_quote($c, '/'); }, explode('*', $lit));
+        return implode('[^|\s]*', $esc);
+    };
     foreach ($parts as $p) {
         if ($p === '') continue;
         if (preg_match('/^\[([a-zA-Z][a-zA-Z0-9_:-]*)\]$/', $p, $m)) {
             $fields[] = strtolower($m[1]);
             $rx .= '([^|\s#]+)';                     // one captured segment
+        } elseif (preg_match('/^\[([|\/.,;:_\-\s]+)\]$/', $p, $m)) {
+            // Optional marker: open a nested optional group that runs to the end
+            // of the template, emitting the marker's literal separator(s).
+            $rx .= '(?:' . $litToRx($m[1]);
+            $openOptional++;
         } else {
-            // Literal chunk; '*' becomes a non-capturing segment wildcard.
-            $esc = array_map(function ($c) { return preg_quote($c, '/'); }, explode('*', $p));
-            $rx .= implode('[^|\s]*', $esc);
+            // Any other chunk (plain literal, or a bracketed token that is
+            // neither a field nor a separator) is matched literally.
+            $rx .= $litToRx($p);
         }
     }
     if (!$fields) return null;
+    $rx .= str_repeat(')?', $openOptional);         // close optional groups
+    // With optional trailing segments the bare literal prefix can match inside
+    // a longer word (e.g. '#vlog' inside '#vlogging'); require a segment
+    // boundary after the match so it can't.
+    if ($openOptional > 0) $rx .= '(?=$|[\s#|])';
     return ['regex' => '/' . $rx . '/iu', 'fields' => $fields];
 }
 
@@ -327,29 +357,36 @@ function getHashtagParseRules(PDO $db): array {
     $seen = [];
     // page_key is OPTIONAL: a template with no scope still captures item-level
     // fields ([episode]/[date]/[title]/[sort]); only [category] needs a page.
-    $add = function ($tpl, $pageKey) use (&$rules, &$seen) {
+    $add = function ($tpl, $pageKey, $sectionKey = 0) use (&$rules, &$seen) {
         $tpl = trim((string)$tpl);
         $pageKey = (int)$pageKey;
+        $sectionKey = (int)$sectionKey;
         if ($tpl === '') return;
         $compiled = compileHashtagTemplate($tpl);
         if (!$compiled) return;
-        $k = $pageKey . '|' . strtolower($tpl);
+        $k = $pageKey . '|' . $sectionKey . '|' . strtolower($tpl);
         if (isset($seen[$k])) return;
         $seen[$k] = true;
-        $rules[] = ['template' => $tpl, 'page_key' => $pageKey,
+        $rules[] = ['template' => $tpl, 'page_key' => $pageKey, 'section_key' => $sectionKey,
                     'regex' => $compiled['regex'], 'fields' => $compiled['fields']];
     };
-    // Back-compat defaults (Vlog=1, Basics=20).
+    // Back-compat defaults (Vlog=1, Basics=20). Kept in the strict form these
+    // pages have always used; a section can opt into the optional-marker form
+    // ('#vlog[|][category][|][episode]') via its own include-hashtags field.
     $add('#vlog|[category]|[episode]', 1);
     $add('#basics|[category]|[episode]', 20);
     // Data-driven rules from active Items sections (yy_section). Category scope
-    // = the section's page_key column, else cfg.page_key, else cfg.pages[].
+    // = the section's page_key column, else cfg.page_key, else cfg.pages[] (all
+    // page-scoped, yy_feed_page_category). Independently, the section_key scopes
+    // the Pages-New page-code model: a captured [category] is also filed under
+    // this section's own yy_category set via yy_section_item.
     try {
-        $st = $db->query("SELECT page_key, section_config FROM yy_section WHERE section_type = 'items' AND section_active_flag = TRUE");
+        $st = $db->query("SELECT section_key, page_key, section_config FROM yy_section WHERE section_type = 'items' AND section_active_flag = TRUE");
         foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
             $cfgRaw = $row['section_config'];
             $cfg = is_string($cfgRaw) ? json_decode($cfgRaw, true) : $cfgRaw;
             if (!is_array($cfg)) continue;
+            $sectionKey = (int)$row['section_key'];
             $pageKeys = [];
             if (!empty($row['page_key'])) $pageKeys[] = (int)$row['page_key'];
             if (!empty($cfg['page_key'])) $pageKeys[] = (int)$cfg['page_key'];
@@ -357,10 +394,10 @@ function getHashtagParseRules(PDO $db): array {
                 foreach ($cfg['pages'] as $e) if (!empty($e['page_key'])) $pageKeys[] = (int)$e['page_key'];
             }
             $pageKeys = array_values(array_unique($pageKeys));
-            if (!$pageKeys) $pageKeys = [0];   // scopeless: capture fields, skip category
+            if (!$pageKeys) $pageKeys = [0];   // scopeless page: still does section-scoped category
             foreach (splitFilterTerms($cfg['include_hashtags'] ?? '') as $term) {
                 if (!isHashtagTemplate($term)) continue;
-                foreach ($pageKeys as $pk) $add($term, $pk);
+                foreach ($pageKeys as $pk) $add($term, $pk, $sectionKey);
             }
         }
     } catch (\Throwable $e) {
@@ -384,15 +421,40 @@ function resolveOrCreateFeedCategory(PDO $db, int $pageKey, string $slug): ?int 
 }
 
 /**
+ * Look up a Pages-New *section* category by (section_key, slug), creating it
+ * from the slug if absent. These live in yy_category (the page-builder's
+ * per-section set, keyed by section_key) and link to feed items via
+ * yy_section_item.category_key — the mechanism behind the page-code model:
+ * a hashtag whose leading token is a page code (#vlog → page_test_code 'vlog')
+ * files the item under that page's Items-section categories.
+ * yy_category has no (section_key,slug) unique index, so guard with a lookup.
+ */
+function resolveOrCreateSectionCategory(PDO $db, int $sectionKey, string $slug): ?int {
+    if (!$sectionKey || $slug === '') return null;
+    $lk = $db->prepare("SELECT category_key FROM yy_category WHERE section_key = ? AND category_slug = ?");
+    $lk->execute([$sectionKey, $slug]);
+    $k = $lk->fetchColumn();
+    if ($k) return (int)$k;
+    $title = ucwords(str_replace('-', ' ', $slug));
+    $ins = $db->prepare("INSERT INTO yy_category (section_key, category_title, category_slug, category_sort) VALUES (?, ?, ?, 0) RETURNING category_key");
+    $ins->execute([$sectionKey, $title, $slug]);
+    return (int)$ins->fetchColumn();
+}
+
+/**
  * Run every parse rule over an item's text (title + description). Returns:
- *   ['fields'     => ['episode'=>'42','date'=>'…',…],  // non-category, first match wins
- *    'categories' => [['category_key'=>N,'episode'=>'42','page_key'=>P], …]]
- * Categories are resolved/auto-created per page_key.
+ *   ['fields'            => ['episode'=>'42','date'=>'…',…],  // non-category, first match wins
+ *    'categories'        => [['category_key'=>N,'episode'=>'42','page_key'=>P], …],   // page-scoped (yy_feed_page_category)
+ *    'section_categories'=> [['category_key'=>N,'episode'=>'42','section_key'=>S], …]] // Pages-New section-scoped (yy_category)
+ * Page categories are resolved/auto-created per page_key; section categories
+ * per section_key (the page-code model — see resolveOrCreateSectionCategory).
  */
 function applyHashtagTemplates(PDO $db, string $searchText, array $rules): array {
     $fields = [];
     $categories = [];
+    $sectionCategories = [];
     $seenCat = [];
+    $seenSecCat = [];
     foreach ($rules as $rule) {
         if (!preg_match_all($rule['regex'], $searchText, $matches, PREG_SET_ORDER)) continue;
         foreach ($matches as $mm) {
@@ -403,18 +465,32 @@ function applyHashtagTemplates(PDO $db, string $searchText, array $rules): array
                 if ($fname === 'category' || $val === null || $val === '') continue;
                 if (!array_key_exists($fname, $fields)) $fields[$fname] = $val;
             }
-            if (!empty($cap['category']) && !empty($rule['page_key'])) {
+            if (!empty($cap['category'])) {
                 $slug = feedCatSlug($cap['category']);
-                $dedupe = $rule['page_key'] . ':' . $slug;
-                if ($slug !== '' && !isset($seenCat[$dedupe])) {
-                    $seenCat[$dedupe] = true;
-                    $catKey = resolveOrCreateFeedCategory($db, $rule['page_key'], $slug);
-                    if ($catKey) $categories[] = ['category_key' => $catKey, 'episode' => $episode, 'page_key' => $rule['page_key']];
+                if ($slug !== '') {
+                    // Page-scoped assignment (production feed pages, yy_feed_page_category).
+                    if (!empty($rule['page_key'])) {
+                        $dedupe = $rule['page_key'] . ':' . $slug;
+                        if (!isset($seenCat[$dedupe])) {
+                            $seenCat[$dedupe] = true;
+                            $catKey = resolveOrCreateFeedCategory($db, (int)$rule['page_key'], $slug);
+                            if ($catKey) $categories[] = ['category_key' => $catKey, 'episode' => $episode, 'page_key' => (int)$rule['page_key']];
+                        }
+                    }
+                    // Section-scoped assignment (Pages-New page-code model, yy_category).
+                    if (!empty($rule['section_key'])) {
+                        $sdedupe = $rule['section_key'] . ':' . $slug;
+                        if (!isset($seenSecCat[$sdedupe])) {
+                            $seenSecCat[$sdedupe] = true;
+                            $scKey = resolveOrCreateSectionCategory($db, (int)$rule['section_key'], $slug);
+                            if ($scKey) $sectionCategories[] = ['category_key' => $scKey, 'episode' => $episode, 'section_key' => (int)$rule['section_key']];
+                        }
+                    }
                 }
             }
         }
     }
-    return ['fields' => $fields, 'categories' => $categories];
+    return ['fields' => $fields, 'categories' => $categories, 'section_categories' => $sectionCategories];
 }
 
 /**
@@ -500,5 +576,20 @@ function applyParsedItemFields(PDO $db, int $itemKey, array $parse): void {
         foreach ($assigns as $a) {
             $catUp->execute([$itemKey, $a['category_key'], $a['episode'] !== null ? (string)$a['episode'] : null]);
         }
+    }
+    // Pages-New section-scoped category links (page-code model). One row per
+    // (section, item) in yy_section_item; the item's category for that section.
+    // Provenance-arbitrated per section so a constantly-running sync never
+    // steamrolls an admin's manual category pick in the page-builder editor
+    // (which stamps 'section_category:<section_key>' via stampManualField).
+    foreach ($parse['section_categories'] ?? [] as $sc) {
+        $sk = (int)($sc['section_key'] ?? 0);
+        $ck = (int)($sc['category_key'] ?? 0);
+        if (!$sk || !$ck) continue;
+        if (!reconcileHashtagField($db, $itemKey, 'section_category:' . $sk, (string)$ck)) continue;
+        $db->prepare("INSERT INTO yy_section_item (section_key, feed_item_key, category_key)
+                      VALUES (?, ?, ?)
+                      ON CONFLICT (section_key, feed_item_key) DO UPDATE SET category_key = EXCLUDED.category_key")
+           ->execute([$sk, $itemKey, $ck]);
     }
 }

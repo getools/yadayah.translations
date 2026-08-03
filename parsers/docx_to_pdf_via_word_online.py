@@ -65,8 +65,8 @@ AUTH_STATE_PATH = "/opt/yada-www/secrets/word-online-auth.json"
 DOWNLOAD_DIR = "/tmp/word-online-downloads"
 
 # How long we'll let Word for the Web grind on a render before giving up.
-PDF_DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000   # 15 minutes
-PAGE_LOAD_TIMEOUT_MS = 90 * 1000           # 90 seconds for initial load
+PDF_DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1000   # 60 minutes (was 30 — complex docs exceed 30 min render)
+PAGE_LOAD_TIMEOUT_MS = 240 * 1000          # 240 seconds for initial load (was 90s — too short under MS load)
 FILE_MENU_TIMEOUT_MS = 180 * 1000          # 180 seconds to find File menu (large docs need time to render)
 
 
@@ -94,6 +94,7 @@ def _get_word_frame(page, timeout_ms=PAGE_LOAD_TIMEOUT_MS):
     sys.stderr.write("[word-online] waiting for WacFrame_Word_0 iframe...\n")
     page.wait_for_selector("iframe[name='WacFrame_Word_0']", timeout=timeout_ms)
     deadline = time.time() + (timeout_ms / 1000)
+    last_log = 0.0
     while time.time() < deadline:
         for f in page.frames:
             if f.name == "WacFrame_Word_0":
@@ -101,7 +102,13 @@ def _get_word_frame(page, timeout_ms=PAGE_LOAD_TIMEOUT_MS):
                 if "word-edit.officeapps.live.com" in f.url:
                     sys.stderr.write(f"[word-online] found Word editor frame: {f.url[:120]}\n")
                     return f
+                now = time.time()
+                if now - last_log >= 30:
+                    sys.stderr.write(f"[word-online] WacFrame URL still loading: {f.url[:150]}\n")
+                    last_log = now
         time.sleep(1)
+    frame_urls = [(f.name, f.url[:80]) for f in page.frames if f.url]
+    sys.stderr.write(f"[word-online] frames at timeout: {frame_urls}\n")
     raise RuntimeError("Word editor iframe didn't reach word-edit.officeapps.live.com")
 
 
@@ -579,7 +586,7 @@ def _trigger_pdf_download(page) -> str:
                             ctx_label = "page" if ctx is page else "frame"
                             sys.stderr.write(
                                 f"[word-online] clicked Download via {sel!r} ({ctx_label}) — "
-                                f"after {(deadline - time.time() + PDF_DOWNLOAD_TIMEOUT_MS/1000):.0f}s of waiting\n"
+                                f"after {(PDF_DOWNLOAD_TIMEOUT_MS/1000 - (deadline - time.time())):.0f}s of waiting\n"
                             )
                         download = dl_info.value
                         suggested = download.suggested_filename
@@ -591,13 +598,17 @@ def _trigger_pdf_download(page) -> str:
                     continue
                 except Exception:
                     continue
-        # Also handle the case where render fails with an error dialog
+        # Also handle the case where render fails with an error dialog.
+        # 'We couldn't convert your document' (seen Jul 2026 on complex docs)
+        # does NOT contain 'error'/'failed'/'unable', so add it explicitly.
         for ctx in [page, frame]:
             try:
                 err = ctx.locator(
                     "[role='dialog']:has-text('error'), "
                     "[role='dialog']:has-text('failed'), "
-                    "[role='dialog']:has-text('unable')"
+                    "[role='dialog']:has-text('unable'), "
+                    "[role='dialog']:has-text('We could'), "
+                    "[role='dialog']:has-text('convert your document')"
                 ).first
                 if err.is_visible(timeout=1000):
                     err_text = err.inner_text()[:300]
@@ -640,6 +651,18 @@ def convert_one(docx_path: Path, pdf_path: Path) -> None:
             "Run refresh_word_online_auth.py on a Windows machine and SCP the result.\n"
         )
         sys.exit(3)
+
+    # Reject implausibly small DOCX before uploading. A 0-byte DOCX causes
+    # Graph to return HTTP 400, and WOL to open a blank document and download
+    # a 1-page blank PDF that passes the Microsoft/Word creator check but
+    # contains no content. Detect and bail before wasting a render attempt.
+    docx_size = docx_path.stat().st_size if docx_path.exists() else 0
+    if docx_size < 1000:
+        sys.stderr.write(
+            f"[word-online] DOCX is empty or truncated ({docx_size} bytes): "
+            f"{docx_path.name} — refusing to render; admin must re-upload a valid DOCX\n"
+        )
+        sys.exit(1)
 
     Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 

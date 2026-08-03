@@ -82,6 +82,10 @@ foreach ($feeds as $feed) {
             if ($response === false) break;
 
             $json = json_decode($response, true);
+            if (!empty($json['error'])) {
+                $error = "Facebook API error: " . ($json['error']['message'] ?? 'unknown') . " (code: " . ($json['error']['code'] ?? '?') . ")";
+                break;
+            }
             if (empty($json['data'])) break;
 
             foreach ($json['data'] as $post) {

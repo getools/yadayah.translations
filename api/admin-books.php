@@ -10,7 +10,7 @@
  * DELETE ?key=N      — delete a volume
  */
 require_once __DIR__ . '/config.php';
-requireAuth();
+$authUser = requireAuth();
 
 $db = getDb();
 $method = $_SERVER['REQUEST_METHOD'];
@@ -103,6 +103,7 @@ if ($method === 'POST' && ($_GET['action'] ?? '') === 'upload_docx') {
     // it's already set we honor it (renaming a book is intentional, not auto).
     $volStmt = $db->prepare("
         SELECT v.volume_key, v.volume_label, v.volume_pdf, v.volume_code, s.series_key,
+               v.volume_locked_flag, v.volume_locked_by_key, v.volume_locked_by_name,
                COALESCE(s.series_number, 0) AS series_number, COALESCE(v.volume_number, 0) AS volume_number
         FROM yy_volume v JOIN yy_series s ON s.series_key = v.series_key
         WHERE v.volume_key = ?
@@ -110,6 +111,16 @@ if ($method === 'POST' && ($_GET['action'] ?? '') === 'upload_docx') {
     $volStmt->execute([$key]);
     $vol = $volStmt->fetch();
     if (!$vol) errorResponse('Volume not found', 404);
+
+    // Source-control lockout: if another admin has this book checked out, a
+    // new DOCX must not overwrite theirs. A lock held by the current user is
+    // fine — that's the normal "I checked it out, edited it, now I'm uploading"
+    // flow (the UI prompts to release the lock afterward). 423 Locked so the
+    // client can surface a distinct "checked out" message.
+    if ($vol['volume_locked_flag'] && (int)$vol['volume_locked_by_key'] !== (int)($authUser['user_key'] ?? 0)) {
+        $holder = $vol['volume_locked_by_name'] ?: 'another admin';
+        errorResponse('This book is checked out by ' . $holder . ' — ask them to release the lock before uploading a new version.', 423);
+    }
 
     // book_code is THE single canonical root. Derive once, normalize, keep.
     $base = '';
@@ -381,6 +392,61 @@ if ($method === 'POST' && (($_GET['action'] ?? '') === 'regenerate_flipbook'
     ]);
 }
 
+// Source-control checkout: lock or unlock a volume so a second admin can't
+// upload a new DOCX over the first admin's in-progress edit.
+// Body: {"action":"toggle_lock","volume_key":N,"locked":true|false,"force":bool}
+//   locked=true  → check the book out under the current admin
+//   locked=false → release the checkout
+// Releasing (or re-locking) a book someone ELSE holds requires force=true so
+// an accidental override is a deliberate act. Lock changes are intentionally
+// invisible to the yy_volume_rev audit trail (they touch only lock_* columns,
+// which the revision trigger's change-detector ignores).
+if ($method === 'POST' && (($_GET['action'] ?? '') === 'toggle_lock'
+                            || (json_decode(file_get_contents('php://input'), true)['action'] ?? '') === 'toggle_lock')) {
+    $body = json_decode(file_get_contents('php://input'), true) ?: [];
+    if (!$key) $key = (int)($body['volume_key'] ?? 0);
+    if (!$key) errorResponse('Volume key required');
+    $wantLock = !empty($body['locked']);
+    $force    = !empty($body['force']);
+
+    $cur = $db->prepare("SELECT volume_locked_flag, volume_locked_by_key, volume_locked_by_name FROM yy_volume WHERE volume_key = ?");
+    $cur->execute([$key]);
+    $vol = $cur->fetch();
+    if (!$vol) errorResponse('Volume not found', 404);
+
+    $myKey  = (int)($authUser['user_key'] ?? 0);
+    $myName = $authUser['user_name'] ?: ($authUser['user_code'] ?? 'admin');
+    $heldBy = (int)$vol['volume_locked_by_key'];
+    $lockedByOther = $vol['volume_locked_flag'] && $heldBy !== $myKey;
+
+    if ($lockedByOther && !$force) {
+        $holder = $vol['volume_locked_by_name'] ?: 'another admin';
+        errorResponse('This book is checked out by ' . $holder . '.', 423);
+    }
+
+    if ($wantLock) {
+        $db->prepare("
+            UPDATE yy_volume
+               SET volume_locked_flag = 'true',
+                   volume_locked_by_key = ?,
+                   volume_locked_by_name = ?,
+                   volume_locked_dtime = NOW()
+             WHERE volume_key = ?
+        ")->execute([$myKey, $myName, $key]);
+        jsonResponse(['locked' => true, 'locked_by_key' => $myKey, 'locked_by_name' => $myName]);
+    } else {
+        $db->prepare("
+            UPDATE yy_volume
+               SET volume_locked_flag = 'false',
+                   volume_locked_by_key = NULL,
+                   volume_locked_by_name = NULL,
+                   volume_locked_dtime = NULL
+             WHERE volume_key = ?
+        ")->execute([$key]);
+        jsonResponse(['locked' => false]);
+    }
+}
+
 // Register 301 redirects in yy_redirect. Triggered by the Books admin form
 // after a rename so old DOCX / PDF URLs forward to the new canonical ones.
 // Body: {"action": "add_redirects", "pairs": [{"from": "/x", "to": "/y"}, ...]}
@@ -459,7 +525,7 @@ if ($method === 'POST') {
     $stmt = $db->prepare("
         INSERT INTO yy_volume (series_key, volume_label, volume_number, volume_sort,
                                volume_code, volume_pdf, volume_page_count, volume_active_flag, volume_ask_rating)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING volume_key
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING volume_key
     ");
     $stmt->execute([
         $seriesKey,

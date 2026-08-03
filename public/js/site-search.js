@@ -1211,7 +1211,13 @@
         // re-introducing the search band on the admin home each time
         // site-nav.js was reintroduced to that page.
         var p = location.pathname || '';
-        if (/^\/admin\b/i.test(p) || /^\/test\//i.test(p)) return;
+        // Pages-New renders REAL content pages via /test/page.php (the renderer
+        // for the yy_page_test system). Those pages want the site search bar
+        // just like the main site. Everything else under /test/ is admin/dev
+        // tooling (admin-pages.html, prototypes) that must stay bar-free, as
+        // does /admin. So exclude /admin and /test/* EXCEPT /test/page.php.
+        var isPagesNewRenderer = /^\/test\/page\.php$/i.test(p);
+        if (!isPagesNewRenderer && (/^\/admin\b/i.test(p) || /^\/test\//i.test(p))) return;
         injectFonts();
         injectStyle();
         buildBar();

@@ -82,6 +82,8 @@ if ($action === 'chapters') {
     // button on the row reflect the currently-selected profile.
     $cStmt = $db->prepare("
         SELECT c.chapter_key, c.chapter_number, c.chapter_name AS chapter_label, c.chapter_page,
+               (SELECT MIN(p.paragraph_page) FROM yy_paragraph p
+                 WHERE p.chapter_key = c.chapter_key) AS chapter_pdf_page,
                a.tts_audio_status, a.tts_audio_progress, a.tts_audio_message,
                a.tts_audio_path, a.tts_audio_duration_secs, a.tts_audio_size_bytes,
                a.tts_audio_completed_dtime, a.tts_audio_started_dtime,
@@ -175,7 +177,51 @@ if ($action === 'processing') {
          ORDER BY a.tts_audio_started_dtime DESC NULLS LAST, a.tts_audio_key DESC
          LIMIT 1
     ";
-    jsonResponse(['processing' => $db->query($sql)->fetch() ?: null]);
+
+    // Total paragraphs still to be REGENERATED across the queue — deliberately
+    // NOT a raw paragraph count. A chapter build re-synthesises only the
+    // paragraphs whose cached part file is missing from that chapter's parts
+    // dir; a paragraph whose part already exists is just repackaged into the
+    // chapter MP3, not regenerated. (A single-paragraph Redo re-queues the
+    // whole chapter but deletes only that one part, so ~all its paragraphs are
+    // reused.) So the real work left per chapter is nPara − (existing part
+    // files), clamped at ≥0 — counting full paragraph counts here overstated
+    // the queue ~6× (e.g. 68k paragraphs enqueued, ~11k actually re-synthed).
+    // This also makes the number tick down only on real synthesis, not when
+    // the worker walks past reused parts. We run on the same host as the build
+    // worker, so we stat the parts dirs directly (~50 ms for the whole queue,
+    // no caching needed). $partsRoot resolves exactly like the worker's:
+    // dirname(__DIR__).'/u' in-container, else the prod public root.
+    // 'paused'/held rows are not queued, so they're excluded. Scoped to the
+    // profile when tts_key given.
+    $partsRoot = (is_dir(dirname(__DIR__) . '/u') ? dirname(__DIR__) : '/opt/yada-www/public') . '/u/tts-parts';
+    $qStmt = $db->query("
+        SELECT a.tts_audio_key AS k,
+               COALESCE(a.tts_audio_paragraph_count,
+                        (SELECT COUNT(*) FROM yy_paragraph p WHERE p.chapter_key = a.chapter_key)) AS npara
+          FROM yy_tts_audio a
+         WHERE a.tts_audio_status IN ('pending','running')
+           AND a.chapter_key IS NOT NULL
+           AND ($ttsKey = 0 OR a.tts_key = $ttsKey)
+    ");
+    $queuedRemaining = 0;
+    foreach ($qStmt->fetchAll() as $r) {
+        $npara = (int)$r['npara'];
+        if ($npara <= 0) continue;
+        $dir = $partsRoot . '/' . (int)$r['k'];
+        $have = 0;
+        if (is_dir($dir)) {
+            $g = glob($dir . '/p*.mp3', GLOB_NOSORT);
+            $have = $g ? count($g) : 0;
+        }
+        $missing = $npara - $have;
+        if ($missing > 0) $queuedRemaining += $missing;
+    }
+
+    jsonResponse([
+        'processing' => $db->query($sql)->fetch() ?: null,
+        'queued_paragraphs_remaining' => $queuedRemaining,
+    ]);
 }
 
 errorResponse('Unknown action');

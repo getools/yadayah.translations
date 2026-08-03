@@ -412,9 +412,17 @@ if ($action === 'ai_chunk') {
         }
     }
     $results = [];
-    foreach ($lines as $l) {
+    $nLines = count($lines);
+    foreach ($lines as $pos => $l) {
         $new = array_key_exists($l['i'], $byIdx) ? trim($byIdx[$l['i']]) : $l['old'];
         if ($new === '') $new = $l['old']; // never blank a line
+        // Merge-guard (see cfReplySwallowsNext): don't surface a suggestion that
+        // has swallowed the next line's wording — a forbidden merge that balloons
+        // line i while i+1 stays put, showing duplicated text to the admin.
+        if ($new !== $l['old'] && $pos + 1 < $nLines
+            && cfReplySwallowsNext($new, $l['old'], (string)$lines[$pos + 1]['old'])) {
+            $new = $l['old'];
+        }
         $results[] = ['key' => $l['key'], 'old' => $l['old'], 'new' => $new,
                       'changed' => ($new !== $l['old'])];
     }

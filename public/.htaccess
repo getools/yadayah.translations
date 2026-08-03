@@ -9,6 +9,26 @@ RewriteRule \.(ashx|aspx|asp|cgi|env|bak|sql|orig|save|old|swp|dist|config)$ /ap
 RewriteRule (phpmyadmin|myadmin|mysql|adminer|phpinfo|eval-stdin|vendor/phpunit|solr|actuator|telescope) /api/honeypot.php [L,NC]
 RewriteRule (\.git/|\.svn/|\.env|\.DS_Store|\.htpasswd|/config\.php\.|/db\.php\.) /api/honeypot.php [L,NC]
 
+# Friendly-name → canonical flipbook redirect for "Sunnah & Suratun".
+# Catches every URL whose path contains both words in any casing/separator
+# (with-and, with-&, hyphen, space, %20, %26 — Apache decodes those before
+# rule eval). Excludes the canonical flipbook URL itself and its PDF so
+# they continue to serve normally instead of looping.
+RewriteCond %{REQUEST_URI} (?i)sunnah.*suratun
+RewriteCond %{REQUEST_URI} !^/YY-s07v05-God-Damn-Religion-Sunnah-and-Suratun
+RewriteCond %{REQUEST_URI} !^/pdf/YY-s07v05
+# Exempt the /u/ asset tree — TTS chapter audio, per-paragraph parts, and the
+# download zip are named with the volume slug and must serve, not redirect.
+RewriteCond %{REQUEST_URI} !^/u/
+RewriteRule ^.*$ /YY-s07v05-God-Damn-Religion-Sunnah-and-Suratun/ [R=301,L]
+
+# The Little Green Book: the book was mis-created with an underscore slug
+# (The_Little_Green_Book) that sits outside the flipbook tooling's
+# spaces->hyphens convention. Canonical slug is now The-Little-Green-Book.
+# Anchored at ^ so only this exact slug (dir + PDF) redirects.
+RewriteRule "^The_Little_Green_Book(/.*)?$"   "/The-Little-Green-Book$1"       [R=301,L]
+RewriteRule "^pdf/The_Little_Green_Book\.pdf$" "/pdf/The-Little-Green-Book.pdf" [R=301,L]
+
 # Legacy PDF URLs → canonical hyphenated names (301). One rule per file —
 # matches against the decoded URI (Apache decodes %20 to real space before
 # rule evaluation), so the LHS uses spaces and the RHS uses hyphens. Only
@@ -17,15 +37,15 @@ RewriteRule (\.git/|\.svn/|\.env|\.DS_Store|\.htpasswd|/config\.php\.|/db\.php\.
 RewriteRule "^pdf/YY-s01v01-An Intro to God-Dabarym-Words\.pdf$"           "/pdf/YY-s01v01-An-Intro-to-God-Dabarym-Words.pdf"           [R=301,L]
 RewriteRule "^pdf/YY-s01v02-An Intro to God-Mitswah-Instructions\.pdf$"    "/pdf/YY-s01v02-An-Intro-to-God-Mitswah-Instructions.pdf"    [R=301,L]
 RewriteRule "^pdf/YY-s01v03-An Intro to God-Towrah Mizmowr\.pdf$"          "/pdf/YY-s01v03-An-Intro-to-God-Towrah-Mizmowr.pdf"          [R=301,L]
-RewriteRule "^pdf/YY-s02v01-Yada Yahowah-Bare'syth-Beginning\.pdf$"        "/pdf/YY-s02v01-Yada-Yahowah-Bare'syth-Beginning.pdf"        [R=301,L]
-RewriteRule "^pdf/YY-s02v02-Yada Yahowah-'Adam-The Story of Man\.pdf$"     "/pdf/YY-s02v02-Yada-Yahowah-'Adam-The-Story-of-Man.pdf"     [R=301,L]
+RewriteRule "^pdf/YY-s02v01-Yada Yahowah-Bare'syth-Beginning\.pdf$"        "/pdf/YY-s02v01-Yada-Yahowah-Baresyth-Beginning.pdf"         [R=301,L]
+RewriteRule "^pdf/YY-s02v02-Yada Yahowah-'Adam-The Story of Man\.pdf$"     "/pdf/YY-s02v02-Yada-Yahowah-Adam-The-Story-of-Man.pdf"      [R=301,L]
 RewriteRule "^pdf/YY-s02v03-Yada Yahowah-Beyth-In the Family\.pdf$"        "/pdf/YY-s02v03-Yada-Yahowah-Beyth-In-the-Family.pdf"        [R=301,L]
-RewriteRule "^pdf/YY-s02v04-Yada Yahowah-Miqra'ey-Invitations\.pdf$"       "/pdf/YY-s02v04-Yada-Yahowah-Miqra'ey-Invitations.pdf"       [R=301,L]
+RewriteRule "^pdf/YY-s02v04-Yada Yahowah-Miqra'ey-Invitations\.pdf$"       "/pdf/YY-s02v04-Yada-Yahowah-Miqraey-Invitations.pdf"        [R=301,L]
 RewriteRule "^pdf/YY-s02v05-Yada Yahowah-Qatsyr-Harvests\.pdf$"            "/pdf/YY-s02v05-Yada-Yahowah-Qatsyr-Harvests.pdf"            [R=301,L]
-RewriteRule "^pdf/YY-s02v06-Yada Yahowah-Mow'ed-Appointments\.pdf$"        "/pdf/YY-s02v06-Yada-Yahowah-Mow'ed-Appointments.pdf"        [R=301,L]
+RewriteRule "^pdf/YY-s02v06-Yada Yahowah-Mow'ed-Appointments\.pdf$"        "/pdf/YY-s02v06-Yada-Yahowah-Mowed-Appointments.pdf"         [R=301,L]
 RewriteRule "^pdf/YY-s02v07-Yada Yahowah-Shanah-Years\.pdf$"               "/pdf/YY-s02v07-Yada-Yahowah-Shanah-Years.pdf"               [R=301,L]
-RewriteRule "^pdf/YY-s02v08-Yada Yahowah-'Azab-Separation\.pdf$"           "/pdf/YY-s02v08-Yada-Yahowah-'Azab-Separation.pdf"           [R=301,L]
-RewriteRule "^pdf/YY-s02v09-Yada Yahowah-'Eth Tsarah-Time of Trouble\.pdf$" "/pdf/YY-s02v09-Yada-Yahowah-'Eth-Tsarah-Time-of-Trouble.pdf" [R=301,L]
+RewriteRule "^pdf/YY-s02v08-Yada Yahowah-'Azab-Separation\.pdf$"           "/pdf/YY-s02v08-Yada-Yahowah-Azab-Separation.pdf"            [R=301,L]
+RewriteRule "^pdf/YY-s02v09-Yada Yahowah-'Eth Tsarah-Time of Trouble\.pdf$" "/pdf/YY-s02v09-Yada-Yahowah-Eth-Tsarah-Time-of-Trouble.pdf"  [R=301,L]
 RewriteRule "^pdf/YY-s04v01-Coming Home-Qowl-A Voice\.pdf$"                "/pdf/YY-s04v01-Coming-Home-Qowl-A-Voice.pdf"                [R=301,L]
 RewriteRule "^pdf/YY-s04v02-Coming Home-Mashyach-Messiah\.pdf$"            "/pdf/YY-s04v02-Coming-Home-Mashyach-Messiah.pdf"            [R=301,L]
 RewriteRule "^pdf/YY-s04v03-Coming Home-Dowd-Beloved\.pdf$"                "/pdf/YY-s04v03-Coming-Home-Dowd-Beloved.pdf"                [R=301,L]

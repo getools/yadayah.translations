@@ -69,6 +69,13 @@ for f in .htaccess CLAUDE.md Dockerfile docker-compose.yml docker-compose.prod.y
     [ -f "$DEPLOY_DIR/$f" ] && cp -f "$DEPLOY_DIR/$f" "$GIT_DIR/$f" 2>/dev/null
 done
 
+# public/.htaccess is the ACTUAL served file — Apache's docroot is public/, so
+# the root .htaccess synced in the loop above is vestigial. The real rewrite
+# rules (honeypot, ban check, flipbook/PDF redirects) live here and must be
+# version-controlled too. Historically only the root file was synced, so
+# public/.htaccess drifted from prod. Sync the real one explicitly.
+[ -f "$DEPLOY_DIR/public/.htaccess" ] && cp -f "$DEPLOY_DIR/public/.htaccess" "$GIT_DIR/public/.htaccess" 2>/dev/null
+
 # Check if there are any changes
 if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
     echo "[git-push] No changes to push"

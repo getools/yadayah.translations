@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1784296806">
+    <meta name="page-version" content="1785736805">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -25,6 +25,17 @@
            the Voice and Style selects get cramped. Scoped to this page
            via #app so other admin pages keep the default width. */
         #app.container { max-width: 1700px; }
+        /* ── Embed mode (?embed=books) ──────────────────────────────────
+           When admin-tts is loaded inside the TTS popover on Admin → Books,
+           strip the page chrome (header, page title, tab bar) and show ONLY
+           the Books pane so it reads as a focused panel, not a whole page. */
+        html.tts-embed, html.tts-embed body { background: #fff; }
+        html.tts-embed .app-header,
+        html.tts-embed #app > h1,
+        html.tts-embed .tts-tabs { display: none !important; }
+        html.tts-embed #app.container { max-width: none; margin: 0; padding: 10px 16px; }
+        html.tts-embed .tts-pane { display: none !important; }
+        html.tts-embed #pane-books { display: block !important; }
         /* Checkbox sized for easy click target in the dense voice row. */
         .voice-row input[type=checkbox] { width: 18px; height: 18px; margin: 0; padding: 0; cursor: pointer; justify-self: center; }
 
@@ -134,6 +145,7 @@
         .books-processing--active { background:#e8f0fe; color:#1a5fb4; border:1px solid #c5d8f7; }
         .books-processing--active .bp-code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-weight:700; }
         .books-processing--active .bp-para { color:#3a6ea5; font-weight:700; }
+        .books-processing .bp-queued { color:#8a6d00; font-weight:700; }
         .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:600; }
         .badge-complete { background:#d4edda; color:#155724; }
         .badge-running { background:#fff3cd; color:#856404; }
@@ -173,6 +185,13 @@
     </style>
 </head>
 <body>
+<script>
+  // Set the embed class as early as possible (before first paint) so the
+  // page chrome never flashes when admin-tts is framed inside the Admin →
+  // Books TTS popover. The full embed behaviour (force Books tab) is wired
+  // in the load handler further down.
+  try { if (new URLSearchParams(location.search).get('embed')) document.documentElement.classList.add('tts-embed'); } catch (e) {}
+</script>
 
 <div id="app" class="container">
     <div class="app-header">
@@ -618,7 +637,7 @@
         <div class="tts-section">
             <div style="display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;">
                 <h3 style="margin:0;">Volumes</h3>
-                <!-- Live "now building" indicator. Shows s##v## ch## · ¶N/M for the
+                <!-- Live "now building" indicator. Shows s##v## ch## · N/M for the
                      chapter the GPU worker is currently processing, or "Idle".
                      Polled independently of the volume selection (see startBooksProcessingPoll). -->
                 <span id="books-processing" class="books-processing books-processing--idle" title="The chapter the TTS build worker is processing right now">Idle</span>
@@ -1317,12 +1336,16 @@ window.addEventListener('load', function() {
     // the options, its MutationObserver re-applies the *previously* saved
     // volume (firing a change → loadChapters). Seeding it with the deep-link
     // volume makes that restore agree instead of clobbering our selection.
-    var dlVol = parseInt(new URLSearchParams(location.search).get('volume') || '0', 10);
+    var params = new URLSearchParams(location.search);
+    var dlVol = parseInt(params.get('volume') || '0', 10);
     if (dlVol) {
         sessionState.save('booksVolumeKey_' + TTS_KEY, dlVol);
         sessionState.save('volume-select', String(dlVol));
         sessionState.save('activeTab', 'books');
     }
+    // Embed mode (TTS popover on Admin → Books): always land on the Books
+    // pane regardless of the last-used tab, since it's the only pane shown.
+    if (params.get('embed')) { activateTtsTab('books'); return; }
     var t = sessionState.load('activeTab', '');
     if (t) activateTtsTab(t);
     setPronsMode(sessionState.load('pronsMode', 'ipa'));
@@ -6221,7 +6244,7 @@ var BOOKS_PROFILE_KEY = 0;
 // Independent of the volume selection: the GPU worker (cap = 1) may be
 // processing a chapter in a volume the admin isn't currently viewing, and
 // the indicator should still show it. Polls ?action=processing while the
-// Books tab is open and shows "s##v## ch## · ¶N/M", or "Idle".
+// Books tab is open and shows "s##v## ch## · N/M", or "Idle".
 var BOOKS_PROC_TIMER = null;
 
 function _pad2(n) { return String(n == null ? 0 : n).padStart(2, '0'); }
@@ -6230,14 +6253,23 @@ function _pad2(n) { return String(n == null ? 0 : n).padStart(2, '0'); }
 // to that volume/chapter/paragraph (see jumpToBuildingChapter). Null=idle.
 var LAST_BOOKS_PROC = null;
 
-function renderBooksProcessing(p) {
+function renderBooksProcessing(p, queued) {
     var el = $('books-processing');
     if (!el) return;
+    // Total paragraphs still queued to build across the whole queue (pending
+    // chapters + what's left of the running one), formatted with thousands
+    // separators. Shown alongside "Building …" so the admin can see how much
+    // work remains, and even when idle if the queue is non-empty.
+    var q = (typeof queued === 'number' && queued > 0) ? queued : 0;
+    var qStr = q.toLocaleString();
+    var qHtml = q ? ' · <span class="bp-queued">' + qStr + ' queued</span>' : '';
     if (!p) {
         LAST_BOOKS_PROC = null;
         el.className = 'books-processing books-processing--idle';
-        el.textContent = 'Idle';
-        el.title = 'No chapter is being processed right now';
+        el.innerHTML = q ? 'Idle' + qHtml : 'Idle';
+        el.title = q
+            ? (qStr + ' paragraphs queued; no chapter is being processed right now')
+            : 'No chapter is being processed right now';
         el.style.cursor = '';
         el.onclick = null;
         return;
@@ -6247,19 +6279,19 @@ function renderBooksProcessing(p) {
     // Pull "Paragraph N / M" out of the worker's progress message when present.
     var para = '';
     var m = /paragraph\s+(\d+)\s*\/\s*(\d+)/i.exec(p.tts_audio_message || '');
-    if (m) para = ' · <span class="bp-para">¶' + m[1] + '/' + m[2] + '</span>';
+    if (m) para = ' · <span class="bp-para">' + m[1] + '/' + m[2] + '</span>';
     else if (p.tts_audio_progress != null) para = ' · ' + p.tts_audio_progress + '%';
     el.className = 'books-processing books-processing--active';
-    el.innerHTML = 'Building <span class="bp-code">' + escapeHtml(code) + '</span>' + para;
+    el.innerHTML = 'Building <span class="bp-code">' + escapeHtml(code) + '</span>' + para + qHtml;
     // Only clickable when we have the keys needed to navigate.
     if (p.volume_key && p.chapter_key) {
         el.style.cursor = 'pointer';
         el.onclick = jumpToBuildingChapter;
-        el.title = 'Now building: ' + code + (p.tts_audio_message ? ' — ' + p.tts_audio_message : '') + ' · click to jump to this chapter';
+        el.title = 'Now building: ' + code + (p.tts_audio_message ? ' — ' + p.tts_audio_message : '') + (q ? ' · ' + qStr + ' queued' : '') + ' · click to jump to this chapter';
     } else {
         el.style.cursor = '';
         el.onclick = null;
-        el.title = 'Now building: ' + code + (p.tts_audio_message ? ' — ' + p.tts_audio_message : '');
+        el.title = 'Now building: ' + code + (p.tts_audio_message ? ' — ' + p.tts_audio_message : '') + (q ? ' · ' + qStr + ' queued' : '');
     }
 }
 
@@ -6323,7 +6355,7 @@ async function jumpToBuildingChapter() {
 async function refreshBooksProcessing() {
     try {
         var r = await api('/admin-tts-books.php?action=processing&tts_key=' + TTS_KEY);
-        renderBooksProcessing(r && r.processing);
+        renderBooksProcessing(r && r.processing, r && r.queued_paragraphs_remaining);
     } catch (e) { /* transient — leave the last state, try again next tick */ }
 }
 
@@ -6819,9 +6851,16 @@ function _chapterRowsHtml(c) {
                  + toggleLabel + '</button>';
     }
     var readCell;
-    if (ACTIVE_VOLUME_CODE && c.chapter_page) {
-        var href = '/' + ACTIVE_VOLUME_CODE + '/#page=' + c.chapter_page;
-        readCell = '<a href="' + escapeHtml(href) + '" target="_blank" title="Open chapter ' + escapeHtml(c.chapter_number) + ' on page ' + escapeHtml(c.chapter_page) + ' in the flipbook" style="color:#31345A;text-decoration:none;font-weight:600;white-space:nowrap;">p.' + escapeHtml(c.chapter_page) + ' →</a>';
+    // Link target MUST be the physical PDF page (= flipbook page), which is
+    // the chapter's first paragraph_page. chapter_page is the PRINTED page
+    // (front-matter offset, 3–7 depending on the book) so using it as the
+    // #page= value landed every chapter link short by that offset. Display
+    // the printed page (matches the book) but navigate to the PDF page.
+    var flipPage = (c.chapter_pdf_page != null ? c.chapter_pdf_page : c.chapter_page);
+    if (ACTIVE_VOLUME_CODE && flipPage) {
+        var href = '/' + ACTIVE_VOLUME_CODE + '/#page=' + flipPage;
+        var pLabel = (c.chapter_page != null ? c.chapter_page : flipPage);
+        readCell = '<a href="' + escapeHtml(href) + '" target="_blank" title="Open chapter ' + escapeHtml(c.chapter_number) + ' in the flipbook (PDF page ' + escapeHtml(flipPage) + ')" style="color:#31345A;text-decoration:none;font-weight:600;white-space:nowrap;">p.' + escapeHtml(pLabel) + ' →</a>';
     } else {
         readCell = '<span style="color:#bbb;" title="No flipbook page configured for this chapter">—</span>';
     }
@@ -7413,6 +7452,23 @@ async function redoParagraph(ak, idx) {
         // Blank the sig so the next poll always repaints this row with the
         // fresh status the backend computes.
         row.dataset.sig = '';
+    }
+    // Re-arm the live-update loop. A single-paragraph redo flips the
+    // chapter to pending/running server-side, but if the volume was
+    // otherwise idle (every chapter 'complete') nothing on the client is
+    // polling or holding an SSE stream open — the placeholder set above
+    // would sit at "queued — re-synthesising…" forever and never flip back
+    // to the audio player when the gap-fill finishes (the operator's
+    // "regenerating paragraph doesn't go back to the player" report).
+    // loadChapters re-fetches CHAPTERS (now pending/running), which arms
+    // SSE + the 5s poll and hands the OPEN panel to
+    // _paraSurgicalFromChapters — that flips THIS row to its player the
+    // moment the rebuilt part lands. Same sanctioned, panel-safe path the
+    // build poll already uses (surgical per-row diff, never a container
+    // overwrite). Only when actually requeued: a 'paused' chapter returns
+    // requeued=false and must not be poked into polling.
+    if (res && res.requeued && typeof loadChapters === 'function' && ACTIVE_VOLUME) {
+        loadChapters(ACTIVE_VOLUME);
     }
     if (btn) setTimeout(function () { btn.disabled = false; btn.textContent = origText || '↻ Redo'; }, 1500);
 }

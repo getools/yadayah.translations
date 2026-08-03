@@ -320,7 +320,9 @@ function numberToWords(int $n): string {
     if ($n < 20)      return $ones[$n];
     if ($n < 100)     { $r = $n % 10;   return $tens[intdiv($n,10)] . ($r ? ' ' . $ones[$r] : ''); }
     if ($n < 1000)    { $r = $n % 100;  return $ones[intdiv($n,100)] . ' hundred' . ($r ? ' ' . numberToWords($r) : ''); }
-    if ($n < 1000000) { $r = $n % 1000; return numberToWords(intdiv($n,1000)) . ' thousand' . ($r ? ' ' . numberToWords($r) : ''); }
+    if ($n < 1000000)       { $r = $n % 1000;       return numberToWords(intdiv($n,1000))       . ' thousand' . ($r ? ' ' . numberToWords($r) : ''); }
+    if ($n < 1000000000)    { $r = $n % 1000000;    return numberToWords(intdiv($n,1000000))    . ' million'  . ($r ? ' ' . numberToWords($r) : ''); }
+    if ($n < 1000000000000) { $r = $n % 1000000000; return numberToWords(intdiv($n,1000000000)) . ' billion'  . ($r ? ' ' . numberToWords($r) : ''); }
     return (string)$n;
 }
 
@@ -503,6 +505,21 @@ function rewriteClockTimes(string $text, bool $spell = false): string {
  */
 function rewriteBareNumbers(string $text, bool $spell = false): string {
     if (!$spell) return $text;
+    // Comma-grouped thousands FIRST ("1,500" -> "one thousand five hundred").
+    // A thousands separator marks the value as a count, never a year, so unlike
+    // the bare 4+-digit case (deliberately left as digits below) it is always
+    // safe — and necessary — to spell it: the autoregressive local engines drop
+    // the leading place otherwise ("1,500" was voiced "five hundred"; "610,000"
+    // would lose its thousands). Requires >=1 well-formed ",ddd" group; the
+    // trailing (?![\d.]) leaves malformed runs ("1,5000") and decimals alone.
+    $text = preg_replace_callback(
+        '/(?<![\d.,:_\x01])([1-9]\d{0,2}(?:,\d{3})+)(?![\d.])(\s*%)?/u',
+        function ($m) {
+            $out = numberToWords((int)str_replace(',', '', $m[1]));
+            return isset($m[2]) && $m[2] !== '' ? $out . ' percent' : $out;
+        },
+        $text
+    );
     // Ranges first: both endpoints spelled, hyphen voiced as "to".
     $text = preg_replace_callback(
         '/(?<![\d.,:_\x01])\b([1-9]\d{2})\s*[-\x{2013}\x{2014}]\s*([1-9]\d{2})\b(?![.,:]\d)(?![_\x01])/u',
@@ -1263,9 +1280,18 @@ function tunePrintToRegex(string $print, bool $caseSensitive = false): string {
     // when the match swallowed an "'s" and append the right sound to
     // the substituted form. Optional, so plain matches still work.
     $possessiveTail = '(' . $APOS_CLASS . 's)?';
+    // Whole-word boundary: reject any Unicode letter or number, plus any
+    // apostrophe-class char, on either side, so a tune word embedded in a
+    // larger word never matches. \p{L} already covers ASCII A-Za-z but ALSO
+    // non-ASCII letters, so "ad" no longer matches inside "ḥadīth"/"aḥadīth";
+    // \p{N} covers digits so "ad2" isn't a whole word either. Punctuation,
+    // spaces and hyphens are NOT word chars, so "Ad-Dan", "Thamud, Ad," and
+    // the possessive "ad's" still match. (Was [A-Za-z], which let non-ASCII
+    // letters and digits leak in mid-word matches.)
+    $wordBoundary = '[\p{L}\p{N}' . substr($APOS_CLASS, 1);
     if ($core === '' || $core === null) {
         // Degenerate: Print was entirely apostrophes. Fall back to literal match.
-        return '/(?<![A-Za-z])(' . preg_quote($print, '/') . ')' . $possessiveTail . '(?![A-Za-z])/' . $flags;
+        return '/(?<!' . $wordBoundary . ')(' . preg_quote($print, '/') . ')' . $possessiveTail . '(?!' . $wordBoundary . ')/' . $flags;
     }
     // 2) Detect whether Print has leading / trailing apostrophe-class
     //    characters. If so, REQUIRE one (any of the equivalents) in
@@ -1276,19 +1302,19 @@ function tunePrintToRegex(string $print, bool $caseSensitive = false): string {
     // 3) Split the core letters, escape each, join with an optional
     //    apostrophe-class so internal half-rings between letters
     //    still flex (e.g. Print "Yahowahs" matches source "Yahowah's").
-    // 4) Whole-word lookarounds reject both ASCII letters and any
-    //    apostrophe-class char on either side, so adjacent half-rings
-    //    in the source can't sneak the match through.
+    // 4) Whole-word lookarounds reject any Unicode letter/number and any
+    //    apostrophe-class char on either side (see $wordBoundary), so
+    //    adjacent half-rings, non-ASCII letters and digits in the source
+    //    can't sneak a mid-word match through.
     // 5) /iu — case-insensitive Unicode; "Yahowah" matches "yahowah" too.
     $needsLeadingApos  = (bool)preg_match($APOS_RE, mb_substr($print, 0, 1));
     $needsTrailingApos = (bool)preg_match($APOS_RE, mb_substr($print, -1));
     $chars = preg_split('//u', $core, -1, PREG_SPLIT_NO_EMPTY);
     $escaped = array_map(function($c) { return preg_quote($c, '/'); }, $chars);
-    $aposClassNoSlash = "[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]";
-    $body = ($needsLeadingApos ? $aposClassNoSlash : '')
+    $body = ($needsLeadingApos ? $APOS_CLASS : '')
           . implode($APOS_CLASS_OPT, $escaped)
-          . ($needsTrailingApos ? $aposClassNoSlash : '');
-    return '/(?<![A-Za-z]|' . $aposClassNoSlash . ')(' . $body . ')' . $possessiveTail . '(?![A-Za-z]|' . $aposClassNoSlash . ')/' . $flags;
+          . ($needsTrailingApos ? $APOS_CLASS : '');
+    return '/(?<!' . $wordBoundary . ')(' . $body . ')' . $possessiveTail . '(?!' . $wordBoundary . ')/' . $flags;
 }
 
 /**
@@ -1887,25 +1913,44 @@ function azureOutputFormats(): array {
  * parenthetical (aside vs definition) — it does not drive segmentation, so the
  * bib-span close-only quirk in segmentParagraph is irrelevant here.
  */
-function ttsScanParenSpan(string $html, int $pos): string {
+function ttsScanParenSpan(string $html, int $pos, ?bool &$leadItalic = null): string {
     $n = strlen($html); $depth = 1; $out = '';
+    // Track whether the FIRST visible glyph of the parenthetical sits inside an
+    // <i> run. In these books a translation gloss opens with its transliterated
+    // Hebrew/Arabic lemma set in italics — "(<i>zakar</i> – …)", "(<i>wa</i>)",
+    // "(ʾ<i>ary</i>ʿ<i>el</i> / …)" — while an editorial aside opens in roman
+    // prose. A leading transliteration half-ring (ʾ ʿ) may precede the lemma and
+    // is skipped over. leadItalic is the primary "this is a definition" signal.
+    $italic = 0; $leadItalic = false; $leadSeen = false;
     while ($pos < $n) {
         $ch = $html[$pos];
-        if ($ch === '<') {                                   // skip a tag
+        if ($ch === '<') {                                   // skip a tag (track <i>…</i>)
             $e = strpos($html, '>', $pos);
             if ($e === false) break;
+            $tag = substr($html, $pos, $e - $pos + 1);
+            if (preg_match('~^<\s*i[\s>]~i', $tag))                    $italic++;
+            elseif (preg_match('~^<\s*/\s*i\s*>~i', $tag) && $italic > 0) $italic--;
             $pos = $e + 1; continue;
         }
         if ($ch === '&') {                                   // decode one entity
             $semi = strpos($html, ';', $pos);
             if ($semi !== false && $semi - $pos <= 8) {
+                if (!$leadSeen) { $leadSeen = true; $leadItalic = ($italic > 0); }
                 $out .= html_entity_decode(substr($html, $pos, $semi - $pos + 1), ENT_QUOTES | ENT_HTML5, 'UTF-8');
                 $pos = $semi + 1; continue;
             }
+            if (!$leadSeen) { $leadSeen = true; $leadItalic = ($italic > 0); }
             $out .= $ch; $pos++; continue;
         }
-        if ($ch === '(') { $depth++; $out .= $ch; $pos++; continue; }
-        if ($ch === ')') { if (--$depth === 0) break; $out .= $ch; $pos++; continue; }
+        if ($ch === '(') { if (!$leadSeen) { $leadSeen = true; $leadItalic = ($italic > 0); } $depth++; $out .= $ch; $pos++; continue; }
+        if ($ch === ')') { if (--$depth === 0) break; if (!$leadSeen) { $leadSeen = true; $leadItalic = ($italic > 0); } $out .= $ch; $pos++; continue; }
+        if (!$leadSeen) {
+            if (ctype_space($ch)) { $out .= $ch; $pos++; continue; }  // leading whitespace
+            if ($ch === "\xCA" && $pos + 1 < $n && ($html[$pos + 1] === "\xBE" || $html[$pos + 1] === "\xBF")) {
+                $out .= substr($html, $pos, 2); $pos += 2; continue;  // leading half-ring ʾ/ʿ → keep scanning for the lemma
+            }
+            $leadSeen = true; $leadItalic = ($italic > 0);           // first real glyph decides
+        }
         $out .= $ch; $pos++;
     }
     return $out;
@@ -1936,44 +1981,50 @@ function ttsScanParenSpan(string $html, int $pos): string {
  * treated as apparatus and stay silent, per the narration policy — they are
  * caught by the numeric verse/page rules below.
  */
-function ttsParentheticalIsAside(string $s): bool {
+function ttsParentheticalIsAside(string $s, bool $leadItalic = false): bool {
     $t = trim($s);
     if ($t === '') return false;
-    // Transliteration diacritics / Hebrew / Arabic script → definition.
-    if (preg_match('/[\x{02BE}\x{02BF}\x{0300}-\x{036F}\x{0590}-\x{05FF}\x{0600}-\x{06FF}]/u', $t)) return false;
+    // Policy (user, 07-18): a parenthetical is left SILENT only when it is the
+    // translation / word-definition apparatus. Everything else — the author's
+    // editorial parentheticals in the running prose — is narrated, however
+    // short. "(collectively and known as the “Old Testament”)" is voiced. So
+    // this is signal-based: we DROP only on a positive definition signal and
+    // narrate by default, rather than the old English-density gate that
+    // silenced legitimate short asides (see [[reference_tts_parenthetical_aside_narration]]).
+    //
+    // The apparatus is marked structurally (an italic transliteration lemma)
+    // and lexically (foreign script, a gloss dash/pipe, grammatical parse, a
+    // reference citation, a bare number, or a romanized function word):
+    if ($leadItalic) return false;                                  // opens with an italic lemma → gloss
+    // Hebrew / Arabic / Greek script, combining marks, or transliteration half-rings.
+    if (preg_match('/[\x{02BE}\x{02BF}\x{0300}-\x{036F}\x{0370}-\x{03FF}\x{0590}-\x{05FF}\x{0600}-\x{06FF}]/u', $t)) return false;
     // Gloss separators (– — |) mark a word-definition block.
     if (preg_match('/[\x{2013}\x{2014}|]/u', $t)) return false;
+    // Transliteration alternates "saphar / sepher" — two bare romanized tokens
+    // split by a slash, with no ordinary English connective between them.
+    if (preg_match('~^[A-Za-z]+\s*/\s*[A-Za-z]+~', $t) && !preg_match('/\b(and|or|the|of|to|in|a|an)\b/i', $t)) return false;
     // Grammatical metalanguage → a parse of a word, not prose.
-    if (preg_match('/\b(hifil|hofal|niphal|qal|piel|pual|hitpael|perfect|imperfect|imperative|participle|infinitive|construct|cohortative|jussive|paragogic|masculine|feminine)\b/i', $t)) return false;
+    if (preg_match('/\b(hifil|hofal|niphal|qal|piel|pual|hitpael|perfect|imperfect|imperative|participle|infinitive|construct|cohortative|jussive|paragogic|masculine|feminine|singular|plural|genitive|nominative|accusative|dative|vocative)\b/i', $t)) return false;
     // Reference citations (chapter:verse / chapter.verse, incl. ranges) stay silent.
     if (preg_match('/\b\d+[:.]\d+(?:[-\x{2013}]\d+)?[a-z]?\b/u', $t)) return false;
-    // Source / self references (op. cit., ibid, p. 139, Volume 2, Chapter 3) stay silent.
-    if (preg_match('/\b(op\.?\s*cit|ibid|pp?\.?\s*\d+|Volume\s+\d+|Chapter\s+\d+)\b/i', $t)) return false;
+    // Source / self references + Strong's numbers stay silent.
+    if (preg_match('/\b(op\.?\s*cit|ibid|pp?\.?\s*\d+|Volume\s+\d+|Chapter\s+\d+|Strong\x27?s?)\b/i', $t)) return false;
+    // Bare number / footnote reference / Strong's id ("38", "H8420", "10, 11").
+    if (preg_match('/^H?\d[\d\s,.:\x{2013}-]*$/u', $t)) return false;
     // Romanized Hebrew/Arabic function tokens (no diacritics) → transliteration.
-    if (preg_match('/\b(wa|ky|huw|hem|hen|shanah|leb|midah|chalab|dabash|nagad|henah|zuwb|shabym|ruwm|qereb|yowm|shem)\b/', $t)) return false;
-    // English-prose density gate: a substantial, natural-English clause.
+    if (preg_match('/\b(wa|ky|huw|hem|hen|hwhy|shanah|leb|midah|chalab|dabash|nagad|henah|zuwb|shabym|ruwm|qereb|yowm|shem|saphar|sepher)\b/', $t)) return false;
+    // Require at least one CONTENT word. An all-function-word fragment
+    // ("(is he)", "(the)", "(to me)") carries no editorial content and only
+    // adds noise when voiced; the pronoun-inclusive $func set is kept separate
+    // so this guard is the sole length floor.
     preg_match_all("/[A-Za-z']+/", mb_strtolower($t), $m);
-    $words = $m[0];
-    $nw = count($words);
-    if ($nw < 8) return false;
-    static $stop = null;
-    if ($stop === null) {
-        $stop = array_flip(explode(' ', 'the a an of to in is was are for with on by it he she they we i you and or but not this that these those his her their our your as at from into over under about which who whom whose because although though however while when where since therefore have has had will would could should may might must been being do does did'));
-    }
-    $eng = 0; foreach ($words as $w) if (isset($stop[$w])) $eng++;
-    $ratio = $eng / $nw;
-    // Reject an all-function-word parenthetical — e.g. a pronoun-list gloss
-    // "(I, me, we, us, you, she, he, they, them)": high stopword ratio but no
-    // content words, so it is a definition list, not editorial prose. Counted
-    // against a pronoun-inclusive function set kept SEPARATE from $stop so this
-    // guard does not perturb the $ratio thresholds above.
     static $func = null;
-    if ($func === null) $func = $stop + array_flip(['me','us','him','them','hers','mine','yours','myself','himself','herself','themselves','ourselves']);
-    $content = 0; foreach ($words as $w) if (!isset($func[$w])) $content++;
-    if ($content < 2) return false;
-    $endsSentence = (bool)preg_match('/[.!?]["\x{201D}\x{2019}]?$/u', $t);
-    $hasTwo       = (bool)preg_match('/[.!?]\s+[A-Z]/', $t);
-    return ($ratio >= 0.30 && ($endsSentence || $hasTwo || $ratio >= 0.40));
+    if ($func === null) {
+        $func = array_flip(explode(' ', 'the a an of to in is was are for with on by it he she they we i you and or but not this that these those his her their our your as at from into over under about which who whom whose because although though however while when where since therefore have has had will would could should may might must been being do does did me us him them hers mine yours myself himself herself themselves ourselves there here be'));
+    }
+    $content = 0; foreach ($m[0] as $w) if (!isset($func[$w])) $content++;
+    if ($content < 1) return false;
+    return true;
 }
 
 /* ── segmentation ───────────────────────────────────────────────────
@@ -2139,7 +2190,7 @@ function segmentParagraph(string $html, ?array &$carry = null): array {
                 // At a top-level open, classify the parenthetical once. $i already
                 // points just past this '(' (a literal '(' takes the $i++ path),
                 // so the lookahead reads its inner text from here.
-                if ($parenDepth === 0) $topParenAside = ttsParentheticalIsAside(ttsScanParenSpan($html, $i));
+                if ($parenDepth === 0) { $leadIt = false; $span = ttsScanParenSpan($html, $i, $leadIt); $topParenAside = ttsParentheticalIsAside($span, $leadIt); }
                 $parenDepth++;
                 $cat = $topParenAside ? 'main' : 'word_definition';
             }
@@ -2228,26 +2279,53 @@ function segmentParagraph(string $html, ?array &$carry = null): array {
             }
         }
     }
-    // Islamic citation -> quote voice. The color parser tags an
-    // Islamic-source citation label ("Quran 005:033", "Ishaq:515") with
-    // its source style (data-style="quran"/"ishaq"/... -> category
-    // quran/ishaq/...) but tags the quotation that follows with the
-    // generic data-style="other" (-> 'other'). Left alone, the scripture
-    // quote routes to the 'Other' voice (a Christian narrator in profile
-    // 8) instead of the Islamic source voice. When a paragraph carries an
-    // Islamic-source segment, re-tag its generic-quote ('other'/'quote')
-    // segments to that source so the citation AND its quote read in one
-    // voice. Only 'other'/'quote' are moved; 'main' narration and other
-    // styled scripture are left untouched.
+    // Islamic citation -> quote voice. The colour parser tags an
+    // Islamic-source citation LABEL ("Quran 005:033", "Ishaq:515") with its
+    // source style (data-style="quran"/"ishaq"/... -> category quran/ishaq/…)
+    // but the quotation that FOLLOWS is styled inconsistently in the source:
+    //   • sometimes the generic data-style="other"  (-> 'other'),
+    //   • very often NO data-style at all — bold quote text then falls
+    //     through segmentParagraph's classifier to 'translation', and plain
+    //     text to 'main'.
+    // Left alone, an unstyled quote reads in the Translation-Prose voice
+    // instead of the Islamic source voice. The Topical Appendix (~1800
+    // back-to-back citations, quotes set BOLD with no colour) was almost
+    // entirely mis-voiced this way. So once a paragraph OPENS an
+    // Islamic-source citation, re-tag its quote-like segments to that source,
+    // so the citation and its quote read in one voice; continuation tails
+    // were already merged into this paragraph's html by the worker, so they
+    // are covered too. Rules — deliberately conservative:
+    //   • Generic quote text ('other'/'quote' — coloured text) anywhere in
+    //     the paragraph is routed to the source (the original behaviour).
+    //   • Bold quote text ('translation') is routed only AFTER the first
+    //     citation label, so a bold interlinear translation BEFORE the
+    //     citation is left alone.
+    //   • 'main' (plain body text) is NEVER moved. In the body chapters an
+    //     author's commentary between/after citations is plain 'main' in the
+    //     same paragraph as the citation (e.g. "…it is spelled fajri rather
+    //     than falaqi in Quran 113.001. The realization that…"); the Islamic
+    //     quotes there are the coloured/bold segments, which the two rules
+    //     above already catch. Moving 'main' would drag that narration into
+    //     the Islamic voice — a regression the appendix fix must not cause.
+    //   • Each quote-like segment takes the MOST RECENT preceding source, so
+    //     a paragraph citing two sources voices each quote correctly.
+    //   • Bible/other styled scripture and parenthetical word-definitions are
+    //     never moved.
     $islamSources = ['islam', 'quran', 'bukhari', 'muslim', 'tabari', 'ishaq'];
-    $islamCat = null;
-    foreach ($merged as $s) {
-        if (in_array($s['category'], $islamSources, true)) { $islamCat = $s['category']; break; }
+    $firstIslamIdx = null;
+    foreach ($merged as $i => $s) {
+        if (in_array($s['category'], $islamSources, true)) { $firstIslamIdx = $i; break; }
     }
-    if ($islamCat !== null) {
-        foreach ($merged as &$s) {
-            if ($s['category'] === 'other' || $s['category'] === 'quote') {
-                $s['category'] = $islamCat;
+    if ($firstIslamIdx !== null) {
+        $primarySrc = $merged[$firstIslamIdx]['category'];
+        $curSrc = null;
+        foreach ($merged as $i => &$s) {
+            if (in_array($s['category'], $islamSources, true)) {
+                $curSrc = $s['category'];
+            } elseif ($s['category'] === 'other' || $s['category'] === 'quote') {
+                $s['category'] = $curSrc ?? $primarySrc;
+            } elseif ($i > $firstIslamIdx && $s['category'] === 'translation') {
+                $s['category'] = $curSrc ?? $primarySrc;
             }
         }
         unset($s);
@@ -3007,9 +3085,35 @@ function buildLocalSegment(string $text, array $cfg, string $category): array {
     // a "Oh Oh Oh Oh" stream at the start of every chapter heading. ASCII
     // periods are universally interpreted as natural pauses by every
     // local engine we use.
-    $text = preg_replace_callback('/\x01PAUSE_\d+_(\d+)\x01/', function ($m) {
+    // User-defined yy_tts_pause rules (key 1..98999) become REAL inserted silence
+    // at a hard split — the autoregressive engines do NOT lengthen a pause from
+    // punctuation (measured on Chatterbox: a comma, three commas, an em-dash and a
+    // semicolon ALL yield the same ~0.3 s gap), so the only way to honor a custom
+    // pause LENGTH is to insert that many ms of ACTUAL silence between clips at
+    // assembly. Emit a split marker carrying the ms; ttsChunkWithSilence() splits on
+    // it and pvConcatMp3sWithPauses inserts the silence (verified linear: 300→0.5s,
+    // 1000→1.2s, 1500→1.7s). Structural pauses (key 0: chapter/subhead) and
+    // font-switch pauses (key>=99000) fall through to the punctuation pass below.
+    // See [[reference_tts_custom_pause_silence]].
+    $text = preg_replace_callback('/\x01PAUSE_(\d+)_(\d+)\x01/', function ($m) {
+        $key = (int)$m[1]; $ms = (int)$m[2];
+        return ($key > 0 && $key < 99000 && $ms > 0) ? "\x02SIL_{$ms}\x02" : $m[0];
+    }, $text);
+    // ⚠ A pause that lands MID-SENTENCE — immediately before a lowercase-letter
+    // continuation or an opening bracket — must NOT become a period. The
+    // autoregressive local engines read ". lowercase" as a botched sentence start
+    // and HALLUCINATE a filler onset ("eee") right there. This bit us with the
+    // "__ (" (space-before-paren) pause at 1000ms: "…Psalms (collectively…" → the
+    // rule strips the "(" and the 1000ms mapped to a period → engine text
+    // "…Psalms. collectively…" → "…Psalms. eee collectively…". A comma is the
+    // correct punctuation at a mid-sentence pause anyway and the engines pause on
+    // it cleanly, so cap such pauses at a comma regardless of ms. Pauses before a
+    // genuine sentence start (capital / digit / quote / end) keep the ms mapping.
+    $text = preg_replace_callback('/\x01PAUSE_\d+_(\d+)\x01[ \t]*(\p{Ll}|[([{])?/u', function ($m) {
         $ms = (int)$m[1];
-        if ($ms < 100)  return ' ';
+        $follow = $m[2] ?? '';                 // set only when the next glyph is lowercase / an open bracket
+        if ($ms < 100)  return ' ' . $follow;
+        if ($follow !== '') return ', ' . $follow;   // mid-sentence → comma, never a period
         if ($ms < 300)  return ', ';
         if ($ms < 1500) return '. ';
         $n = (int)ceil($ms / 700);
@@ -3116,9 +3220,21 @@ function buildInworldSegment(string $text, array $cfg, string $category): array 
     $text = applyInlinePauses($text);
     // Same pause-as-punctuation strategy as buildLocalSegment — Inworld
     // honours commas / periods for natural pacing without needing SSML breaks.
-    $text = preg_replace_callback('/\x01PAUSE_\d+_(\d+)\x01/', function ($m) {
+    // ⚠ A pause that lands MID-SENTENCE — immediately before a lowercase-letter
+    // continuation or an opening bracket — must NOT become a period. The
+    // autoregressive local engines read ". lowercase" as a botched sentence start
+    // and HALLUCINATE a filler onset ("eee") right there. This bit us with the
+    // "__ (" (space-before-paren) pause at 1000ms: "…Psalms (collectively…" → the
+    // rule strips the "(" and the 1000ms mapped to a period → engine text
+    // "…Psalms. collectively…" → "…Psalms. eee collectively…". A comma is the
+    // correct punctuation at a mid-sentence pause anyway and the engines pause on
+    // it cleanly, so cap such pauses at a comma regardless of ms. Pauses before a
+    // genuine sentence start (capital / digit / quote / end) keep the ms mapping.
+    $text = preg_replace_callback('/\x01PAUSE_\d+_(\d+)\x01[ \t]*(\p{Ll}|[([{])?/u', function ($m) {
         $ms = (int)$m[1];
-        if ($ms < 100)  return ' ';
+        $follow = $m[2] ?? '';                 // set only when the next glyph is lowercase / an open bracket
+        if ($ms < 100)  return ' ' . $follow;
+        if ($follow !== '') return ', ' . $follow;   // mid-sentence → comma, never a period
         if ($ms < 300)  return ', ';
         if ($ms < 1500) return '. ';
         $n = (int)ceil($ms / 700);
@@ -3247,6 +3363,13 @@ function buildElevenLabsSegment(string $text, array $cfg, string $category): arr
  */
 function localTtsSynthesize(array $cfg, array $seg, string $outputFormat, ?string &$err = null): string {
     require_once __DIR__ . '/gpu-client.php';
+    // Defensive: a custom-pause silence marker (\x02SIL_<ms>\x02) must never reach
+    // the engine. The mp3/preview paths split on it via ttsChunkWithSilence(); on
+    // any other path (wav/pcm single-call) fall back to a period so it's spoken as
+    // a natural pause, not the literal control bytes.
+    if (isset($seg['text']) && strpos((string)$seg['text'], "\x02SIL_") !== false) {
+        $seg['text'] = preg_replace('/\x02SIL_(\d+)\x02/u', '. ', (string)$seg['text']);
+    }
     $prov = $cfg['providers'][$seg['provider_key']] ?? null;
     if (!$prov) { $err = 'unknown provider_key ' . ($seg['provider_key'] ?? '?'); return ''; }
     $settings = json_decode((string)($prov['provider_settings'] ?? '{}'), true) ?: [];
@@ -3496,7 +3619,10 @@ function localTtsSynthesizeChunked(array $cfg, array $seg, string $outputFormat,
     // ttsProviderChunkSizes) — the SAME splitter the preview path uses, so a book
     // build and its preview chunk identically. No hardcoded sizes here.
     $cs = ttsProviderChunkSizes($cfg, (int)($seg['provider_key'] ?? 0));
-    $chunks = chunkTextForPreview((string)($seg['text'] ?? ''), $cs['min'], $cs['target'], $cs['max']);
+    // Silence-aware chunking: splits on custom-pause markers and returns the exact
+    // ms to insert after each chunk (null = natural breath). $chunks is marker-free,
+    // so the opus byte-concat path below stays correct too.
+    [$chunks, $chunkPauses] = ttsChunkWithSilence((string)($seg['text'] ?? ''), $cs['min'], $cs['target'], $cs['max']);
     if (!$chunks) return localTtsSynthesizeRetry($cfg, $seg, $outputFormat, $err);
 
     // Opus can't go through pvConcatMp3sWithPauses (mp3/wav only) — keep the
@@ -3557,7 +3683,8 @@ function localTtsSynthesizeChunked(array $cfg, array $seg, string $outputFormat,
             if (ttsBuildChunkOk($cand, $chunk)) break;   // faithful render — done
         }
         if ($b === '') { $err = 'chunk ' . ($i + 1) . ' of ' . $n . ": $cErr"; return ''; }
-        $items[] = ['mp3' => $b, 'pause' => ($i < $n - 1) ? pvChunkPauseMs($chunk) : 0];
+        // Custom-pause silence (ttsChunkWithSilence) overrides the natural breath.
+        $items[] = ['mp3' => $b, 'pause' => ($i < $n - 1) ? ($chunkPauses[$i] ?? pvChunkPauseMs($chunk)) : 0];
     }
     $cErr = '';
     $out = pvConcatMp3sWithPauses($items, $cErr, 'mp3', $trailingPadMs);
@@ -3685,8 +3812,13 @@ function ttsCleanPreviewText(string $text): string {
     $text = preg_replace('/\s+/u', ' ', $text);
     $text = trim($text);
     $aposCls = "[\x{0027}\x{0060}\x{00B4}\x{02BC}\x{02BE}\x{02BF}\x{02C0}\x{2018}\x{2019}\x{201B}\x{2032}\x{05F3}]";
-    $text = preg_replace('/(\pL)\s+(' . $aposCls . ')/u', '$1$2', $text);
-    $text = preg_replace('/(' . $aposCls . ')\s+(\pL)/u', '$1$2', $text);
+    // Only repair an apostrophe-class glyph left STRANDED between spaces by
+    // markup removal (e.g. "Miqra <sup>ʿ</sup> ey" -> "Miqra ʿ ey"): pull the
+    // lone glyph back onto BOTH neighbours. A half-ring that already leads a
+    // word ("the ʿam", or the "Say ʿAd again." audition frame) is a legitimate
+    // word boundary -- gluing it onto the previous word ("SayʿAd") would hide the
+    // whole word from the pronunciation matcher so its phonetic never fires.
+    $text = preg_replace('/(\pL)\s+(' . $aposCls . ')\s+(\pL)/u', '$1$2$3', $text);
     return $text;
 }
 
@@ -3787,6 +3919,42 @@ function chunkTextForPreview(string $text, int $minChars, int $targetChars, int 
     return array_values(array_filter($chunks, function ($c) { return $c !== '' && preg_match('/\p{L}|\d/u', $c); }));
 }
 
+/**
+ * Chunk a segment's text like chunkTextForPreview(), but honor custom-pause
+ * silence markers (\x02SIL_<ms>\x02) emitted by buildLocalSegment for user
+ * yy_tts_pause rules. Splits the text on each marker, chunks each piece
+ * independently, and returns [chunks, pauseAfter] where pauseAfter[$i] is the
+ * exact ms of silence to insert AFTER chunk $i (the piece's LAST chunk) — or
+ * null to use the natural punctuation-derived breath (pvChunkPauseMs). The core
+ * chunker is unchanged; markers never reach it or the engine. Local engines
+ * can't lengthen a pause from punctuation, so this is how a custom pause LENGTH
+ * is realised — as real inserted silence. See [[reference_tts_custom_pause_silence]].
+ */
+function ttsChunkWithSilence(string $text, int $minChars, int $targetChars, int $maxChars): array {
+    // parts = [text0, ms0, text1, ms1, …, textN] (DELIM_CAPTURE keeps the ms).
+    $parts = preg_split('/\x02SIL_(\d+)\x02/u', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
+    if ($parts === false) $parts = [$text];
+    $chunks = []; $pauseAfter = [];
+    for ($p = 0; $p < count($parts); $p += 2) {
+        $pieceChunks = chunkTextForPreview((string)$parts[$p], $minChars, $targetChars, $maxChars);
+        $ms = isset($parts[$p + 1]) ? (int)$parts[$p + 1] : 0;   // silence to insert after this piece
+        if (!$pieceChunks) {
+            // Empty piece (marker at a boundary or two adjacent markers): fold its
+            // silence onto the previous chunk so no pause is lost.
+            if ($ms > 0 && $chunks) {
+                $last = count($chunks) - 1;
+                $pauseAfter[$last] = max((int)($pauseAfter[$last] ?? 0), $ms);
+            }
+            continue;
+        }
+        $lastIdx = count($pieceChunks) - 1;
+        foreach ($pieceChunks as $j => $c) {
+            $chunks[]     = $c;
+            $pauseAfter[] = ($j === $lastIdx && $ms > 0) ? $ms : null;   // null → natural breath
+        }
+    }
+    return [$chunks, $pauseAfter];
+}
 
 /**
  * PREVIEW-ONLY chunked synth for self-hosted engines (XTTS/Coqui, Chatterbox,
@@ -3817,9 +3985,9 @@ function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat,
         $cs = ttsProviderChunkSizes($cfg, (int)$seg['provider_key']);
         $minChars = $cs['min']; $targetChars = $cs['target']; $maxChars = $cs['max'];
     }
-    $chunks = chunkTextForPreview((string)($seg['text'] ?? ''), $minChars, $targetChars, $maxChars);
+    [$chunks, $chunkPauses] = ttsChunkWithSilence((string)($seg['text'] ?? ''), $minChars, $targetChars, $maxChars);
     if (!$chunks) { $err = 'no synthesizable text'; return ''; }
-    if (count($chunks) > $maxChunks) $chunks = array_slice($chunks, 0, $maxChunks); // runaway safety only
+    if (count($chunks) > $maxChunks) { $chunks = array_slice($chunks, 0, $maxChunks); $chunkPauses = array_slice($chunkPauses, 0, $maxChunks); } // runaway safety only
 
     // Chunks are synthesised LOSSLESS (wav) and kept lossless through assembly;
     // we only MP3-encode at the very end (once) — no compounding warble.
@@ -3888,7 +4056,7 @@ function localTtsSynthesizePreview(array $cfg, array $seg, string $outputFormat,
         // Raw chunk bytes — leading-silence trim happens once in the assembly
         // (single encode = no warble). Pause AFTER this chunk is sized by the
         // punctuation it ends on (a natural breath between chunks).
-        $items[] = ['mp3' => $b, 'pause' => ($i < count($chunks) - 1) ? pvChunkPauseMs($chunk) : 0];
+        $items[] = ['mp3' => $b, 'pause' => ($i < count($chunks) - 1) ? ($chunkPauses[$i] ?? pvChunkPauseMs($chunk)) : 0];
         if ($onChunk) $onChunk();   // one chunk done (drives async chunk-progress)
     }
     // Assemble: clean seekable header + inter-chunk pauses. WAV (lossless) when
@@ -4062,9 +4230,15 @@ function ttsWordLocations(PDO $db, int $ttsKey, array $tune): array {
     $gated = ttsTuneIsFormatGated($tune);
     $fonts = $gated ? ttsLoadFontRules($db, $ttsKey) : [];
 
+    // Only pull the ONE text column the matcher below actually reads: html for
+    // gated tunes (font-filtered), plain otherwise. A loose short core like
+    // "ad" pre-matches ~57k paragraphs; selecting both columns pulled ~75MB and
+    // fetchAll() then duplicated it into a PHP array, blowing PHP's 128M limit.
+    // $textCol is derived from a bool, so it is safe to interpolate.
+    $textCol = $gated ? 'p.paragraph_text_html' : 'p.paragraph_text_plain';
     $cand = $db->prepare(
         "SELECT p.chapter_key, p.volume_key, p.series_key,
-                p.paragraph_text_plain, p.paragraph_text_html,
+                $textCol AS match_text,
                 s.series_number, COALESCE(s.series_label, s.series_name) AS series_label, s.series_sort,
                 v.volume_number, v.volume_label, v.volume_sort,
                 c.chapter_number, c.chapter_name, c.chapter_sort
@@ -4079,10 +4253,12 @@ function ttsWordLocations(PDO $db, int $ttsKey, array $tune): array {
     $cand->execute([':core' => $core, ':apos' => TTS_APOS_CHARS]);
 
     $chapters = [];   // chapter_key => aggregate node
-    foreach ($cand->fetchAll(PDO::FETCH_ASSOC) as $r) {
+    // Stream row-by-row: fetchAll() would materialise the whole candidate set
+    // (tens of thousands of wide rows) a second time in PHP memory.
+    while ($r = $cand->fetch(PDO::FETCH_ASSOC)) {
         $hits = $gated
-            ? ttsCountTuneInHtml(preprocessFontFilter((string)$r['paragraph_text_html'], $fonts), $tune)
-            : ttsCountTuneInHtml((string)$r['paragraph_text_plain'], $tune);
+            ? ttsCountTuneInHtml(preprocessFontFilter((string)$r['match_text'], $fonts), $tune)
+            : ttsCountTuneInHtml((string)$r['match_text'], $tune);
         if ($hits <= 0) continue;
         $ck = (int)$r['chapter_key'];
         if (!isset($chapters[$ck])) {

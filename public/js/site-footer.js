@@ -7,7 +7,7 @@
 if (!document.getElementById('error-reporter-js')) {
     var s = document.createElement('script');
     s.id = 'error-reporter-js';
-    s.src = '/js/error-reporter.js?v=12';
+    s.src = '/js/error-reporter.js?v=13';
     document.head.appendChild(s);
 }
 
@@ -46,11 +46,17 @@ if (!document.getElementById('site-footer-css')) {
 
 // Find the footer element
 var footer = document.querySelector('footer');
+// A server-rendered footer marked data-static owns its own markup (e.g. the
+// Pages-New /test/page.php footer, which renders Books + a menu-driven Links
+// area itself). Leave its contents alone — the rest of this file still runs
+// (background video source, data-config labels, scroll buttons, live indicator).
+var footerStatic = !!(footer && footer.hasAttribute('data-static'));
 if (!footer) {
     footer = document.createElement('footer');
     document.body.appendChild(footer);
 }
 
+if (!footerStatic) {
 // Build footer HTML
 footer.innerHTML = '<video class="footer-video" autoplay muted loop playsinline></video>'
     + '<div class="footer-inner">'
@@ -89,6 +95,7 @@ fetch('/api/page-footer.php')
             }
         });
     });
+} // end !footerStatic — static footers keep their server-rendered Books/Links
 
 // Apply data-config overrides from site-config (if loaded later by another script)
 fetch('/api/site-config.php')
