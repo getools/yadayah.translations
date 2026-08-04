@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1785736804">
+    <meta name="page-version" content="1785823203">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Feeds Admin - Yada Yah</title>
@@ -5760,7 +5760,7 @@ function _tsShowEditTools(td) {
         '<button type="button" class="ts-play-btn" onmousedown="event.preventDefault()" title="Play this segment (up to the next row timestamp)" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #ccc;border-radius:4px;padding:2px 8px;cursor:pointer;color:#1d6b3a;">'
       +   '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'
       + '</button>'
-      + '<button type="button" class="ts-adjust-btn" onmousedown="event.preventDefault()" title="Shift all later timestamps by the same amount you changed this one" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #ccc;border-radius:4px;padding:2px 8px;cursor:pointer;color:#31345A;">'
+      + '<button type="button" class="ts-adjust-btn" onmousedown="event.preventDefault()" title="Shift every segment at or after this one&#39;s original time by the same amount you changed this one" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #ccc;border-radius:4px;padding:2px 8px;cursor:pointer;color:#31345A;">'
       +   '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="8"/><path d="M10 5.5 V10 H6"/><circle cx="18" cy="18" r="5.4" fill="#fff"/><text x="18" y="20.7" text-anchor="middle" font-size="9" font-weight="700" stroke="none" fill="currentColor">\u00b1</text></svg>'
       + '</button>';
     td.appendChild(box);
@@ -5828,7 +5828,16 @@ function _tsPlaySegment(td) {
     }
 }
 
-// Shift every following row's timestamp by (current - original), after confirm.
+// Shift every row at or after this segment's ORIGINAL time by (new - original).
+//
+// Selection is by TIME, not by DOM position, and the cut-off is the edited
+// segment's pre-edit time. Walking nextElementSibling was wrong: opening the
+// confirm dialog blurs the time input, whose blur handler runs _tsReorderRow()
+// and slides the edited row past every row between its old and new time — so
+// by the time Apply fired, exactly the rows that needed shifting were sitting
+// *above* the edited row and got skipped. Snapshotting the targets up front
+// (before the dialog can reorder anything) also makes the set immune to any
+// further re-sorting.
 function _tsAdjustFollowing(td) {
     var input = td.querySelector('input[data-field="segment"]');
     if (!input) return;
@@ -5838,32 +5847,70 @@ function _tsAdjustFollowing(td) {
     var delta = now - orig;
     if (Math.abs(delta) < 0.005) { alert('Edit this timestamp first — there is no change to apply.'); return; }
     var tr = td.closest('tr');
-    _tsConfirmAdjust(delta, function() {
-        var sib = tr ? tr.nextElementSibling : null;
-        while (sib) {
-            var si = sib.querySelector('input[data-field="segment"]');
-            if (si) {
-                var v = parseSegmentToSeconds(si.value) + delta;
-                if (v < 0) v = 0;
-                si.value = fmtSegHundredths(v);
-                var cell = sib.querySelector('td.t-time-cell'); if (cell) cell.dataset.secs = String(v);
-            }
-            sib = sib.nextElementSibling;
-        }
+    var tbody = tr ? tr.parentNode : null;
+    // Every other row whose current time is at or after `orig` (hundredths
+    // resolution, so a hair of epsilon keeps an exact tie inside the set).
+    var targets = [];
+    if (tbody) {
+        Array.prototype.forEach.call(tbody.children, function(r) {
+            if (r === tr) return;                    // the edited row is already set
+            var si = r.querySelector('input[data-field="segment"]');
+            if (!si) return;                         // placeholder row
+            var s = parseSegmentToSeconds(si.value);
+            if (!isNaN(s) && s >= orig - 0.0005) targets.push({ row: r, input: si, secs: s });
+        });
+    }
+    _tsConfirmAdjust(delta, targets.length, orig, function() {
+        targets.forEach(function(t) {
+            var v = t.secs + delta;
+            if (v < 0) v = 0;
+            t.input.value = fmtSegHundredths(v);
+            var cell = t.row.querySelector('td.t-time-cell'); if (cell) cell.dataset.secs = String(v);
+        });
         td.dataset.origSecs = String(now);   // new baseline for any further adjust
+        // A negative shift can carry rows back past ones that stayed put, so
+        // re-sort to keep the display in the order saveTranscript() persists.
+        _tsSortRowsByTime(tbody);
         scheduleAutoSave();
     });
 }
 
+// Stable re-sort of the whole segment list by time. No-op when already ordered,
+// and bails out entirely if any row has no readable time (placeholder rows) so
+// it can never scramble a list it doesn't fully understand.
+function _tsSortRowsByTime(tbody) {
+    if (!tbody) return;
+    var rows = Array.prototype.slice.call(tbody.children);
+    if (rows.length < 2) return;
+    var keyed = [];
+    for (var i = 0; i < rows.length; i++) {
+        var c = rows[i].querySelector('td.t-time-cell');
+        if (!c) return;
+        var si = c.querySelector('input[data-field="segment"]');
+        var s = si ? parseSegmentToSeconds(si.value) : parseFloat(c.dataset.secs);
+        if (isNaN(s)) return;
+        c.dataset.secs = String(s);
+        keyed.push({ row: rows[i], secs: s, i: i });
+    }
+    keyed.sort(function(a, b) { return (a.secs - b.secs) || (a.i - b.i); });
+    var moved = keyed.some(function(k, n) { return k.i !== n; });
+    if (!moved) return;
+    var frag = document.createDocumentFragment();
+    keyed.forEach(function(k) { frag.appendChild(k.row); });
+    tbody.appendChild(frag);
+}
+
 // Confirmation popover for the shift; amt is signed to 2 decimals (+1.34 / -0.56).
-function _tsConfirmAdjust(delta, onApply) {
+// `count` / `fromSecs` spell out the affected set: every segment at or after the
+// edited row's original time.
+function _tsConfirmAdjust(delta, count, fromSecs, onApply) {
     var ov = document.getElementById('ts-adjust-overlay'); if (ov) ov.remove();
     var amt = (delta >= 0 ? '+' : '') + delta.toFixed(2);
     ov = document.createElement('div');
     ov.id = 'ts-adjust-overlay';
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10008;display:flex;align-items:center;justify-content:center;padding:30px;';
     ov.innerHTML = '<div style="background:#fff;border-radius:10px;width:min(420px,95vw);box-shadow:0 12px 40px rgba(0,0,0,.4);overflow:hidden;">'
-        + '<div style="padding:16px 18px;font-size:0.9rem;color:#333;">Apply a <strong>' + amt + '</strong> adjustment to all subsequent segments?</div>'
+        + '<div style="padding:16px 18px;font-size:0.9rem;color:#333;">Apply a <strong>' + amt + '</strong> adjustment to <strong>' + count + '</strong> segment' + (count === 1 ? '' : 's') + ' at or after <strong>' + fmtSegHundredths(fromSecs) + '</strong>?</div>'
         + '<div style="display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid #eee;background:#f7f8fc;">'
         +   '<button id="ts-adjust-cancel" style="padding:7px 14px;background:#fff;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Cancel</button>'
         +   '<button id="ts-adjust-apply" style="padding:7px 16px;background:#31345A;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Apply</button>'

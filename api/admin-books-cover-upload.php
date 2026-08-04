@@ -27,7 +27,7 @@ $ICON_MAX_H  = 300;
 $FULL_MAX_W  = 1200;   // display copy; the untouched upload stays in originals/
 $FULL_MAX_H  = 1600;
 
-$UPLOAD_DIR = __DIR__ . '/../u/covers';
+$UPLOAD_DIR = dirname(__DIR__) . '/public/u/covers';
 $ORIG_DIR   = $UPLOAD_DIR . '/originals';
 $WEB_DIR    = '/u/covers';
 
@@ -139,7 +139,9 @@ if (!in_array($ext, $allowed, true)) errorResponse('Image must be a JPG, PNG, GI
 if (!@getimagesize($file['tmp_name'])) errorResponse('That file is not a readable image');
 
 foreach ([$UPLOAD_DIR, $ORIG_DIR] as $d) {
-    if (!is_dir($d)) @mkdir($d, 0775, true);
+    if (!is_dir($d) && !mkdir($d, 0775, true) && !is_dir($d)) {
+        errorResponse('Upload directory could not be created: ' . basename($d), 500);
+    }
 }
 
 $name = 'vol' . $key . '-' . $slot . '-' . uniqid('', false) . '.' . $ext;
