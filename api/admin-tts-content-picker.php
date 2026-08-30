@@ -53,12 +53,14 @@ if ($mode === 'preview_chunks') {
 }
 
 if ($mode === 'series') {
-    // Only return series that actually have at least one active volume so the
-    // dropdown can't dead-end the user.
+    // Only return series that actually have at least one volume so the
+    // dropdown can't dead-end the user. Inactive volumes count: "inactive"
+    // only hides a book from the public site, it is still narratable, so a
+    // series whose only volume is inactive must still be reachable here.
     $rows = $db->query("
         SELECT s.series_key, s.series_number, COALESCE(s.series_label, s.series_name) AS label
           FROM yy_series s
-         WHERE EXISTS (SELECT 1 FROM yy_volume v WHERE v.series_key = s.series_key AND v.volume_active_flag = TRUE)
+         WHERE EXISTS (SELECT 1 FROM yy_volume v WHERE v.series_key = s.series_key)
          ORDER BY s.series_sort, s.series_number
     ")->fetchAll();
     jsonResponse(['rows' => array_map(function ($r) {
@@ -73,18 +75,23 @@ if ($mode === 'series') {
 if ($mode === 'volumes') {
     $seriesKey = (int)($_GET['series_key'] ?? 0);
     if (!$seriesKey) errorResponse('series_key required');
+    // Inactive volumes are included — the flag governs public visibility, not
+    // narratability — but are labelled so the picker still reads honestly.
     $stmt = $db->prepare("
-        SELECT volume_key, volume_number, volume_label
+        SELECT volume_key, volume_number, volume_label,
+               COALESCE(volume_active_flag, TRUE) AS volume_active_flag
           FROM yy_volume
-         WHERE series_key = ? AND volume_active_flag = TRUE
+         WHERE series_key = ?
          ORDER BY volume_sort, volume_number
     ");
     $stmt->execute([$seriesKey]);
     jsonResponse(['rows' => array_map(function ($r) {
+        $inactive = !filter_var($r['volume_active_flag'], FILTER_VALIDATE_BOOLEAN);
         return [
             'key'    => (int)$r['volume_key'],
             'number' => (int)$r['volume_number'],
-            'label'  => 'v0' . $r['volume_number'] . ' — ' . ($r['volume_label'] ?: 'untitled'),
+            'label'  => 'v0' . $r['volume_number'] . ' — ' . ($r['volume_label'] ?: 'untitled')
+                      . ($inactive ? ' (inactive)' : ''),
         ];
     }, $stmt->fetchAll())]);
 }

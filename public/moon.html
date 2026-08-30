@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="page-version" content="1788098406">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Moon Visibility</title>
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Moon Visibility — Yada Yah">
+    <meta property="og:description" content="Where the moon is, how much of it is lit, and whether the renewed sliver can be seen — from the Temple Mount or any location on earth.">
+    <meta property="og:url" content="https://yadayah.com/moon">
+    <meta property="og:image" content="https://yadayah.com/images/yy-social-preview.jpg">
+    <meta name="twitter:card" content="summary_large_image">
+    <link rel="icon" href="/images/favicon-32x32.png" sizes="32x32" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Julius+Sans+One&family=Maven+Pro:wght@400;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="/js/site-nav.js?v=58"></script>
+    <link rel="stylesheet" href="/css/page-heading.css?v=2">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        html, body { overflow-x: hidden; }
+        body {
+            font-family: 'Maven Pro', Arial, sans-serif;
+            margin: 0; padding: 0; background: #f5f5f5; color: #111;
+            display: flex; flex-direction: column; min-height: 100vh;
+        }
+        a { text-decoration: none; }
+
+        /* ── Header (matches the other content pages) ── */
+        header {
+            display: flex; flex-direction: column; align-items: center; padding: 0;
+            background: url('/images/yy-bg-bluewave.jpg') center/cover no-repeat;
+            position: relative; overflow: hidden; flex-shrink: 0;
+        }
+        header .header-video {
+            position: absolute; top: 50%; left: 50%; min-width: 100%; min-height: 100%;
+            transform: translate(-50%, -50%); object-fit: cover; z-index: 0;
+        }
+        header .header-inner {
+            display: flex; flex-direction: column; align-items: center;
+            width: 100%; max-width: 1140px; margin: 0 auto; position: relative; z-index: 1;
+        }
+        header .header-logos { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+        header nav { display: flex; flex-direction: column; align-items: center; }
+        header nav .nav-row {
+            display: flex; justify-content: center; gap: 0 30px; padding: 4px 0; flex-wrap: wrap;
+        }
+        header nav a {
+            color: #E5C86C; font-family: "Julius Sans One", sans-serif;
+            font-size: 1.1em; font-weight: 700;
+        }
+        header nav a:hover { color: #fff; }
+
+        main { flex: 1 0 auto; width: 100%; max-width: 1120px; margin: 0 auto; padding: 0 16px 40px; }
+
+        /* ── Controls ── */
+        .controls {
+            background: #fff; border: 1px solid #dcdcdc; border-radius: 8px;
+            padding: 14px 16px; margin: 0 0 18px;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 12px 28px;
+            align-items: start;
+        }
+        .ctl-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+        .ctl { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+        .ctl label {
+            font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+            color: #6b6b6b; font-weight: 600;
+        }
+        .ctl select, .ctl input {
+            font-family: 'Maven Pro', Arial, sans-serif; font-size: 0.95rem;
+            padding: 7px 8px; border: 1px solid #ccc; border-radius: 5px; background: #fff;
+            color: #111; width: 100%; min-width: 0;
+        }
+        .ctl-row { display: flex; gap: 6px; }
+        .ctl-row input { flex: 1 1 0; min-width: 0; }
+        .ctl-row input.elev { text-align: right; }
+        .ctl-row select.tz { flex: 0 0 auto; width: 88px; }
+        /* A field carries its own label directly above it inside a shared row. */
+        .field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 0; min-width: 0; }
+        .field.narrow { flex: 0 0 auto; }
+        .field.narrow > input { width: 88px; }
+        .sub-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
+                     color: #6b6b6b; font-weight: 600; margin-top: 2px; }
+        .step-row { justify-content: flex-start; }
+        .step-row input { text-align: center; flex: 0 1 92px; }
+        .step-row .btn { min-width: 42px; font-size: 1.05rem; line-height: 1; }
+        .btn {
+            font-family: 'Maven Pro', Arial, sans-serif; font-size: 0.9rem; font-weight: 600;
+            padding: 7px 12px; border: 1px solid #1b3a5c; border-radius: 5px;
+            background: #1b3a5c; color: #fff; cursor: pointer; white-space: nowrap;
+        }
+        .btn:hover { background: #27527f; }
+        .btn.secondary { background: #fff; color: #1b3a5c; }
+        .btn.secondary:hover { background: #eaf1f8; }
+        /* "Now" is a toggle, so it has to look pressed or not at a glance: off is
+           a pale outline with grey lettering, on is filled gold with a live dot.
+           The grey still clears 4.5:1 on white, so the label stays readable. */
+        #nowBtn { background: #fff; color: #6b7580; border-color: #c9ced3; font-weight: 600; }
+        #nowBtn:hover { background: #eaf1f8; color: #1b3a5c; border-color: #b9c0c7; }
+        #nowBtn::before {
+            content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+            background: #b9c0c7; margin-right: 6px; vertical-align: 1px;
+        }
+        #nowBtn.active {
+            background: #7a5c00; border-color: #5c4400; color: #fff;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.35);
+        }
+        #nowBtn.active::before { background: #ffd977; animation: nowPulse 2s ease-in-out infinite; }
+        @keyframes nowPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+        @media (prefers-reduced-motion: reduce) { #nowBtn.active::before { animation: none; } }
+        .btn.active { background: #7a5c00; border-color: #7a5c00; }
+        .btn-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end; }
+        .hint { font-size: 0.78rem; color: #6b6b6b; }
+        .hint.err { color: #a3282b; }
+
+        /* ── The instrument panel ── */
+        /* No overflow clipping here: the explainers are raised from inside and
+           must be free to spill past the frame. The title and footer strips
+           carry the rounded corners themselves. */
+        .console {
+            background: #000; border: 3px solid #cfd4d8; border-radius: 8px;
+            padding: 0; margin-bottom: 18px;
+        }
+        .console-title {
+            background: #e8ecef; color: #1b3a5c; text-align: center;
+            font-family: 'Maven Pro', sans-serif; font-weight: 700; font-size: 1.05rem;
+            padding: 7px 10px; letter-spacing: 0.02em;
+            border-radius: 5px 5px 0 0; position: relative;
+        }
+        .console-title .ct-time { font-family: 'Roboto Mono', monospace; margin-right: 10px; }
+        .console-title .ct-phase { color: #7a5c00; }
+        /* Rail of moments on the left, the disc and its figures on the right.
+           The chosen rail entry takes the view's own black and covers the
+           dividing line, so the selection reads as one continuous surface. */
+        /* Moments | figures | disc. The first column is wide enough that
+           "Twilight Astronomical (dawn)" keeps to one line. */
+        .console-body {
+            display: grid;
+            grid-template-columns: minmax(0, 296px) minmax(0, 1fr) minmax(0, 345px);
+        }
+        /* Three grounds: grey for the moments not chosen, #10171f for the
+           chosen one and the figures it belongs to — so the selection runs
+           straight into them — and pure black for the disc. */
+        .moments-rail { background: #363c44; border-right: 1px solid #262c33; }
+        .console-data { background: #10171f; padding: 14px 16px; display: flex; align-items: center; }
+        .console-figure { background: #000; position: relative; min-height: 240px; }
+        .moment-item {
+            display: grid; grid-template-columns: 1fr auto; gap: 0 10px;
+            width: 100%; text-align: left; background: none; border: 0;
+            border-bottom: 1px solid rgba(0,0,0,0.22); padding: 3px 14px; cursor: pointer;
+            line-height: 1.35;
+            font-family: 'Maven Pro', Arial, sans-serif; font-size: 0.85rem;
+            color: #dfe6ee; position: relative;
+        }
+        .moment-item:last-child { border-bottom: 0; }
+        .moment-item:hover { background: #434a53; }
+        .moment-item:focus-visible { outline: 2px solid #E5C86C; outline-offset: -2px; }
+        .moment-item .mi-time { font-family: 'Roboto Mono', monospace; color: #E5C86C; }
+
+        .moment-item.on {
+            background: #10171f; color: #fff; cursor: default;
+            border-right: 1px solid #10171f; margin-right: -1px;
+        }
+        .moment-item.on::before {
+            content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+            width: 3px; background: #E5C86C;
+        }
+        .moment-item.is-missing { color: #8b939c; cursor: default; }
+        .moment-item.is-missing .mi-time { color: #8b939c; }
+
+        /* Each figure explains itself: the label is the trigger, marked by a
+           faint dotted underline rather than a badge. */
+        .readout .row { position: relative; align-items: baseline; }
+        .readout .k.has-help {
+            cursor: help; text-decoration: underline dotted rgba(143,166,189,0.45);
+            text-underline-offset: 3px;
+        }
+        .readout .k.has-help:hover, .readout .k.has-help:focus {
+            color: #E5C86C; text-decoration-color: #E5C86C; outline: none;
+        }
+        .readout .k.has-help:hover .help-pop,
+        .readout .k.has-help:focus .help-pop { display: block; }
+        .readout .help-pop { left: 0; right: auto; width: min(390px, 74vw); top: calc(100% + 2px); }
+        /* The crescent band letter, sitting against the lit percentage. */
+        .band-tag {
+            cursor: help; color: #E5C86C; font-weight: 500;
+            text-decoration: underline dotted rgba(229,200,108,0.5); text-underline-offset: 3px;
+        }
+        .band-tag:hover, .band-tag:focus { color: #fff; text-decoration-color: #fff; outline: none; }
+        .band-tag:hover .help-pop, .band-tag:focus .help-pop { display: block; }
+        .help-pop .band {
+            font-family: 'Roboto Mono', monospace; font-weight: 500; color: #1b3a5c;
+        }
+
+        #moonCanvas {
+            position: absolute; top: 12px; bottom: 12px; left: 0; right: 0;
+            height: calc(100% - 24px); width: auto; aspect-ratio: 1 / 1;
+            max-width: calc(100% - 24px); margin: auto; display: block;
+            image-rendering: auto;
+        }
+        .console-foot {
+            background: #e8ecef; padding: 7px 12px; display: flex;
+            align-items: center; gap: 10px; position: relative;
+            border-radius: 0 0 5px 5px;
+        }
+        .console-foot label {
+            font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
+            color: #4a5b6b; font-weight: 600;
+        }
+        .delta-t {
+            position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+            z-index: 60;   /* the transform creates a stacking context; raise it */
+            font-family: 'Roboto Mono', monospace; font-size: 0.78rem;
+            color: #4a5b6b; white-space: nowrap; font-weight: 400; letter-spacing: normal;
+        }
+        .delta-t .dt-trigger {
+            cursor: help; text-decoration: underline dotted rgba(74,91,107,0.55);
+            text-underline-offset: 3px;
+        }
+        .delta-t .dt-trigger:hover, .delta-t .dt-trigger:focus {
+            color: #1b3a5c; text-decoration-color: #1b3a5c; outline: none;
+        }
+        .delta-t .dt-trigger:hover .help-pop,
+        .delta-t .dt-trigger:focus .help-pop { display: block; }
+        .delta-t .help-pop { left: auto; right: 0; width: min(400px, 78vw); top: calc(100% + 6px); }
+        .console-foot select {
+            font-family: 'Maven Pro', Arial, sans-serif; font-size: 0.85rem;
+            padding: 4px 7px; border: 1px solid #b9c0c7; border-radius: 5px;
+            background: #fff; color: #111;
+        }
+        /* Readout colours: muted moonlit steel for the labels so they sit back,
+           and the site's gold for the figures so the eye lands on them. Both
+           clear the 4.5:1 contrast bar against the black panel. */
+        .readout { font-family: 'Roboto Mono', monospace; font-size: 0.88rem; line-height: 1.55; }
+        /* Wide enough for "Declination:" plus its badge on one line. */
+        .readout .row { display: grid; grid-template-columns: 152px minmax(0, 1fr); gap: 8px; }
+        .readout .k { color: #8fa6bd; white-space: nowrap; }
+        .readout .v { color: #E5C86C; }
+        .readout .gap { height: 12px; }
+
+        /* Address lookup results */
+        .addr-results {
+            border: 1px solid #ccc; border-radius: 5px; background: #fff;
+            max-height: 200px; overflow-y: auto;
+        }
+        .addr-results button {
+            display: block; width: 100%; text-align: left; background: none;
+            border: 0; border-bottom: 1px solid #eceff2; padding: 6px 8px;
+            font-family: 'Maven Pro', Arial, sans-serif; font-size: 0.84rem;
+            color: #23303b; cursor: pointer; line-height: 1.35;
+        }
+        .addr-results button:last-child { border-bottom: 0; }
+        .addr-results button:hover, .addr-results button:focus { background: #eaf1f8; outline: none; }
+        .addr-results .msg { padding: 6px 8px; font-size: 0.82rem; color: #6b6b6b; }
+
+        /* ── Data panels ── */
+        .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 14px; }
+        /* overflow stays visible so a help popover can spill past the panel;
+           the header keeps the rounded top corners on its own. */
+        .panel { background: #f0f2f4; border: 2px solid #cfd4d8; border-radius: 8px; }
+        .panel h2 {
+            margin: 0; background: #1b3a5c; color: #E5C86C;
+            font-family: 'Julius Sans One', sans-serif; font-size: 1rem; font-weight: 400;
+            text-align: center; padding: 6px 10px; letter-spacing: 0.04em;
+            border-radius: 6px 6px 0 0;
+            position: relative;   /* anchors a help popover to the panel width */
+        }
+        .panel.wide { grid-column: 1 / -1; }
+        .panel .body { padding: 10px 12px; }
+
+        /* Key-moments table. Scrolls inside itself on narrow screens rather
+           than pushing the page sideways. */
+        .table-wrap { overflow-x: auto; }
+        .moments { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+        .moments th {
+            text-align: right; padding: 4px 8px; white-space: nowrap;
+            font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
+            color: #4a5b6b; border-bottom: 1px solid #b9c0c7;
+        }
+        .moments td {
+            text-align: right; padding: 5px 8px; white-space: nowrap;
+            font-family: 'Roboto Mono', monospace; color: #111;
+            border-bottom: 1px solid #e1e4e7;
+        }
+        .moments tr:last-child td { border-bottom: 0; }
+        .moments th:first-child, .moments td:first-child { text-align: left; }
+        .moments td.event, .moments td.say {
+            font-family: 'Maven Pro', Arial, sans-serif; color: #23303b;
+        }
+        .moments td.event { font-weight: 600; }
+        .moments td.say { text-align: left; }
+        .moments tr.is-selected td { background: #e4edf7; }
+        .moments tr.is-missing td { color: #99a2aa; font-family: 'Maven Pro', Arial, sans-serif; }
+        .panel-ctl { padding: 10px 12px 0; position: relative; }   /* anchors its help popover */
+        .panel-ctl label {
+            display: block; font-size: 0.68rem; text-transform: uppercase;
+            letter-spacing: 0.06em; color: #6b6b6b; font-weight: 600; margin-bottom: 3px;
+        }
+        .panel-ctl select {
+            width: 100%; font-family: 'Maven Pro', Arial, sans-serif; font-size: 0.88rem;
+            padding: 5px 7px; border: 1px solid #ccc; border-radius: 5px; background: #fff; color: #111;
+        }
+        /* The label column keeps at least 38% of the row, so one wide value can
+           never squeeze every label in the panel down to a single character. */
+        .kv { display: grid; grid-template-columns: minmax(38%, 1fr) auto; gap: 2px 12px; font-size: 0.9rem; }
+        .kv .k { color: #4a5b6b; font-weight: 600; overflow-wrap: anywhere; }
+        .kv .v { font-family: 'Roboto Mono', monospace; text-align: right; color: #111; white-space: nowrap; }
+        .dst { font-style: italic; }
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+        .two-col .kv { font-size: 0.85rem; gap: 2px 8px; }
+        .panel .note { font-size: 0.76rem; color: #6b6b6b; margin-top: 8px; line-height: 1.4; }
+
+        /* Help badge. Position stays static so the popover resolves against its
+           containing block and can never be pushed off the side of the screen. */
+        .help {
+            position: static; display: inline-flex; align-items: center; justify-content: center;
+            width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid currentColor;
+            font-size: 0.72rem; font-weight: 700; margin-left: 8px; cursor: help;
+            vertical-align: 2px; opacity: 0.85;
+        }
+        .help:hover, .help:focus { opacity: 1; outline: none; }
+        .help-pop {
+            display: none; position: absolute; z-index: 60; top: calc(100% - 4px); left: 8px; right: 8px;
+            background: #fff; color: #23303b; border: 1px solid #b9c0c7; border-radius: 6px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.3); padding: 12px 14px;
+            font-size: 0.8rem; font-weight: 400; line-height: 1.5; text-align: left;
+            white-space: normal;
+            /* Reset the heading's display face when the badge sits in an h2. */
+            font-family: 'Maven Pro', Arial, sans-serif; letter-spacing: normal;
+            text-transform: none; cursor: auto;
+        }
+        .help-pop i { font-style: italic; }
+        .help:hover .help-pop, .help:focus .help-pop { display: block; }
+        .help-pop b { color: #1b3a5c; }
+        .help-pop p { margin: 0 0 7px; }
+        .help-pop p:last-child { margin-bottom: 0; }
+        .help-pop ul { margin: 6px 0 7px; padding-left: 18px; }
+        .help-pop li { margin-bottom: 3px; }
+        .help-pop .band { font-family: 'Roboto Mono', monospace; font-weight: 500; }
+
+        .legend { font-size: 0.78rem; color: #555; margin: 14px 0 18px; line-height: 1.5; }
+        .legend b { color: #1b3a5c; }
+        .legend i { font-style: italic; }
+
+        @media (max-width: 700px) {
+            .console-body { grid-template-columns: 1fr; }
+            .delta-t { position: static; transform: none; display: block; margin-top: 2px; }
+            .delta-t .help-pop { right: auto; left: 0; }
+            .moments-rail { border-right: 0; border-bottom: 1px solid #26303b; }
+            .moment-item.on { margin-right: 0; border-right: 0; }
+            .readout { font-size: 0.82rem; }
+            .controls { grid-template-columns: 1fr; gap: 12px; }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <video class="header-video" autoplay muted loop playsinline></video>
+    <div class="header-inner">
+        <div class="header-logos">
+            <a href="/"><img src="/images/yy-logo-80x90.png" alt="Yada Yah"></a>
+        </div>
+        <nav>
+            <div class="nav-row">
+                <a href="/books">Books</a>
+                <a href="/blog">Blog</a>
+                <a href="/resources">Resources</a>
+                <a href="/Craig_Winn">Winn</a>
+                <a href="/timeline">Timeline</a>
+            </div>
+            <div class="nav-row">
+                <a href="/translations">Translations</a>
+                <a href="/media">Media</a>
+                <a href="/music">Music</a>
+                <a href="/ask">Ask</a>
+            </div>
+        </nav>
+    </div>
+</header>
+
+<div class="page-heading-wrap"><h1 class="page-heading">Moon Visibility</h1></div>
+
+<main>
+    <div class="controls">
+        <!-- Column one: where you are standing. -->
+        <div class="ctl-col">
+            <div class="ctl">
+                <label for="locSelect">Location</label>
+                <select id="locSelect"></select>
+            </div>
+            <div class="ctl">
+                <label for="addrInput">Address</label>
+                <div class="ctl-row">
+                    <input id="addrInput" type="text" autocomplete="off"
+                           placeholder="Street, town, country" aria-label="Address to look up">
+                    <button class="btn secondary" id="addrFind" type="button">Find</button>
+                    <button class="btn secondary" id="gpsBtn" type="button"
+                            title="Use this device's own position">GPS</button>
+                </div>
+                <div class="addr-results" id="addrResults" hidden></div>
+            </div>
+            <div class="ctl">
+                <div class="ctl-row">
+                    <div class="field">
+                        <label for="latInput">Latitude</label>
+                        <input id="latInput" type="text" inputmode="decimal" autocomplete="off">
+                    </div>
+                    <div class="field">
+                        <label for="lonInput">Longitude</label>
+                        <input id="lonInput" type="text" inputmode="decimal" autocomplete="off">
+                    </div>
+                    <div class="field narrow">
+                        <label for="elevInput">Elev. (m)</label>
+                        <input id="elevInput" class="elev" type="text" inputmode="decimal" autocomplete="off">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Column two: the clock. The zone selector sits directly above it,
+             unlabelled — its two options say what it does. -->
+        <div class="ctl-col">
+            <div class="ctl">
+                <label for="dateInput">Date</label>
+                <div class="ctl-row">
+                    <button class="btn secondary" id="prevDay" type="button" aria-label="Previous day">‹</button>
+                    <!-- lang="en-GB" so the browser draws this day-first, whatever
+                         the visitor's locale is. -->
+                    <input id="dateInput" type="date" lang="en-GB" autocomplete="off">
+                    <button class="btn secondary" id="nextDay" type="button" aria-label="Next day">›</button>
+                </div>
+            </div>
+            <div class="ctl">
+                <label for="timeInput">Time (24h)</label>
+                <div class="ctl-row">
+                    <select id="tzSelect" class="tz" aria-label="Times shown in"
+                            title="Show every time on the page in the location's own zone, or in UTC">
+                        <option value="local">Local</option>
+                        <option value="gmt">UTC</option>
+                    </select>
+                    <!-- A text box rather than <input type="time">: the native control
+                         draws a 12-hour clock wherever the browser locale says so, and
+                         these times must always read as military time. -->
+                    <input id="timeInput" type="text" inputmode="numeric" maxlength="8" autocomplete="off"
+                           placeholder="HH:MM" aria-label="Time, 24-hour">
+                    <button class="btn" id="nowBtn" type="button">Now</button>
+                </div>
+                <div class="ctl-row">
+                    <div class="field">
+                        <label for="jumpSelect">Jump to</label>
+                        <select id="jumpSelect">
+                            <option value="">Select an event…</option>
+                        </select>
+                    </div>
+                    <div class="field narrow">
+                        <label for="stepInput">Step (minutes)</label>
+                        <div class="ctl-row step-row">
+                            <button class="btn secondary" id="stepMinus" type="button" aria-label="Step back">&minus;</button>
+                            <input id="stepInput" type="number" min="1" max="1440" step="1" value="10" autocomplete="off"
+                                   aria-label="Step size in minutes">
+                            <button class="btn secondary" id="stepPlus" type="button" aria-label="Step forward">+</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="hint" id="ctlHint"></div>
+
+    <div class="console">
+        <div class="console-title" id="consoleTitle">
+            <span class="ct-date">—</span><span class="ct-phase"></span>
+            <!-- Built once by the script, so hovering it survives the tick. -->
+            <span class="delta-t" id="deltaT"></span>
+        </div>
+        <div class="console-body">
+            <!-- Moments on the left, their figures in the middle, the disc on
+                 the right. The chosen moment carries the same ground as the
+                 figures, so the two read as one surface. -->
+            <div class="moments-rail" id="momentsRail" role="tablist"
+                 aria-label="Key moments of the day"></div>
+            <div class="console-data">
+                <div class="readout" id="readout"></div>
+            </div>
+            <div class="console-figure">
+                <canvas id="moonCanvas" width="640" height="640" aria-label="Rendered view of the moon"></canvas>
+            </div>
+        </div>
+        <div class="console-foot">
+            <label for="horizonSelect">Moonrise / moonset rule</label>
+            <select id="horizonSelect">
+                <option value="limb">Upper limb, 34′ refraction</option>
+                <option value="centre">Centre of the disc at 0°</option>
+            </select>
+        </div>
+    </div>
+
+</main>
+
+<footer></footer>
+<script src="/js/bg-video.js"></script>
+<script src="/js/moon-ephemeris.js?v=5"></script>
+<script src="/js/moon-app.js?v=45"></script>
+<script src="/js/site-footer.js?v=130"></script>
+</body>
+</html>

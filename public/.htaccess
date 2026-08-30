@@ -67,12 +67,34 @@ RewriteRule ^(.+)/$ /$1 [R=301,L]
 RewriteCond %{THE_REQUEST} \s/+(books|vlog|ask|timeline|glossary|dss|search|Craig_Winn|resources|invite|blog|music|media|translations|chat|admin|admin-[a-z]+|10-7-memorial)\.html[\s?] [NC]
 RewriteRule ^(books|vlog|ask|timeline|glossary|dss|search|Craig_Winn|resources|invite|blog|music|media|translations|chat|admin|admin-[a-z]+|10-7-memorial)\.html$ /$1 [R=301,L]
 
-# Memorial: /memorial → /10-7-memorial, /memorial/Name → /10-7-memorial/Name
-RewriteRule ^memorial/(.+)$ /10-7-memorial.html?name=$1 [L,QSA]
-RewriteRule ^memorial$ /10-7-memorial [R=301,L]
+# ─────────────────────────────────────────────────────────────────────────
+# Pages-New cutover (2026-08-06)
+#
+# Every content page now renders from the page builder (yy_page + yy_section)
+# through the shared renderer, instead of from its own static .html file.
+# These rules sit ABOVE the "serve clean URLs from .html files" rule below,
+# so they win; the .html files stay on disk completely untouched.
+#
+# ROLLBACK: delete this block. Every page reverts to its static file
+# instantly — no database change required.
+#
+# Internal rewrites (no [R]), so visitors keep seeing /vlog, /books, etc.
+# QSA preserves query strings (?q=, ?page=, ?name=…).
+# ─────────────────────────────────────────────────────────────────────────
 
-# Memorial deep-link: /10-7-memorial/Name → 10-7-memorial.html?name=Name
-RewriteRule ^10-7-memorial/(.+)$ /10-7-memorial.html?name=$1 [L,QSA]
+# Home page. mod_rewrite runs before mod_dir, so this takes over from the
+# DirectoryIndex that used to serve index.html.
+RewriteRule ^$ /page.php?code=home [L,QSA]
+
+# Memorial deep link + alias. The client also resolves the name from the
+# path, so the address bar keeps showing /10-7-memorial/Name.
+RewriteRule ^memorial/(.+)$ /page.php?code=10-7-memorial&name=$1 [L,QSA]
+RewriteRule ^memorial$ /10-7-memorial [R=301,L]
+RewriteRule ^10-7-memorial/(.+)$ /page.php?code=10-7-memorial&name=$1 [L,QSA]
+
+# Content pages. Case-sensitive: the two mixed-case slugs have their own
+# canonical 301s further down, which feed back into this rule.
+RewriteRule ^(books|vlog|shorts|basics|music|invite|translations|glossary|dss|grammar|ask|timeline|chat|media|resources|family|search|moon|10-7-memorial|Craig_Winn|privacy|terms|atwarreligion|search-books)$ /page.php?code=$1 [L,QSA]
 
 # Redirect /time to /timeline
 RewriteRule ^time$ /timeline [R=301,L,NC]

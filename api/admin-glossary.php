@@ -7,6 +7,7 @@
  * POST ?action=upload  — upload background image
  */
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/image-helpers.php';
 requireAuth();
 
 $db = getDb();
@@ -94,6 +95,10 @@ if ($method === 'POST') {
         }
 
         if (!move_uploaded_file($file['tmp_name'], $dest)) errorResponse('Failed to save file');
+
+        // Letter images live in /images, not /u, but get the same size set so
+        // glossary lists can pull '-icon' instead of the full-resolution plate.
+        makeImageSizes($dest, dirname($dest), $filename);
 
         // Update DB
         $db->prepare("UPDATE yy_letter SET letter_image = ? WHERE letter_key = ?")->execute([$filename, $key]);

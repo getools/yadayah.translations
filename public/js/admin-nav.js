@@ -6,7 +6,7 @@
 if (!document.getElementById('error-reporter-js')) {
     var s = document.createElement('script');
     s.id = 'error-reporter-js';
-    s.src = '/js/error-reporter.js?v=13';
+    s.src = '/js/error-reporter.js?v=14';
     document.head.appendChild(s);
 }
 
@@ -53,8 +53,7 @@ var tabs = [
     ['admin-vlog.html', 'Vlog'],
     ['admin-backgrounds.html', 'Backgrounds'],
     ['admin-feeds.html', 'Feeds'],
-    ['admin-pages.html', 'Pages'],
-    ['/test/admin-pages.html', 'Pages-New', 'Prototype multi-section page builder (yy_page_test) — the new test page editor.'],
+    ['admin-pages.html', 'Pages', 'Build and edit every site page - sections, aliases, search flags, menus, and global styles.'],
     ['admin-redirects.html', 'Redirects'],
     ['admin-links.html', 'Links'],
     ['admin-resources.html', 'Resources'],

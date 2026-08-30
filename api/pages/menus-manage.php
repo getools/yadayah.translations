@@ -2,14 +2,14 @@
 /**
  * TEST endpoint — site menu management for the Pages-New system.
  * Manages yy_menu_item: the Header / Subheader / Footer link lists that
- * render on every /test/page.php page. Items point at yy_page_test pages.
+ * render on every /test/page.php page. Items point at yy_page pages.
  *
- *   GET    ?action=pages                       → selectable page catalogue (yy_page_test)
+ *   GET    ?action=pages                       → selectable page catalogue (yy_page)
  *   GET    ?action=footer-config               → { footer_link_columns }
  *   PUT    ?action=footer-config               body { footer_link_columns }  (1–6)
  *   GET    ?zone=header|footer                 → items in that zone (flat)
  *   GET    ?zone=subheader&parent=H            → subheader items under header item H
- *   POST   ?zone=header|subheader|footer       body {page_test_key, parent_menu_item_key?}
+ *   POST   ?zone=header|subheader|footer       body {page_key, parent_menu_item_key?}
  *   PUT    ?key=K                              body {menu_item_sort}   (reorder)
  *   DELETE ?key=K
  *
@@ -30,17 +30,17 @@ const MENU_ZONES = ['header', 'subheader', 'footer'];
 
 // Display label for a menu row / page catalogue entry (variable so it
 // interpolates into the double-quoted SQL below).
-$pageLabelSql = "COALESCE(NULLIF(p.page_test_label, ''), NULLIF(p.page_test_title, ''), p.page_test_code)";
+$pageLabelSql = "COALESCE(NULLIF(p.page_label, ''), NULLIF(p.page_title, ''), p.page_code)";
 
 // ── Page catalogue (what you can add to a list) ───────────────────────────
 if ($action === 'pages' && $method === 'GET') {
     $st = $db->query("
-        SELECT p.page_test_key,
-               p.page_test_code,
-               p.page_test_url,
+        SELECT p.page_key,
+               p.page_code,
+               p.page_url,
                $pageLabelSql AS display
-          FROM yy_page_test p
-         WHERE p.page_test_active_flag = TRUE
+          FROM yy_page p
+         WHERE p.page_active_flag = TRUE
          ORDER BY display
     ");
     jsonResponse(['pages' => $st->fetchAll()]);
@@ -49,10 +49,10 @@ if ($action === 'pages' && $method === 'GET') {
 // ── Footer layout config ───────────────────────────────────────────────────
 // The number of columns the Footer "Links" area flows across before wrapping to
 // a new row. Global (the footer is identical on every Pages-New page), so it is
-// stored on the singleton yy_page_test_style row alongside the global fonts.
+// stored on the singleton yy_page_style row alongside the global fonts.
 if ($action === 'footer-config') {
     if ($method === 'GET') {
-        $n = $db->query("SELECT footer_link_columns FROM yy_page_test_style WHERE style_key = 1")->fetchColumn();
+        $n = $db->query("SELECT footer_link_columns FROM yy_page_style WHERE style_key = 1")->fetchColumn();
         jsonResponse(['footer_link_columns' => ($n === false || $n === null) ? 3 : (int)$n]);
     }
     if ($method === 'PUT') {
@@ -61,7 +61,7 @@ if ($action === 'footer-config') {
         if ($n < 1) $n = 1;
         if ($n > 6) $n = 6;
         $st = $db->prepare("
-            INSERT INTO yy_page_test_style (style_key, footer_link_columns, updated_dtime)
+            INSERT INTO yy_page_style (style_key, footer_link_columns, updated_dtime)
             VALUES (1, ?, now())
             ON CONFLICT (style_key) DO UPDATE
                SET footer_link_columns = EXCLUDED.footer_link_columns,
@@ -77,12 +77,12 @@ if ($action === 'footer-config') {
 // ── List items in a zone ──────────────────────────────────────────────────
 if ($method === 'GET' && in_array($zone, MENU_ZONES, true)) {
     $sql = "
-        SELECT m.menu_item_key, m.menu_zone, m.page_test_key, m.parent_menu_item_key,
+        SELECT m.menu_item_key, m.menu_zone, m.page_key, m.parent_menu_item_key,
                m.menu_item_sort, m.menu_item_active_flag,
-               p.page_test_code, p.page_test_url,
+               p.page_code, p.page_url,
                $pageLabelSql AS display
           FROM yy_menu_item m
-          JOIN yy_page_test p ON p.page_test_key = m.page_test_key
+          JOIN yy_page p ON p.page_key = m.page_key
          WHERE m.menu_zone = ?
     ";
     $params = [$zone];
@@ -103,12 +103,12 @@ if ($method === 'GET' && in_array($zone, MENU_ZONES, true)) {
 // ── Add an item to a zone ─────────────────────────────────────────────────
 if ($method === 'POST' && in_array($zone, MENU_ZONES, true)) {
     $d = json_decode(file_get_contents('php://input'), true) ?: [];
-    $pageTestKey = (int)($d['page_test_key'] ?? 0);
-    if (!$pageTestKey) errorResponse('page_test_key required');
+    $pageKey = (int)($d['page_key'] ?? 0);
+    if (!$pageKey) errorResponse('page_key required');
 
     // Validate the page exists.
-    $chk = $db->prepare("SELECT 1 FROM yy_page_test WHERE page_test_key = ?");
-    $chk->execute([$pageTestKey]);
+    $chk = $db->prepare("SELECT 1 FROM yy_page WHERE page_key = ?");
+    $chk->execute([$pageKey]);
     if (!$chk->fetchColumn()) errorResponse('Unknown page', 404);
 
     $parentKey = null;
@@ -125,11 +125,11 @@ if ($method === 'POST' && in_array($zone, MENU_ZONES, true)) {
     // hides used pages from the add-dropdown). Same page can live in different
     // lists — the check is scoped to this zone (+ parent for subheaders).
     if ($parentKey === null) {
-        $dup = $db->prepare("SELECT 1 FROM yy_menu_item WHERE menu_zone = ? AND parent_menu_item_key IS NULL AND page_test_key = ?");
-        $dup->execute([$zone, $pageTestKey]);
+        $dup = $db->prepare("SELECT 1 FROM yy_menu_item WHERE menu_zone = ? AND parent_menu_item_key IS NULL AND page_key = ?");
+        $dup->execute([$zone, $pageKey]);
     } else {
-        $dup = $db->prepare("SELECT 1 FROM yy_menu_item WHERE menu_zone = ? AND parent_menu_item_key = ? AND page_test_key = ?");
-        $dup->execute([$zone, $parentKey, $pageTestKey]);
+        $dup = $db->prepare("SELECT 1 FROM yy_menu_item WHERE menu_zone = ? AND parent_menu_item_key = ? AND page_key = ?");
+        $dup->execute([$zone, $parentKey, $pageKey]);
     }
     if ($dup->fetchColumn()) errorResponse('That page is already in this list', 409);
 
@@ -143,8 +143,8 @@ if ($method === 'POST' && in_array($zone, MENU_ZONES, true)) {
     }
     $sort = (int)$ns->fetchColumn();
 
-    $ins = $db->prepare("INSERT INTO yy_menu_item (menu_zone, page_test_key, parent_menu_item_key, menu_item_sort) VALUES (?, ?, ?, ?) RETURNING menu_item_key");
-    $ins->execute([$zone, $pageTestKey, $parentKey, $sort]);
+    $ins = $db->prepare("INSERT INTO yy_menu_item (menu_zone, page_key, parent_menu_item_key, menu_item_sort) VALUES (?, ?, ?, ?) RETURNING menu_item_key");
+    $ins->execute([$zone, $pageKey, $parentKey, $sort]);
     jsonResponse(['saved' => true, 'menu_item_key' => (int)$ins->fetchColumn(), 'menu_item_sort' => $sort]);
 }
 

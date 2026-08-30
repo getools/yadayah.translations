@@ -895,7 +895,17 @@
                 }
             }
             if (coverUrl) {
-                coverHtml = '<div class="cover"><img src="' + esc(coverUrl) + '" alt="" loading="lazy" onerror="this.remove()"></div>';
+                // volume_img_icon is the 300px '-icon' member of the size set
+                // written by makeImageSizes() (api/image-helpers.php). '-sm' is
+                // 640px and exists for every uploaded cover, so hand it to
+                // retina screens via srcset. Legacy /images/covers thumbs have
+                // no size set — they stay single-source.
+                var srcsetAttr = '';
+                if (/-icon\.[a-z0-9]+$/i.test(coverUrl)) {
+                    srcsetAttr = ' srcset="' + esc(coverUrl) + ' 1x, '
+                               + esc(coverUrl.replace(/-icon\.([a-z0-9]+)$/i, '-sm.$1')) + ' 2x"';
+                }
+                coverHtml = '<div class="cover"><img src="' + esc(coverUrl) + '"' + srcsetAttr + ' alt="" loading="lazy" onerror="this.remove()"></div>';
             }
             html += '<div class="ss-result-card">'
                   + '<div class="ss-result-book">'
@@ -1205,6 +1215,41 @@
         document.head.appendChild(link);
     }
 
+    // On the dedicated /search page the results belong in the page body,
+    // under the "Search" heading — not stacked inside the band above it,
+    // which is where #ss-results is built for every other page (there the
+    // band is an overlay on top of the page's own content, so results
+    // sitting in it is correct).
+    //
+    // Two ways to opt in, checked in order:
+    //   1. Any page can host the results by server-rendering an element
+    //      with [data-search-results] — generic, no path coupling.
+    //   2. The dedicated search page by path. /search is the live URL;
+    //      /test/page.php?code=search is the same page pre-cutover.
+    // Anything else is left alone, so every other page is untouched.
+    function relocateResults() {
+        var res = $('ss-results');
+        if (!res) return;
+
+        var mount = document.querySelector('[data-search-results]');
+        if (!mount) {
+            var path = (location.pathname || '').replace(/\/+$/, '').toLowerCase();
+            var code = '';
+            try {
+                code = (new URLSearchParams(location.search).get('code') || '').toLowerCase();
+            } catch (_) {}
+            var isSearchPage = (path === '/search' || path === '/search.html') ||
+                               (path === '/test/page.php' && code === 'search');
+            if (!isSearchPage) return;
+            // .page-wrap is the Pages-New content column; .content is the
+            // legacy page-render.php one. Appending puts the results after
+            // the heading (and after #sections-root, whose innerHTML the
+            // section loader replaces — so results must not live inside it).
+            mount = document.querySelector('.page-wrap') || document.querySelector('.content');
+        }
+        if (mount) mount.appendChild(res);
+    }
+
     function init() {
         // Admin pages have their own /js/admin-nav.js toolbar + page-specific
         // controls. The public search band would crowd those layouts and the
@@ -1217,7 +1262,7 @@
         // site-nav.js was reintroduced to that page.
         var p = location.pathname || '';
         // Pages-New renders REAL content pages via /test/page.php (the renderer
-        // for the yy_page_test system). Those pages want the site search bar
+        // for the yy_page system). Those pages want the site search bar
         // just like the main site. Everything else under /test/ is admin/dev
         // tooling (admin-pages.html, prototypes) that must stay bar-free, as
         // does /admin. So exclude /admin and /test/* EXCEPT /test/page.php.
@@ -1227,6 +1272,7 @@
         injectStyle();
         buildBar();
         wire();
+        relocateResults();
         applyModeLabels();
         try {
             window.matchMedia('(max-width: 767px)').addEventListener('change', applyModeLabels);

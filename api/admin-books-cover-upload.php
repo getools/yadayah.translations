@@ -22,14 +22,17 @@ $authUser = requireAuth();
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') errorResponse('Method not allowed', 405);
 
 $COVER_SLOTS = ['front_2d', 'spine_2d', 'back_2d', 'front_3d', 'spine_3d', 'back_3d'];
-$ICON_MAX_W  = 245;    // matches the legacy /images/covers/*-245x300.jpg thumbs
-$ICON_MAX_H  = 300;
+// Icon/sm/md/lg all come from IMG_SIZE_SET in image-helpers.php now. The base
+// display copy stays 1200×1600 so every path already stored in yy_volume
+// keeps resolving to the same file it did before.
 $FULL_MAX_W  = 1200;   // display copy; the untouched upload stays in originals/
 $FULL_MAX_H  = 1600;
 
-$UPLOAD_DIR = dirname(__DIR__) . '/public/u/covers';
-$ORIG_DIR   = $UPLOAD_DIR . '/originals';
-$WEB_DIR    = '/u/covers';
+// uploadDir() resolves against the real docroot and guarantees the directory
+// exists and is www-data-writable — never hand-roll these paths (see config.php).
+$UPLOAD_DIR = uploadDir('covers');
+$ORIG_DIR   = uploadDir('covers/originals');
+$WEB_DIR    = uploadUrl('covers');
 
 $db = getDb();
 
@@ -59,32 +62,34 @@ function coverAbs(?string $webPath, string $uploadDir): ?string {
     return rtrim($uploadDir, '/') . '/' . $base;
 }
 
-/** Remove a slot's display copy and its original. */
+/** Remove a slot's display copy, its whole size set, and its original. */
 function coverUnlink(?string $webPath, string $uploadDir, string $origDir): void {
     $abs = coverAbs($webPath, $uploadDir);
     if ($abs && is_file($abs)) @unlink($abs);
+    if ($abs) unlinkImageSizes($uploadDir, basename($abs));
     $orig = coverAbs($webPath, $origDir);
     if ($orig && is_file($orig)) @unlink($orig);
 }
 
 /**
- * (Re)build the icon from the 2D front original. Returns the new web path,
- * or null when there is no front image to derive from.
+ * (Re)build the size set from a slot's stored original and return the icon's
+ * web path, or null when there is nothing to derive from.
+ *
+ * The icon is just the 'icon' member of the standard set — covers do NOT get
+ * their own thumbnail rule any more, so a rebuild here and an upload produce
+ * byte-identical files under the same name.
  */
-function coverBuildIcon(?string $front2d, string $uploadDir, string $origDir, string $webDir, int $maxW, int $maxH): ?string {
+function coverBuildIcon(?string $front2d, string $uploadDir, string $origDir, string $webDir): ?string {
     if (!$front2d) return null;
     $src = coverAbs($front2d, $origDir);
     if (!$src || !is_file($src)) $src = coverAbs($front2d, $uploadDir);   // original pruned? fall back
     if (!$src || !is_file($src)) return null;
 
-    $base = basename($src);
-    $ext  = strtolower(pathinfo($base, PATHINFO_EXTENSION));
-    $stem = preg_replace('/\.[^.]+$/', '', $base);
-    $iconName = $stem . '-icon.' . $ext;
-    $iconAbs  = rtrim($uploadDir, '/') . '/' . $iconName;
-
-    if (!scaleImage($src, $iconAbs, $maxW, $maxH)) return null;
-    return rtrim($webDir, '/') . '/' . $iconName;
+    // Variant names key off the slot's own filename, not the source's, so a
+    // fallback to the display copy still yields '<stem>-icon.<ext>'.
+    $made = makeImageSizes($src, $uploadDir, basename(coverAbs($front2d, $uploadDir)));
+    if (empty($made['icon'])) return null;
+    return rtrim($webDir, '/') . '/' . $made['icon'];
 }
 
 // ── Delete a slot ────────────────────────────────────────────────────────
@@ -108,7 +113,7 @@ if ($action === 'delete') {
 
 // ── Rebuild the icon from the existing 2D front ──────────────────────────
 if ($action === 'regen_icon') {
-    $icon = coverBuildIcon($vol['volume_img_front_2d'] ?? null, $UPLOAD_DIR, $ORIG_DIR, $WEB_DIR, $ICON_MAX_W, $ICON_MAX_H);
+    $icon = coverBuildIcon($vol['volume_img_front_2d'] ?? null, $UPLOAD_DIR, $ORIG_DIR, $WEB_DIR);
     if (!$icon) errorResponse('No 2D front image to derive an icon from');
     if (($vol['volume_img_icon'] ?? null) && $vol['volume_img_icon'] !== $icon) {
         coverUnlink($vol['volume_img_icon'], $UPLOAD_DIR, $ORIG_DIR);
@@ -136,12 +141,15 @@ $allowed = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 $ext = strtolower(pathinfo($file['name'] ?? '', PATHINFO_EXTENSION));
 if ($ext === 'jpeg') $ext = 'jpg';
 if (!in_array($ext, $allowed, true)) errorResponse('Image must be a JPG, PNG, GIF or WEBP');
-if (!@getimagesize($file['tmp_name'])) errorResponse('That file is not a readable image');
+$dims = @getimagesize($file['tmp_name']);
+if (!$dims) errorResponse('That file is not a readable image');
 
-foreach ([$UPLOAD_DIR, $ORIG_DIR] as $d) {
-    if (!is_dir($d) && !mkdir($d, 0775, true) && !is_dir($d)) {
-        errorResponse('Upload directory could not be created: ' . basename($d), 500);
-    }
+// GD needs 4 bytes/pixel however well the file compresses, so reject the
+// handful of images too big to decode at all rather than letting the request
+// die on a memory fatal. imgMemoryHeadroom() raises the limit for the rest.
+$mp = ($dims[0] * $dims[1]) / 1e6;
+if (ceil($mp * 1e6 * 4 * 2.2 / 1048576) + 32 > IMG_MEMORY_CAP) {
+    errorResponse(sprintf('Image is too large to process (%dx%d, %.1f megapixels). Please save it at a smaller size.', $dims[0], $dims[1], $mp));
 }
 
 $name = 'vol' . $key . '-' . $slot . '-' . uniqid('', false) . '.' . $ext;
@@ -155,12 +163,23 @@ if (!scaleImage($origAbs, $destAbs, $FULL_MAX_W, $FULL_MAX_H)) {
 }
 $webPath = $WEB_DIR . '/' . $name;
 
+// Every slot — not just the 2D front — gets the full derivative set, built
+// from the untouched original so no variant is a rescale of a rescale. The
+// paths are conventional (<stem>-icon|sm|md|lg.<ext>), so consumers derive
+// them with imageSizeUrl() instead of us storing six more columns per slot.
+$sizes = makeImageSizes($origAbs, $UPLOAD_DIR, $name);
 $oldPath = $vol[$col] ?? null;
-$resp = ['saved' => true, 'slot' => $slot, 'path' => $webPath];
+$resp = [
+    'saved' => true,
+    'slot'  => $slot,
+    'path'  => $webPath,
+    'sizes' => array_map(fn($f) => $WEB_DIR . '/' . $f, $sizes),
+];
 
 if ($slot === 'front_2d') {
-    // The icon is always derived, never uploaded — rebuild it from the new front.
-    $icon = coverBuildIcon($webPath, $UPLOAD_DIR, $ORIG_DIR, $WEB_DIR, $ICON_MAX_W, $ICON_MAX_H);
+    // The icon is always derived, never uploaded — it is simply the 'icon'
+    // member of the set we just built.
+    $icon = !empty($sizes['icon']) ? $WEB_DIR . '/' . $sizes['icon'] : null;
     if (($vol['volume_img_icon'] ?? null) && $vol['volume_img_icon'] !== $icon) {
         coverUnlink($vol['volume_img_icon'], $UPLOAD_DIR, $ORIG_DIR);
     }

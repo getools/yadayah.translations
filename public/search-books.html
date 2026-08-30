@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1785823205">
+    <meta name="page-version" content="1788098406">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Search Books — Yada Yah</title>
@@ -90,7 +90,7 @@
             .filters select { min-width: 140px; }
         }
     </style>
-<script src="/js/site-nav.js?v=56"></script>
+<script src="/js/site-nav.js?v=57"></script>
 </head>
 <body>
 
@@ -313,7 +313,14 @@ function renderCard(r) {
         }
     }
     if (coverUrl) {
-        coverHtml = '<div class="cover"><img src="' + esc(coverUrl) + '" alt="" loading="lazy" onerror="this.remove()"></div>';
+        // '-icon' is 300px, '-sm' is 640px — see makeImageSizes() in
+        // api/image-helpers.php. Legacy /images/covers thumbs have no set.
+        var srcsetAttr = '';
+        if (/-icon\.[a-z0-9]+$/i.test(coverUrl)) {
+            srcsetAttr = ' srcset="' + esc(coverUrl) + ' 1x, '
+                       + esc(coverUrl.replace(/-icon\.([a-z0-9]+)$/i, '-sm.$1')) + ' 2x"';
+        }
+        coverHtml = '<div class="cover"><img src="' + esc(coverUrl) + '"' + srcsetAttr + ' alt="" loading="lazy" onerror="this.remove()"></div>';
     }
     var snippetHtml = r.snippet || '';
     return '<div class="ss-result-card">'

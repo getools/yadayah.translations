@@ -1,4 +1,8 @@
 <?php
+// Absolute upper bound on a synth chunk, in characters. This is a sanity rail,
+// NOT the per-provider policy: ttsProviderChunkSizes() caps ordinary providers
+// at 600 and only lets provider_settings->'long_form' engines go higher.
+if (!defined('TTS_CHUNK_ABS_MAX')) define('TTS_CHUNK_ABS_MAX', 20000);
 /**
  * Shared helpers for the TTS admin area.
  *
@@ -2517,7 +2521,7 @@ function ttsCollapseSkippedSegments(array $cfg, array $segments): array {
 
 /**
  * Final safety net after ttsCollapseSkippedSegments(): drop any segment with no
- * SPEAKABLE content — i.e. no base letter (Ll/Lu/Lt/Lo) and no digit. A segment
+ * SPEAKABLE content — i.e. nothing a Latin-script voice can pronounce. A segment
  * whose text is only punctuation, whitespace, combining marks, or transliteration
  * modifier letters (ʾ U+02BE, ʿ U+02BF — Unicode category Lm) is unsynthesisable:
  * the local GPU engine rejects it with "HTTP 400 — empty text", which makes the
@@ -2529,20 +2533,41 @@ function ttsCollapseSkippedSegments(array $cfg, array $segments): array {
  * drops): the lone "ʾ" / "." / "," is tagged main/translation, has no
  * same-category neighbour left to merge into, and so survives on its own.
  *
+ * ⚠ A base letter is NOT enough — it must be a LATIN base letter. Bare source
+ * script (Hebrew ‎ָ נָׁ שא, Greek ΘΥ / ανοικοδομησω) is category Lo/Lu/Ll, so a
+ * "has a base letter" test KEEPS it, the engine normalises the non-Latin
+ * codepoints away, and 400s on the empty remainder — exactly the same failure
+ * the Lm case above produces. That is what left YY-s01v02 ch1 (¶210) and
+ * YY-s03v04 ch4 (¶1047) complete-but-never-live: one unsynthesisable Hebrew
+ * fragment ⇒ failureCount > 0 ⇒ admin-tts-build-worker.php never stamps
+ * tts_audio_live_dtime ⇒ tts-audio.php hides the chapter from the flipbook.
+ *
+ * Dropping bare source script loses no narration: the books always follow it
+ * with a Latin transliteration, and NO pronunciation tune matches on non-Latin
+ * text (verified 2026-08-06: 0 of 3397 active yy_tts_tune rows), so nothing here
+ * would have been substituted into speech downstream.
+ *
  * Any real punctuation in such an orphan (a trailing "." or ",") is folded onto
  * the previous KEPT segment so sentence boundaries aren't lost; modifier letters
  * and marks are discarded. An orphan with no previous segment is dropped outright.
  *
  * NB: \p{L} alone would be WRONG here — it includes Lm (modifier letters) like
- * ʾ ʿ, which is exactly the content we need to treat as unspeakable.
+ * ʾ ʿ, which is exactly the content we need to treat as unspeakable. \p{Latin}
+ * alone would ALSO be wrong for the same reason (it matches those modifiers), so
+ * the test reduces to base letters + digits FIRST, then asks whether any of that
+ * residue is Latin. Reducing first also keeps the range test off "×" / "÷", which
+ * sit inside U+00C0–U+024F but are maths symbols, not letters.
  *
- * Idempotent; a no-op once every segment carries a letter or digit.
+ * Idempotent; a no-op once every segment carries a Latin letter or digit.
  */
 function ttsDropUnspeakableSegments(array $segments): array {
     $out = [];
     foreach ($segments as $s) {
         $text = (string)($s['text'] ?? '');
-        if (preg_match('/[\p{Ll}\p{Lu}\p{Lt}\p{Lo}\p{N}]/u', $text)) {
+        // Reduce to base letters + digits, then require some of it to be Latin
+        // (ASCII, Latin-1 Supplement, or Latin Extended-A/B) or a digit.
+        $speakable = preg_replace('/[^\p{Ll}\p{Lu}\p{Lt}\p{Lo}\p{N}]/u', '', $text);
+        if ($speakable !== '' && preg_match('/[A-Za-z\x{00C0}-\x{024F}\p{N}]/u', $speakable)) {
             $out[] = $s;
             continue;
         }
@@ -2716,7 +2741,19 @@ function ttsProviderChunkSizes(array $cfg, int $providerKey): array {
     // Validation rails only (NOT size defaults): keep values sane + ordered so a
     // bad DB edit can't break the splitter. max authoritative ≤600; target ≤ max;
     // min ≤ target. Mirror chunkTextForPreview()'s clamp exactly.
-    $max    = max(40, min(600, (int)($chunk['max']    ?? 0)));
+    // Long-form engines (VibeVoice generates ~90 min in ONE pass) are wasted if
+    // fed 600-char windows: every chunk boundary is a seam that has to be
+    // assembled and can drift in speaker identity. A provider opts in with
+    // provider_settings->'long_form' = true; everything else keeps the 600
+    // ceiling exactly as before.
+    $longForm = false;
+    $pRow = $cfg['providers'][$providerKey] ?? null;
+    if ($pRow) {
+        $pSet = json_decode((string)($pRow['provider_settings'] ?? '{}'), true) ?: [];
+        $longForm = !empty($pSet['long_form']);
+    }
+    $ceiling = $longForm ? TTS_CHUNK_ABS_MAX : 600;
+    $max    = max(40, min($ceiling, (int)($chunk['max']    ?? 0)));
     $target = max(20, min($max, (int)($chunk['target'] ?? 0)));
     $min    = max(10, min($target, (int)($chunk['min'] ?? 0)));
     return ['min' => $min, 'target' => $target, 'max' => $max];
@@ -3872,7 +3909,10 @@ function chunkTextForPreview(string $text, int $minChars, int $targetChars, int 
     $text = trim((string)preg_replace('/\s+/u', ' ', $text));
     if ($text === '') return [];
     // Max is the authoritative hard cap; Target clamps DOWN to it, Min to Target.
-    $maxChars    = max(40, min(600, $maxChars));
+    // The bound here is only a sanity rail against a nonsense value: the real
+    // per-provider policy (600 normally, larger for long_form engines) is
+    // applied by ttsProviderChunkSizes(), which every caller sources max from.
+    $maxChars    = max(40, min(TTS_CHUNK_ABS_MAX, $maxChars));
     $targetChars = max(20, min($maxChars, $targetChars));
     $minChars    = max(10, min($targetChars, $minChars));
     $len = mb_strlen($text);

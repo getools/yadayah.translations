@@ -827,11 +827,33 @@ function ttsLoadPageText(string $bundleDir, int $page, array &$cache): string {
 // to ~300 chars of page-header noise (chapter title, page number)
 // before the matched suffix starts on the next page. Returns [] when
 // the paragraph fits on a single page or no good match was found.
-function ttsFindPageBreakRatios(string $paraText, array $nextPageTexts): array {
+function ttsFindPageBreakRatios(string $paraText, array $nextPageTexts, string $startPageText = ''): array {
     $out = [];
     $p = ttsNormalizeForMatch($paraText);
     $plen = mb_strlen($p);
     if ($plen < 30) return $out;
+    // A paragraph that fits ENTIRELY on its own start page cannot overflow
+    // onto the next one, so there is no crossing to find. Test this
+    // space-INSENSITIVELY: the flipbook text layer splits words around
+    // half-rings and other combining glyphs ("Mow ʿ ed" for "Mowʿed"),
+    // so a whitespace-sensitive compare misses the very cases this guard
+    // exists for. Without it the running header — which repeats the chapter
+    // title verbatim atop every page, and a chapter TITLE paragraph's text
+    // IS that header — matched on the NEXT page and produced a bogus crossing
+    // marker at ratio 0, i.e. at the title's own start time: the flipbook
+    // turned forward while the title was still being read and snapped back
+    // at the next paragraph. Repeated refrains recurring on the following
+    // page (e.g. "Quran 055.0NN So which favors of your Lord...") did the same.
+    if ($startPageText !== '') {
+        $tight = static function (string $s): string {
+            return (string)preg_replace('/\s+/u', '', $s);
+        };
+        $pTight = $tight($p);
+        if ($pTight !== ''
+            && mb_strpos($tight(ttsNormalizeForMatch($startPageText)), $pTight) !== false) {
+            return $out;
+        }
+    }
     foreach ($nextPageTexts as $k => $pageText) {
         $g = ttsNormalizeForMatch($pageText);
         if ($g === '') break;
@@ -853,6 +875,18 @@ function ttsFindPageBreakRatios(string $paraText, array $nextPageTexts): array {
             else                              { $hi  = $mid - 1; }
         }
         if ($bestL < 0) break;   // paragraph doesn't extend further
+        // A crossing means the page BEFORE this one holds the paragraph's
+        // opening chars — so the matched suffix must be a PROPER suffix. When
+        // the WHOLE paragraph is found on the next page it is not a
+        // continuation at all, it is a duplicate: the running header (which
+        // repeats the chapter title verbatim at the top of every page, and a
+        // title paragraph's own text is exactly that header) or a repeated
+        // refrain (e.g. "Quran 055.0NN So which favors of your Lord will you
+        // both deny"). Emitting it produced a page-crossing marker at ratio 0,
+        // i.e. at the paragraph's own start time, so the flipbook turned
+        // FORWARD while the title was still being read and snapped BACK at the
+        // next paragraph. Reject and stop looking further.
+        if ($bestL >= $plen) break;
         $bestRatio = ($plen - $bestL) / $plen;
         $out[$k] = $bestRatio;
     }
@@ -1021,7 +1055,10 @@ $emitPageBreakMarkers = function (array $p, ?int $paraStartPage, int $paraStartM
     // Text-matched ratios pin the exact break point per page; keyed by page
     // OFFSET (1..5) from $paraStartPage. May be empty/partial when the flipbook
     // text layer diverges (special glyphs, Hebrew transliteration, headers).
-    $ratios = $nextPageTexts ? ttsFindPageBreakRatios($paraTextPlain, $nextPageTexts) : [];
+    $ratios = $nextPageTexts
+        ? ttsFindPageBreakRatios($paraTextPlain, $nextPageTexts,
+                                 ttsLoadPageText($bundleDir, $paraStartPage, $pageTextCache))
+        : [];
 
     // The AUTHORITATIVE set of page crossings is $_cont_by_page, recorded at
     // coalesce time from the parser's continuation flags — we KNOW a

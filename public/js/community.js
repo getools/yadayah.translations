@@ -174,6 +174,15 @@ Community.showView = function(id) {
 
 // ── Routing ──
 Community.route = function() {
+    // Guard: if community-topics.js failed to load, avoid a crash
+    if (typeof CommunityTopics === 'undefined') {
+        var wrap = document.querySelector('.community-wrap');
+        if (wrap && !document.getElementById('community-load-error')) {
+            wrap.insertAdjacentHTML('afterbegin', '<div id="community-load-error" style="text-align:center;padding:40px;color:#c0392b;">Page failed to load completely. <a href="" style="color:#31345A;font-weight:600;">Reload</a></div>');
+        }
+        return;
+    }
+
     var hash = window.location.hash || '#topics';
 
     // Check for special tokens

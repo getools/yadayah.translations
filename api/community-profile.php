@@ -5,6 +5,7 @@
  * POST: update profile fields (name, handle, bio, email, password, avatar upload)
  */
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/image-helpers.php';
 if (session_status() === PHP_SESSION_NONE) session_start();
 
 $userKey = $_SESSION['user_key'] ?? null;
@@ -51,12 +52,16 @@ if ($method === 'POST') {
         $filename = 'av_' . $userKey . '_' . time() . '.' . $ext;
         $dest = $dir . '/' . $filename;
 
-        // Resize to 200x200
-        $src = null;
-        if ($ext === 'png') $src = imagecreatefrompng($file['tmp_name']);
-        elseif ($ext === 'gif') $src = imagecreatefromgif($file['tmp_name']);
-        elseif ($ext === 'webp') $src = imagecreatefromwebp($file['tmp_name']);
-        else $src = imagecreatefromjpeg($file['tmp_name']);
+        // Keep the raw upload — the 200×200 crop below is lossy and one-way, so
+        // without this there is nothing to re-derive a bigger avatar from later.
+        $origDir  = $dir . '/originals';
+        if (!is_dir($origDir)) @mkdir($origDir, 02775, true);
+        $origPath = $origDir . '/' . $filename;
+        if (!move_uploaded_file($file['tmp_name'], $origPath)) errorResponse('Failed to save image');
+
+        // Resize to 200x200 — via imgLoad() so a small-but-huge-pixel upload
+        // gets memory headroom instead of fataling mid-request.
+        $src = imgLoad($origPath, $ext === 'jpeg' ? 'jpg' : $ext);
 
         if ($src) {
             $w = imagesx($src);
@@ -75,8 +80,12 @@ if ($method === 'POST') {
                 $dest = $newDest;
             }
         } else {
-            move_uploaded_file($file['tmp_name'], $dest);
+            copy($origPath, $dest);
         }
+
+        // Size set keys off the FINAL avatar name (the crop may have switched
+        // the extension to .jpg) but is derived from the untouched original.
+        makeImageSizes($origPath, $dir, basename($dest));
 
         $avatarUrl = '/u/avatars/' . basename($dest);
         $db->prepare("UPDATE yy_user SET user_avatar = ? WHERE user_key = ?")->execute([$avatarUrl, $userKey]);

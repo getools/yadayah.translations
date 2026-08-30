@@ -139,12 +139,22 @@ function normalizeMediaUrl(?string $u): ?string {
  * include_hashtags, exclude_hashtags, title_include, title_exclude.
  */
 function appendItemsSectionFilters(array $cfg, string &$where, array &$params): void {
-    if (!empty($cfg['feed_keys']) && is_array($cfg['feed_keys'])) {
+    // Feeds is a SOURCE LIST, not an optional narrowing filter: an Items
+    // section draws from the feeds it names, so naming none selects nothing.
+    // (Every other field below is a filter, where blank means "unrestricted".)
+    // The distinction is between the key being ABSENT and being an EMPTY list:
+    //   absent      → caller isn't scoping by feed at all (feed-items-search.php
+    //                 omits the param entirely when the editor has no feeds
+    //                 checked, so the pin typeahead stays searchable).
+    //   empty list  → the section explicitly names zero sources → no items.
+    if (array_key_exists('feed_keys', $cfg) && is_array($cfg['feed_keys'])) {
         $ids = array_values(array_filter(array_map('intval', $cfg['feed_keys'])));
         if ($ids) {
             $place = implode(',', array_fill(0, count($ids), '?'));
             $where .= " AND i.feed_key IN ($place)";
             array_push($params, ...$ids);
+        } else {
+            $where .= " AND FALSE";
         }
     }
     $ageMinH = (int)($cfg['age_min_h'] ?? 0);
@@ -425,7 +435,7 @@ function resolveOrCreateFeedCategory(PDO $db, int $pageKey, string $slug): ?int 
  * from the slug if absent. These live in yy_category (the page-builder's
  * per-section set, keyed by section_key) and link to feed items via
  * yy_section_item.category_key — the mechanism behind the page-code model:
- * a hashtag whose leading token is a page code (#vlog → page_test_code 'vlog')
+ * a hashtag whose leading token is a page code (#vlog → page_code 'vlog')
  * files the item under that page's Items-section categories.
  * yy_category has no (section_key,slug) unique index, so guard with a lookup.
  */

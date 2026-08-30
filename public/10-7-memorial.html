@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1785823201">
+    <meta name="page-version" content="1788098403">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>October 7 Memorial</title>
@@ -205,7 +205,7 @@
             .memorial-grid { grid-template-columns: repeat(3, 1fr); }
         }
     </style>
-<script src="/js/site-nav.js?v=56"></script>
+<script src="/js/site-nav.js?v=57"></script>
     <link rel="stylesheet" href="/css/page-heading.css?v=2">
 </head>
 <body>
@@ -329,6 +329,13 @@ function loadMemorials() {
         .catch(function(err) { console.error('Failed to load memorials:', err); });
 }
 
+// '/u/x/name.jpg' + 'md' → '/u/x/name-md.jpg'. Every uploaded image gets an
+// icon/sm/md/lg set from makeImageSizes() (api/image-helpers.php); callers
+// keep an onerror fallback to the full file for anything predating it.
+function imgSize(url, size) {
+    return url.replace(/(\.[a-z0-9]+)$/i, '-' + size + '$1');
+}
+
 function buildCarousel() {
     var track = document.getElementById('carousel-track');
     track.innerHTML = memorials.map(function(m) {
@@ -338,7 +345,7 @@ function buildCarousel() {
             : '';
         return '<div class="carousel-slide">'
             + '<h2 class="mem-name">' + esc(m.memorial_name_full) + '</h2>'
-            + '<img class="mem-photo" src="' + imgPath + '" alt="' + esc(m.memorial_name_full) + '" loading="lazy">'
+            + '<img class="mem-photo" src="' + imgSize(imgPath, 'md') + '" alt="' + esc(m.memorial_name_full) + '" loading="lazy" onerror="this.onerror=null;this.src=\'' + imgPath + '\'">'
             + '<div class="mem-summary">' + esc(m.memorial_summary) + '</div>'
             + bioBtn
             + '</div>';
@@ -351,7 +358,7 @@ function buildGrid() {
     grid.innerHTML = memorials.map(function(m, i) {
         var imgPath = '/u/10-7-memorial/' + esc(m.memorial_image_file);
         return '<div class="grid-thumb' + (i === 0 ? ' active' : '') + '" onclick="goToSlide(' + i + ')" title="' + esc(m.memorial_name_full) + '">'
-            + '<img src="' + imgPath + '" alt="' + esc(m.memorial_name_full) + '" loading="lazy">'
+            + '<img src="' + imgSize(imgPath, 'icon') + '" alt="' + esc(m.memorial_name_full) + '" loading="lazy" onerror="this.onerror=null;this.src=\'' + imgPath + '\'">'
             + '<div class="grid-name">' + esc(m.memorial_name_full) + '</div>'
             + '</div>';
     }).join('');

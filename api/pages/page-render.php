@@ -50,10 +50,14 @@ if ($sectionKey > 0 && $paginatedLimit > 0) {
 }
 
 if (!empty($_GET['key'])) {
-    $stmt = $db->prepare("SELECT * FROM yy_page_test WHERE page_test_key = ? AND page_test_active_flag = TRUE");
+    $stmt = $db->prepare("SELECT * FROM yy_page WHERE page_key = ? AND page_active_flag = TRUE");
     $stmt->execute([(int)$_GET['key']]);
 } elseif (!empty($_GET['code'])) {
-    $stmt = $db->prepare("SELECT * FROM yy_page_test WHERE page_test_code = ? AND page_test_active_flag = TRUE");
+    // Case-insensitive, matching public/page.php. yy_page stores craig_winn
+    // where the old builder table stored Craig_Winn, and the canonical URL is
+    // /Craig_Winn - an exact match would 404 the sections fetch for any caller
+    // that uses the mixed-case form.
+    $stmt = $db->prepare("SELECT * FROM yy_page WHERE lower(page_code) = lower(?) AND page_active_flag = TRUE");
     $stmt->execute([trim($_GET['code'])]);
 } else {
     errorResponse('Missing code or key');
@@ -61,8 +65,8 @@ if (!empty($_GET['key'])) {
 $page = $stmt->fetch();
 if (!$page) errorResponse('Page not found', 404);
 
-$sec = $db->prepare("SELECT * FROM yy_section WHERE page_test_key = ? AND section_active_flag = TRUE ORDER BY section_sort, section_key");
-$sec->execute([$page['page_test_key']]);
+$sec = $db->prepare("SELECT * FROM yy_section WHERE page_key = ? AND section_active_flag = TRUE ORDER BY section_sort, section_key");
+$sec->execute([$page['page_key']]);
 
 $out = [];
 foreach ($sec->fetchAll() as $s) {

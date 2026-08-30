@@ -85,6 +85,56 @@ function errorResponse(string $message, int $status = 400): void {
 }
 
 /**
+ * Absolute path to an upload directory under /u, created if missing.
+ *
+ * Use this instead of hand-rolling a path in every new uploader. Two things
+ * keep going wrong when endpoints roll their own:
+ *
+ *  1. Path. On prod `api/` is mounted INSIDE the docroot (/var/www/html/api,
+ *     where /var/www/html is public/), so the repo-shaped
+ *     `dirname(__DIR__) . '/public/u/...'` resolves to nothing and every
+ *     upload dies with "Upload directory could not be created".
+ *  2. Ownership. New dirs must be www-data-writable. www-data is NOT in group
+ *     claudefix, so the `root:claudefix 2775` pattern used by older dirs is
+ *     read-only to PHP — hence the setgid 02775 + explicit writability check
+ *     below, which fails loudly at the top of a request instead of halfway
+ *     through a multi-file write.
+ *
+ * @param string $rel  Path under /u, e.g. 'covers' or 'covers/originals'.
+ * @return string      Absolute directory path, guaranteed to exist + be writable.
+ */
+function uploadDir(string $rel): string {
+    $rel = trim(str_replace('\\', '/', $rel), '/');
+    if ($rel === '' || strpos($rel, '..') !== false) {
+        errorResponse('Invalid upload directory: ' . $rel, 500);
+    }
+    $abs = __DIR__ . '/../u/' . $rel;
+
+    if (!is_dir($abs)) {
+        // PHP 8.0+: @ no longer silences errors inside custom error handlers,
+        // so use set_error_handler to truly suppress the mkdir warning on failure.
+        set_error_handler(static function () { return true; });
+        mkdir($abs, 02775, true);
+        restore_error_handler();
+        @chmod($abs, 02775);          // mkdir() mode is masked by umask
+    }
+    if (!is_dir($abs)) {
+        errorResponse('Upload directory could not be created: /u/' . $rel
+            . ' (parent not writable by www-data)', 500);
+    }
+    if (!is_writable($abs)) {
+        errorResponse('Upload directory is not writable: /u/' . $rel
+            . ' (needs chown www-data:claudefix)', 500);
+    }
+    return $abs;
+}
+
+/** Web path (/u/…) for the same directory uploadDir() returns. */
+function uploadUrl(string $rel): string {
+    return '/u/' . trim(str_replace('\\', '/', $rel), '/');
+}
+
+/**
  * Is the currently logged-in user banned? Banned users stay fully logged in
  * and tracked — this does NOT touch the session. It only lets the restricted
  * features (Ask Yada, Chat) refuse the action. Result is cached per request;
@@ -287,5 +337,19 @@ register_shutdown_function(function () {
             $err['message'],
             ($err['file'] ?? '?') . ':' . ($err['line'] ?? '?')
         );
+
+        // A fatal aborts before the endpoint can jsonResponse(), and
+        // display_errors is off, so without this the browser gets a bodyless
+        // 500 and the admin UI can only report "HTTP 500:" with no reason.
+        // Signed-in admins get the real message; everyone else gets 'Server
+        // error', same as the uncaught-exception handler above.
+        if (php_sapi_name() !== 'cli' && !headers_sent()) {
+            http_response_code(500);
+            header('Content-Type: application/json; charset=utf-8');
+            $detail = !empty($_SESSION['user_key'])
+                ? 'PHP fatal: ' . $err['message'] . ' (' . basename($err['file'] ?? '?') . ':' . ($err['line'] ?? '?') . ')'
+                : 'Server error';
+            echo json_encode(['error' => $detail]);
+        }
     }
 });

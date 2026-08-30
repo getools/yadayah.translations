@@ -2,6 +2,10 @@
 $uri = $_SERVER['REQUEST_URI'];
 $path = parse_url($uri, PHP_URL_PATH);
 $query = parse_url($uri, PHP_URL_QUERY);
+// parse_url leaves percent-escapes intact (e.g. %27 stays as %27, not '),
+// but yy_redirect stores literal characters. Decode so a request URL like
+// /pdf/Foo%27Bar.pdf matches a stored row keyed on /pdf/Foo'Bar.pdf.
+$path = $path !== null ? rawurldecode($path) : $path;
 
 // --- Check yy_redirect table ---
 try {
@@ -18,10 +22,14 @@ try {
     $atkStmt->execute([':req' => $path]);
     if ($atkStmt->fetchColumn()) {
         // Ban this IP via honeypot
-        $ip = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
+        $ip = $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
         if (strpos($ip, ',') !== false) $ip = trim(explode(',', $ip)[0]);
         $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
-        if ($ip) {
+        // Never ban private/loopback/Docker IPs — banning a reverse-proxy IP blocks all traffic through it
+        $skipBan = $ip === '' || $ip === '::1' || str_starts_with($ip, '127.') ||
+                   str_starts_with($ip, '10.') || str_starts_with($ip, '192.168.') ||
+                   (str_starts_with($ip, '172.') && (int)explode('.', $ip)[1] >= 16 && (int)explode('.', $ip)[1] <= 31);
+        if ($ip && !$skipBan) {
             $pdo->prepare("
                 INSERT INTO yy_ip_ban (ban_ip, ban_reason, ban_uri, ban_ua, ban_expires_dtime)
                 VALUES (?, 'attack_redirect', ?, ?, NOW() + INTERVAL '48 hours')
@@ -97,16 +105,45 @@ if ($aliases) {
 }
 
 // --- Dynamic page from yy_page ---
+// Case-insensitive match: /Grammar, /GRAMMAR, /grammar all resolve to the
+// same row. If the URL the user typed differs in case from the canonical
+// page_url, 301-redirect them to the canonical form so shareable links
+// converge on one casing.
+//
+// A row that's marked active renders even when its body/heading is empty
+// (header + sub-toolbar + footer + page title still surface). That keeps
+// URLs working as soon as the row is created in admin — content can be
+// filled in later without breaking the link.
 $pageSlug = trim($path, '/');
 if ($pageSlug && isset($pdo)) {
     try {
-        $pgStmt = $pdo->prepare("SELECT * FROM yy_page WHERE (page_code = ? OR page_url = ? OR page_url = ?) AND page_active_flag = TRUE LIMIT 1");
+        $pgStmt = $pdo->prepare("
+            SELECT * FROM yy_page
+             WHERE (lower(page_code) = lower(?) OR lower(page_url) = lower(?) OR lower(page_url) = lower(?))
+               AND page_active_flag = TRUE
+             LIMIT 1
+        ");
         $pgStmt->execute([$pageSlug, $pageSlug, '/' . $pageSlug]);
         $pageRow = $pgStmt->fetch(PDO::FETCH_ASSOC);
-        if ($pageRow && ($pageRow['page_heading'] || $pageRow['page_body'])) {
-            // Render dynamic page
-            require __DIR__ . '/page-render.php';
-            renderDynamicPage($pageRow);
+        if ($pageRow) {
+            // Canonical-casing redirect: if the request's path differs from
+            // the row's page_url in case only, normalize so the address bar
+            // settles on one form.
+            $canon = (string)($pageRow['page_url'] ?? '');
+            if ($canon !== '' && strcasecmp($canon, $path) === 0 && $canon !== $path) {
+                $loc = $canon;
+                if ($query) $loc .= '?' . $query;
+                header('Location: ' . $loc, true, 301);
+                exit;
+            }
+            // Renders through the page builder (public/page.php). Before the
+            // 2026-08-23 unification this called the legacy renderer, and a
+            // SECOND block below repeated the same lookup against the old
+            // builder table to reach page.php; one page table collapses both
+            // into this. A page built in admin is therefore reachable at its
+            // slug as soon as it is active - no .htaccess entry needed.
+            $_GET['code'] = $pageRow['page_code'];
+            require __DIR__ . '/page.php';
             exit;
         }
     } catch (Exception $e) {}

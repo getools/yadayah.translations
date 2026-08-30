@@ -23,9 +23,14 @@ $action = $_GET['action'] ?? 'volumes';
 
 if ($action === 'volumes') {
     $ttsKey = (int)($_GET['tts_key'] ?? 0);
+    // Inactive volumes are deliberately NOT filtered out. The active flag only
+    // hides a book from the public site (search / reader); it is still
+    // narratable, and filtering here made such a book impossible to select for
+    // a build. The flag rides along so the dropdown can label it.
     $sql = "
         SELECT v.volume_key, v.series_key, v.volume_number, v.volume_label,
                v.volume_paragraph_count_live AS paragraph_count,
+               COALESCE(v.volume_active_flag, TRUE) AS volume_active_flag,
                s.series_number,
                (SELECT COUNT(*) FROM yy_chapter c WHERE c.volume_key = v.volume_key) AS chapters_total,
                COALESCE((
@@ -40,7 +45,6 @@ if ($action === 'volumes') {
                    AND ($ttsKey = 0 OR a.tts_key = $ttsKey)) AS last_built_dtime
           FROM yy_volume v
           JOIN yy_series s ON v.series_key = s.series_key
-         WHERE v.volume_active_flag = TRUE
          ORDER BY s.series_number, v.volume_number
     ";
     jsonResponse(['volumes' => $db->query($sql)->fetchAll()]);

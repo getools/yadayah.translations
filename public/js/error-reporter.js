@@ -48,6 +48,11 @@
     // originates in connectedCallback inside YouTube's injected web-component
     // scripts (<anonymous code>), never in yadayah.com code.
     /can't access dead object/i,
+    // Brave browser (iOS/desktop) built-in page translation feature raises
+    // "Translation Error" as an unhandled promise rejection when translation
+    // fails or the user cancels. Yadayah.com has no translation feature;
+    // all such rejections originate inside Brave's injected translation scripts.
+    /^Translation Error$/i,
     // Facebook in-app browser (iOS) injects setupIosCallbackHandler into every
     // page it renders and calls window.webkit.messageHandlers.*. When that iOS
     // WebKit bridge isn't present (e.g. Facebook's own partial implementation),
@@ -60,7 +65,13 @@
     // the browser throws because only one "default" policy can exist. This
     // originates entirely inside TinyMCE, not in yadayah.com code.
     /Policy with name .default. already exists/i,
-    /Failed to execute 'createPolicy'.*already exists/i
+    /Failed to execute 'createPolicy'.*already exists/i,
+    // Browser extension API error — fired when a Chrome/Firefox extension
+    // calls runtime.sendMessage() targeting a tab that has been closed or
+    // navigated away. Originates entirely inside extension content scripts,
+    // never in yadayah.com code.
+    /Invalid call to runtime\.sendMessage\(\)/i,
+    /Tab not found/i
   ];
 
   // Files whose errors we should not report (third-party bundles)

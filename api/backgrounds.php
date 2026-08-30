@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/image-helpers.php';
 
 $user = requireAuth();
 $db = getDb();
@@ -229,6 +230,9 @@ function handleUpload(array $file, array $opts = []): string|array {
         $filename = uniqid('bg_') . '.' . $ext;
         $dest = $UPLOAD_DIR . $filename;
         rename($tmpPath, $dest);
+        // Backgrounds are the biggest images on the site — the size set is what
+        // lets a phone pull '-md' instead of a 4K hero. No-op for the .svg case.
+        makeImageSizes($dest, rtrim($UPLOAD_DIR, '/'), $filename);
         return 'u/backgrounds/' . $filename;
     }
 }

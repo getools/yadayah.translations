@@ -249,6 +249,23 @@ function gpuLlmChat(string $model, array $messages, array $opts = []): array {
 }
 
 /**
+ * Engines that run as their OWN gateway-routed container (the per-provider
+ * image split) instead of inside the tts-engine monolith, each because its
+ * dependency pins conflict with the monolith's. Maps engine key -> gateway
+ * path prefix. Anything not listed falls through to tts-engine at /tts.
+ *
+ * `catalog` says whether that container serves its own /catalog endpoint;
+ * f5 deliberately does NOT (its voices live in tts-engine's registry).
+ */
+function gpuStandaloneEngines(): array {
+    return [
+        'f5'        => ['path' => '/tts-f5',        'catalog' => false],
+        'vibevoice' => ['path' => '/tts-vibevoice', 'catalog' => true],
+        'qwen3tts'  => ['path' => '/tts-qwen3tts',  'catalog' => true],
+    ];
+}
+
+/**
  * Enumerate the FULL voice catalog a Puget-side provider offers — the
  * candidate pool that admin-tts-voices.php upserts into yy_tts_voice when an
  * admin clicks "Check for new voices" for that provider.
@@ -261,7 +278,12 @@ function gpuLlmChat(string $model, array $messages, array $opts = []): array {
  */
 function gpuProviderCatalog(string $provider, int $timeout = 600): array {
     // Caddy strips the '/tts/' prefix and forwards to tts-engine:8801/catalog.
-    return gpuRequest('GET', '/tts/catalog?provider=' . urlencode($provider), [
+    // A standalone engine serves its OWN /catalog and must not be asked of the
+    // monolith, which knows nothing about it -- but only when it actually
+    // exposes one (see gpuStandaloneEngines()).
+    $meta = gpuStandaloneEngines()[$provider] ?? null;
+    $base = ($meta && !empty($meta['catalog'])) ? $meta['path'] : '/tts';
+    return gpuRequest('GET', $base . '/catalog?provider=' . urlencode($provider), [
         'timeout' => $timeout,
     ]);
 }
@@ -285,8 +307,8 @@ function gpuSynthesize(array $params, ?string $saveTo = null, int $timeout = 600
     $opts = ['json' => $params, 'timeout' => $timeout];
     if ($saveTo !== null) $opts['save_to'] = $saveTo;
     else                  $opts['expect']  = 'raw';
-    // F5-TTS runs as its own gateway-routed engine (/tts-f5/); everything else -> tts-engine.
-    $ttsPath = ((($params['provider'] ?? '')) === 'f5') ? '/tts-f5/synthesize' : '/tts/synthesize';
+    $eng     = (string)($params['provider'] ?? '');
+    $ttsPath = (gpuStandaloneEngines()[$eng]['path'] ?? '/tts') . '/synthesize';
     return gpuRequest('POST', $ttsPath, $opts);
 }
 

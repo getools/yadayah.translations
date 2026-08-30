@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/image-helpers.php';
 $user = requireAuth();
 $db = getDb();
 setCurrentUser($db, $user['user_key']);
@@ -34,6 +35,8 @@ function handleImageUpload(array $data, string $uploadDir): ?string {
         if (!move_uploaded_file($file['tmp_name'], $dest)) {
             errorResponse('Failed to save image');
         }
+        // icon/sm/md/lg beside the stored file (no-op for the allowed .svg).
+        makeImageSizes($dest, $uploadDir, $safeName);
         return "u/resources/$safeName";
     }
     return !empty($data['resource_image']) ? $data['resource_image'] : null;

@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/image-helpers.php';
 
 $db = getDb();
 $UPLOAD_DIR = __DIR__ . '/../u/community/posts';
@@ -64,6 +65,9 @@ if ($method === 'POST') {
         if (!move_uploaded_file($_FILES['image']['tmp_name'], $dest)) {
             errorResponse('Failed to save image');
         }
+        // The stored file IS the raw upload here (no separate originals/ copy),
+        // so derive icon/sm/md/lg from it. Feeds should request '-sm'.
+        makeImageSizes($dest, $UPLOAD_DIR, $filename);
         $imagePath = "u/community/posts/$filename";
     }
 

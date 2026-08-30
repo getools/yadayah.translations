@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1785823204">
+    <meta name="page-version" content="1788098406">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTS Admin - Yada Yah</title>
@@ -196,7 +196,7 @@
 <div id="app" class="container">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=21"></script>
+<script src="/js/admin-nav.js?v=22"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -873,6 +873,30 @@ var CUSTOMIZE_PROVIDERS = {
             data:     'One clean clip OVER 5 s (English only), single speaker, no music/noise, 16–24 kHz mono WAV.',
             workflow: 'Zero-shot clone with faster decoding — the clip registers as a voice on submit.',
             time:     'Instant.',
+        },
+    },
+    qwen3tts: {
+        label: 'Qwen3-TTS 12Hz 1.7B',
+        codePrefix: 'q3-',
+        noAudio: true,
+        instructions: {
+            data:     'No audio clip - this variant ships 9 fixed timbres (Ryan, Eric, Dylan, Aiden, Serena, Vivian, Sohee, Ono Anna, Uncle Fu). Pick one as the base.',
+            workflow: 'Optionally add an instruct line to shape delivery, e.g. "Read slowly and solemnly".',
+            time:     'Instant to register; ~4x realtime to synth.',
+        },
+        extraFields: [
+            { id: 'q3-instruct', type: 'text', label: 'Instruct (delivery)',
+              placeholder: 'e.g. Read slowly and solemnly, like scripture',
+              help: 'Free-text delivery instruction passed to the model. Leave blank for a neutral read.' },
+        ],
+    },
+    vibevoice: {
+        label: 'VibeVoice 1.5B',
+        codePrefix: 'vv-',
+        instructions: {
+            data:     'One clean 5-20 s clip, single speaker, no music/noise, mono WAV.',
+            workflow: 'Zero-shot clone - the clip registers as a voice on submit. No transcript needed.',
+            time:     'Instant to register; ~25 s to synth a short paragraph.',
         },
     },
     cosyvoice: {
@@ -6379,6 +6403,9 @@ async function loadVolumes() {
         var o = document.createElement('option');
         o.value = v.volume_key;
         o.textContent = 's' + String(v.series_number).padStart(2,'0') + 'v' + String(v.volume_number).padStart(2,'0') + ' — ' + (v.volume_label || '');
+        // Inactive books stay in the list — the flag only hides them from the
+        // public site, they are still narratable — but say so.
+        if (v.volume_active_flag === false) o.textContent += '  (inactive)';
         if (v.chapters_with_audio > 0) o.textContent += '  (' + v.chapters_with_audio + '/' + v.chapters_total + ' built)';
         sel.appendChild(o);
     });
@@ -8264,7 +8291,9 @@ async function qaLoadVolumes() {
         var o = document.createElement('option');
         o.value = v.volume_key;
         o.textContent = 's' + String(v.series_number).padStart(2, '0') + 'v' + String(v.volume_number).padStart(2, '0')
-            + ' — ' + (v.volume_label || '') + '  (' + v.chapters_with_audio + ' built)';
+            + ' — ' + (v.volume_label || '')
+            + (v.volume_active_flag === false ? '  (inactive)' : '')
+            + '  (' + v.chapters_with_audio + ' built)';
         sel.appendChild(o);
     });
 }

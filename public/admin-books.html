@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta name="page-version" content="1785823202">
+    <meta name="page-version" content="1788098404">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Books Admin - Yada Yah</title>
@@ -146,7 +146,7 @@
 <div id="app" class="container" style="display:none">
     <div class="app-header">
         <nav class="nav-tabs"></nav>
-<script src="/js/admin-nav.js?v=21"></script>
+<script src="/js/admin-nav.js?v=22"></script>
         <div class="user-info">
             <span id="user-display"></span>
             <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
@@ -818,8 +818,13 @@ function legacyCoverUrl(v) {
 
 function coverCell(v) {
     var url = v.volume_img_icon || legacyCoverUrl(v);
+    // volume_img_icon is already the 300px '-icon' variant; '-sm' (640px) is
+    // the retina step. Legacy /images/covers thumbs have no size set.
+    var srcset = /-icon\.[a-z0-9]+$/i.test(url || '')
+        ? ' srcset="' + esc(url) + ' 1x, ' + esc(url.replace(/-icon\.([a-z0-9]+)$/i, '-sm.$1')) + ' 2x"'
+        : '';
     var inner = url
-        ? '<img src="' + esc(url) + '" alt="" loading="lazy" onerror="this.remove()">'
+        ? '<img src="' + esc(url) + '"' + srcset + ' alt="" loading="lazy" onerror="this.remove()">'
         : '<span class="cover-empty">🖼</span>';
     return '<button class="cover-cell-btn" title="Cover art for “' + esc(v.volume_label) + '”" '
          + 'onclick="openCoverPopover(' + v.volume_key + ')">' + inner + '</button>';

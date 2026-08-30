@@ -16,20 +16,35 @@ if (file_exists($CACHE_FILE) && (time() - filemtime($CACHE_FILE)) < $CACHE_TTL) 
 }
 
 $db = getDb();
+
+// Footer links come from yy_menu_item (zone=footer) — the same list the page
+// renderer uses — so the static pages that still call this endpoint show the
+// same footer as every cut-over page. Previously this read
+// yy_page.page_footer_col / page_footer_sort, which drifted from the new
+// menus (it was missing Family and Grammar, for instance).
 $stmt = $db->query("
-    SELECT page_title, page_url, page_code, page_footer_col
-    FROM yy_page
-    WHERE page_footer_col > 0 AND page_active_flag = TRUE
-    ORDER BY page_footer_col, page_footer_sort, page_title
+    SELECT COALESCE(NULLIF(p.page_label, ''), NULLIF(p.page_title, ''), p.page_code) AS link_title,
+           p.page_url, p.page_code
+      FROM yy_menu_item m
+      JOIN yy_page p ON p.page_key = m.page_key
+     WHERE m.menu_zone = 'footer'
+       AND COALESCE(m.menu_item_active_flag, TRUE) = TRUE
+       AND p.page_active_flag = TRUE
+     ORDER BY m.menu_item_sort, m.menu_item_key
 ");
 $rows = $stmt->fetchAll();
 
+// The consumer (site-footer.js) expects three columns. The menu is a single
+// ordered list, so deal it into 3 balanced columns while preserving order
+// top-to-bottom within each column.
 $cols = [1 => [], 2 => [], 3 => []];
-foreach ($rows as $r) {
-    $url = $r['page_url'] ?: '/' . $r['page_code'];
-    $cols[(int)$r['page_footer_col']][] = [
-        'title' => $r['page_title'],
-        'url' => $url,
+$total   = count($rows);
+$perCol  = $total > 0 ? (int)ceil($total / 3) : 0;
+foreach ($rows as $i => $r) {
+    $col = $perCol > 0 ? min(3, (int)floor($i / $perCol) + 1) : 1;
+    $cols[$col][] = [
+        'title' => $r['link_title'],
+        'url'   => $r['page_url'] ?: '/' . $r['page_code'],
     ];
 }
 
